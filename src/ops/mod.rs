@@ -1,4 +1,5 @@
 mod attention;
+mod attention_async;
 mod embedding;
 mod gather;
 mod linear;
@@ -9,9 +10,8 @@ mod sampling;
 mod short_conv;
 mod silu_mul;
 
-pub use attention::{
-    hybrid_ragged_attention_lfm2_bf16, paged_attention_lfm2_bf16, prefill_attention_lfm2_bf16,
-};
+pub use attention::{hybrid_ragged_attention_lfm2_bf16, prefill_attention_lfm2_bf16};
+pub use attention_async::paged_attention_lfm2_bf16;
 pub use embedding::embedding_bf16;
 pub use gather::gather_rows_bf16;
 pub use linear::{linear_bf16, linear_last_row_bf16};
