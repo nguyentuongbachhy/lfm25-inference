@@ -1,4 +1,5 @@
 mod attention;
+mod attention_async;
 mod embedding;
 mod fp8_quantize;
 mod gather;
@@ -17,6 +18,7 @@ use anyhow::Result;
 use cudarc::driver::CudaContext;
 
 use attention::AttentionKernels;
+use attention_async::AsyncAttentionKernels;
 use embedding::EmbeddingKernels;
 use fp8_quantize::Fp8QuantizeKernels;
 use gather::GatherKernels;
@@ -38,6 +40,7 @@ pub(crate) struct Kernels {
     rope: RopeKernels,
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
+    attention_async: AsyncAttentionKernels,
     short_conv: ShortConvKernels,
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
@@ -54,6 +57,7 @@ impl Kernels {
             rope: RopeKernels::load(context)?,
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
+            attention_async: AsyncAttentionKernels::load(context)?,
             short_conv: ShortConvKernels::load(context)?,
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
@@ -85,12 +89,19 @@ impl Kernels {
     pub(crate) fn kv_cache(&self) -> &KvCacheKernels {
         &self.kv_cache
     }
+
     pub(crate) fn attention(&self) -> &AttentionKernels {
         &self.attention
     }
+
+    pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
+        &self.attention_async
+    }
+
     pub(crate) fn short_conv(&self) -> &ShortConvKernels {
         &self.short_conv
     }
+
     pub(crate) fn sampling(&self) -> &SamplingKernels {
         &self.sampling
     }
@@ -98,6 +109,7 @@ impl Kernels {
     pub(crate) fn fp8_quantize(&self) -> &Fp8QuantizeKernels {
         &self.fp8_quantize
     }
+
     pub(crate) fn gather(&self) -> &GatherKernels {
         &self.gather
     }
