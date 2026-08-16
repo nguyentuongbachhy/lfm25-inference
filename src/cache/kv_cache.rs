@@ -79,17 +79,25 @@ impl PagedKvCache {
     pub fn page_size(&self) -> KvPageSize {
         self.page_size
     }
+
     pub fn num_pages(&self) -> usize {
         self.num_pages
     }
+
     pub fn block_table(&self) -> &Tensor<u32> {
         &self.block_table
     }
+
     pub fn key(&self) -> &Tensor<bf16> {
         &self.key
     }
+
     pub fn value(&self) -> &Tensor<bf16> {
         &self.value
+    }
+
+    pub(crate) fn kv_mut(&mut self) -> (&mut Tensor<bf16>, &mut Tensor<bf16>) {
+        (&mut self.key, &mut self.value)
     }
 
     pub fn write_lfm2(
