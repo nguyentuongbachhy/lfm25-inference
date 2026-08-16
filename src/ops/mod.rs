@@ -17,6 +17,7 @@ pub use embedding::embedding_bf16;
 pub use gather::gather_rows_bf16;
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{linear_fp8_e4m3, linear_last_row_fp8_e4m3, quantize_weight_e4m3};
+#[allow(unused_imports)]
 pub(crate) use qk_postprocess::qk_norm_rope_kv_write_decode_bf16;
 #[allow(unused_imports)]
 pub use residual::residual_add_bf16;
