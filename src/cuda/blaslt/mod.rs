@@ -2,10 +2,15 @@ pub(crate) mod fp8;
 mod plan;
 
 use std::{
+    cell::UnsafeCell,
     collections::HashMap,
     ffi::c_void,
     mem,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::ThreadId,
 };
 
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -19,19 +24,38 @@ use plan::{MatmulKey, MatmulPlan};
 
 use fp8::{Fp8MatmulKey, Fp8MatmulPlan, Fp8ScaleMode};
 
+enum PlanAccess<'a, T> {
+    Owner(&'a T),
+    Shared(Arc<T>),
+}
+
+impl<T> PlanAccess<'_, T> {
+    #[inline(always)]
+    fn get(&self) -> &T {
+        match self {
+            Self::Owner(plan) => plan,
+            Self::Shared(plan) => plan.as_ref(),
+        }
+    }
+}
+
 pub(crate) struct BlasLt {
     handle: sys::cublasLtHandle_t,
-
     stream: Arc<CudaStream>,
-
     workspace: CudaSlice<u8>,
-
     workspace_size: usize,
-
-    plans: RwLock<HashMap<MatmulKey, Arc<MatmulPlan>>>,
-
-    fp8_plans: RwLock<HashMap<Fp8MatmulKey, Arc<Fp8MatmulPlan>>>,
+    plans: RwLock<Option<HashMap<MatmulKey, Arc<MatmulPlan>>>>,
+    fp8_plans: RwLock<Option<HashMap<Fp8MatmulKey, Arc<Fp8MatmulPlan>>>>,
+    owner_plans: UnsafeCell<Option<HashMap<MatmulKey, Arc<MatmulPlan>>>>,
+    owner_fp8_plans: UnsafeCell<Option<HashMap<Fp8MatmulKey, Arc<Fp8MatmulPlan>>>>,
+    owner_mode: AtomicBool,
+    owner_thread: OnceLock<ThreadId>,
 }
+
+// Dynamic setup remains protected by RwLock. Once owner mode is enabled, all
+// accesses are restricted to the dedicated GPU-owner thread and use the
+// UnsafeCell-backed maps without synchronization.
+unsafe impl Sync for BlasLt {}
 
 impl BlasLt {
     pub(crate) fn workspace_size(&self) -> usize {
@@ -62,26 +86,78 @@ impl BlasLt {
 
         Ok(Self {
             handle,
-
             stream,
-
             workspace,
-
             workspace_size,
-
-            plans: RwLock::new(HashMap::new()),
-
-            fp8_plans: RwLock::new(HashMap::new()),
+            plans: RwLock::new(Some(HashMap::new())),
+            fp8_plans: RwLock::new(Some(HashMap::new())),
+            owner_plans: UnsafeCell::new(None),
+            owner_fp8_plans: UnsafeCell::new(None),
+            owner_mode: AtomicBool::new(false),
+            owner_thread: OnceLock::new(),
         })
     }
 
-    fn get_or_create_fp8_plan(&self, key: Fp8MatmulKey) -> Result<Arc<Fp8MatmulPlan>> {
+    pub(crate) fn enter_owner_mode(&self) -> Result<()> {
+        ensure!(
+            !self.owner_mode.load(Ordering::Acquire),
+            "cuBLASLt owner mode is already enabled"
+        );
+        self.stream
+            .context()
+            .bind_to_thread()
+            .context("failed to bind CUDA context for cuBLASLt owner")?;
+        self.owner_thread
+            .set(std::thread::current().id())
+            .map_err(|_| anyhow!("cuBLASLt owner thread is already set"))?;
+
+        let mut plans = match self.plans.write() {
+            Ok(plans) => plans,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut fp8_plans = match self.fp8_plans.write() {
+            Ok(plans) => plans,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let owner_plans = plans
+            .take()
+            .context("cuBLASLt BF16 plan cache is unavailable")?;
+        let owner_fp8_plans = fp8_plans
+            .take()
+            .context("cuBLASLt FP8 plan cache is unavailable")?;
+
+        // SAFETY: owner mode is not visible until both maps have been moved.
+        unsafe {
+            *self.owner_plans.get() = Some(owner_plans);
+            *self.owner_fp8_plans.get() = Some(owner_fp8_plans);
+        }
+        self.owner_mode.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn assert_owner_thread(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let current = std::thread::current().id();
+            debug_assert!(
+                self.owner_thread
+                    .get()
+                    .is_some_and(|owner| *owner == current),
+                "cuBLASLt owner cache accessed from a non-owner thread"
+            );
+        }
+    }
+
+    fn get_or_create_fp8_plan_shared(&self, key: Fp8MatmulKey) -> Result<Arc<Fp8MatmulPlan>> {
         {
             let plans = self
                 .fp8_plans
                 .read()
                 .map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
-
+            let plans = plans
+                .as_ref()
+                .context("cuBLASLt FP8 plan cache moved to owner mode")?;
             if let Some(plan) = plans.get(&key) {
                 return Ok(Arc::clone(plan));
             }
@@ -98,49 +174,143 @@ impl BlasLt {
             .fp8_plans
             .write()
             .map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
-
+        let plans = plans
+            .as_mut()
+            .context("cuBLASLt FP8 plan cache moved to owner mode")?;
         let plan = plans.entry(key).or_insert_with(|| Arc::clone(&created));
-
         Ok(Arc::clone(plan))
     }
 
-    fn get_or_create_plan(&self, key: MatmulKey) -> Result<Arc<MatmulPlan>> {
+    fn get_or_create_plan_shared(&self, key: MatmulKey) -> Result<Arc<MatmulPlan>> {
         {
             let plans = self
                 .plans
                 .read()
                 .map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
-
+            let plans = plans
+                .as_ref()
+                .context("cuBLASLt plan cache moved to owner mode")?;
             if let Some(plan) = plans.get(&key) {
                 return Ok(Arc::clone(plan));
             }
         }
 
-        /*
-         * Do the expensive heuristic work
-         * outside the write lock.
-         */
         let created = Arc::new(MatmulPlan::new(self.handle, key, self.workspace_size)?);
 
         let mut plans = self
             .plans
             .write()
             .map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
-
-        /*
-         * If another caller inserted the same
-         * shape meanwhile, reuse the existing one.
-         */
+        let plans = plans
+            .as_mut()
+            .context("cuBLASLt plan cache moved to owner mode")?;
         let plan = plans.entry(key).or_insert_with(|| Arc::clone(&created));
-
         Ok(Arc::clone(plan))
+    }
+
+    fn get_or_create_plan_owner(&self, key: MatmulKey) -> Result<&MatmulPlan> {
+        self.assert_owner_thread();
+        // SAFETY: owner mode guarantees exclusive access from one thread.
+        let missing = unsafe {
+            (*self.owner_plans.get())
+                .as_ref()
+                .expect("cuBLASLt owner BF16 cache is unavailable")
+                .get(&key)
+                .is_none()
+        };
+        if missing {
+            let created = Arc::new(MatmulPlan::new(self.handle, key, self.workspace_size)?);
+            // SAFETY: the GPU owner is the only thread mutating this map.
+            unsafe {
+                (*self.owner_plans.get())
+                    .as_mut()
+                    .expect("cuBLASLt owner BF16 cache is unavailable")
+                    .insert(key, created);
+            }
+        }
+        // SAFETY: plans are heap allocated behind Arc and remain in the owner map
+        // for the lifetime of BlasLt, so the returned plan reference is stable.
+        Ok(unsafe {
+            (*self.owner_plans.get())
+                .as_ref()
+                .expect("cuBLASLt owner BF16 cache is unavailable")
+                .get(&key)
+                .expect("cuBLASLt owner BF16 plan insertion failed")
+                .as_ref()
+        })
+    }
+
+    fn get_or_create_fp8_plan_owner(&self, key: Fp8MatmulKey) -> Result<&Fp8MatmulPlan> {
+        self.assert_owner_thread();
+        // SAFETY: owner mode guarantees exclusive access from one thread.
+        let missing = unsafe {
+            (*self.owner_fp8_plans.get())
+                .as_ref()
+                .expect("cuBLASLt owner FP8 cache is unavailable")
+                .get(&key)
+                .is_none()
+        };
+        if missing {
+            let created = Arc::new(Fp8MatmulPlan::new(
+                self.handle,
+                &self.stream,
+                key,
+                self.workspace_size,
+            )?);
+            // SAFETY: the GPU owner is the only thread mutating this map.
+            unsafe {
+                (*self.owner_fp8_plans.get())
+                    .as_mut()
+                    .expect("cuBLASLt owner FP8 cache is unavailable")
+                    .insert(key, created);
+            }
+        }
+        // SAFETY: plans remain owned by the map for the lifetime of BlasLt.
+        Ok(unsafe {
+            (*self.owner_fp8_plans.get())
+                .as_ref()
+                .expect("cuBLASLt owner FP8 cache is unavailable")
+                .get(&key)
+                .expect("cuBLASLt owner FP8 plan insertion failed")
+                .as_ref()
+        })
+    }
+
+    #[inline]
+    fn resolve_plan(&self, key: MatmulKey) -> Result<PlanAccess<'_, MatmulPlan>> {
+        if self.owner_mode.load(Ordering::Acquire) {
+            Ok(PlanAccess::Owner(self.get_or_create_plan_owner(key)?))
+        } else {
+            Ok(PlanAccess::Shared(self.get_or_create_plan_shared(key)?))
+        }
+    }
+
+    #[inline]
+    fn resolve_fp8_plan(&self, key: Fp8MatmulKey) -> Result<PlanAccess<'_, Fp8MatmulPlan>> {
+        if self.owner_mode.load(Ordering::Acquire) {
+            Ok(PlanAccess::Owner(self.get_or_create_fp8_plan_owner(key)?))
+        } else {
+            Ok(PlanAccess::Shared(
+                self.get_or_create_fp8_plan_shared(key)?,
+            ))
+        }
+    }
+
+    #[inline]
+    fn bind_context_if_shared(&self) -> Result<()> {
+        if self.owner_mode.load(Ordering::Relaxed) {
+            self.assert_owner_thread();
+            return Ok(());
+        }
+        self.stream
+            .context()
+            .bind_to_thread()
+            .context("failed to bind CUDA context for cuBLASLt matmul")
     }
 
     pub(crate) fn prepare_linear_bf16(&self, m: usize, n: usize, k: usize) -> Result<()> {
         let key = MatmulKey::new(m, n, k)?;
-
-        self.get_or_create_plan(key)?;
-
+        self.resolve_plan(key)?;
         Ok(())
     }
 
@@ -157,51 +327,35 @@ impl BlasLt {
         X: DevicePtr<bf16>,
     {
         let key = MatmulKey::new(m, n, k)?;
-
         let x_required = m.checked_mul(k).context("linear input size overflow")?;
-
         let weight_required = n.checked_mul(k).context("linear weight size overflow")?;
-
         let out_required = m.checked_mul(n).context("linear output size overflow")?;
 
         ensure!(
             x.len() >= x_required,
-            "linear input storage too small: \
-             required={x_required}, actual={}",
+            "linear input storage too small: required={x_required}, actual={}",
             x.len(),
         );
-
         ensure!(
             weight.len() >= weight_required,
-            "linear weight storage too small: \
-             required={weight_required}, actual={}",
+            "linear weight storage too small: required={weight_required}, actual={}",
             weight.len(),
         );
-
         ensure!(
             out.len() >= out_required,
-            "linear output storage too small: \
-             required={out_required}, actual={}",
+            "linear output storage too small: required={out_required}, actual={}",
             out.len(),
         );
 
-        let plan = self.get_or_create_plan(key)?;
-
-        self.stream
-            .context()
-            .bind_to_thread()
-            .context("failed to bind CUDA context for cuBLASLt matmul")?;
+        let plan = self.resolve_plan(key)?;
+        let plan = plan.get();
+        self.bind_context_if_shared()?;
 
         let (x_ptr, _x_record) = x.device_ptr(&self.stream);
-
         let (weight_ptr, _weight_record) = weight.device_ptr(&self.stream);
-
         let (out_ptr, _out_record) = out.device_ptr_mut(&self.stream);
-
         let (workspace_ptr, _workspace_record) = self.workspace.device_ptr(&self.stream);
-
         let alpha = 1.0f32;
-
         let beta = 0.0f32;
 
         unsafe {
@@ -237,9 +391,7 @@ impl BlasLt {
         scale_mode: Fp8ScaleMode,
     ) -> Result<()> {
         let key = Fp8MatmulKey::new(m, n, k, scale_mode)?;
-
-        self.get_or_create_fp8_plan(key)?;
-
+        self.resolve_fp8_plan(key)?;
         Ok(())
     }
 
@@ -304,18 +456,15 @@ impl BlasLt {
             out.len(),
         );
 
-        let plan = self.get_or_create_fp8_plan(key)?;
-
-        self.stream
-            .context()
-            .bind_to_thread()
+        let plan = self.resolve_fp8_plan(key)?;
+        let plan = plan.get();
+        self.bind_context_if_shared()
             .context("failed to bind CUDA context for cuBLASLt FP8 matmul")?;
 
         let (x_ptr, _x_record) = x.device_ptr(&self.stream);
         let (weight_ptr, _weight_record) = weight.device_ptr(&self.stream);
         let (out_ptr, _out_record) = out.device_ptr_mut(&self.stream);
         let (workspace_ptr, _workspace_record) = self.workspace.device_ptr(&self.stream);
-
         let alpha = output_scale;
         let beta = 0.0f32;
 
@@ -346,45 +495,79 @@ impl BlasLt {
 
     #[cfg(test)]
     pub(crate) fn cached_plan_count(&self) -> usize {
+        if self.owner_mode.load(Ordering::Acquire) {
+            self.assert_owner_thread();
+            // SAFETY: owner thread has exclusive access.
+            return unsafe {
+                (*self.owner_plans.get())
+                    .as_ref()
+                    .map_or(0, HashMap::len)
+            };
+        }
         match self.plans.read() {
-            Ok(plans) => plans.len(),
-
-            Err(poisoned) => poisoned.into_inner().len(),
+            Ok(plans) => plans.as_ref().map_or(0, HashMap::len),
+            Err(poisoned) => poisoned.into_inner().as_ref().map_or(0, HashMap::len),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn cached_fp8_plan_count(&self) -> usize {
+        if self.owner_mode.load(Ordering::Acquire) {
+            self.assert_owner_thread();
+            // SAFETY: owner thread has exclusive access.
+            return unsafe {
+                (*self.owner_fp8_plans.get())
+                    .as_ref()
+                    .map_or(0, HashMap::len)
+            };
+        }
         match self.fp8_plans.read() {
-            Ok(plans) => plans.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
+            Ok(plans) => plans.as_ref().map_or(0, HashMap::len),
+            Err(poisoned) => poisoned.into_inner().as_ref().map_or(0, HashMap::len),
         }
     }
 }
 
 impl Drop for BlasLt {
     fn drop(&mut self) {
-        match self.plans.get_mut() {
-            Ok(plans) => {
-                plans.clear();
+        if self.owner_mode.load(Ordering::Relaxed) {
+            // SAFETY: drop happens after owner execution has stopped.
+            unsafe {
+                if let Some(plans) = (*self.owner_plans.get()).as_mut() {
+                    plans.clear();
+                }
+                if let Some(plans) = (*self.owner_fp8_plans.get()).as_mut() {
+                    plans.clear();
+                }
             }
-
-            Err(poisoned) => {
-                poisoned.into_inner().clear();
+        } else {
+            match self.plans.get_mut() {
+                Ok(plans) => {
+                    if let Some(plans) = plans.as_mut() {
+                        plans.clear();
+                    }
+                }
+                Err(poisoned) => {
+                    if let Some(plans) = poisoned.into_inner().as_mut() {
+                        plans.clear();
+                    }
+                }
             }
-        }
-
-        match self.fp8_plans.get_mut() {
-            Ok(plans) => {
-                plans.clear();
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().clear();
+            match self.fp8_plans.get_mut() {
+                Ok(plans) => {
+                    if let Some(plans) = plans.as_mut() {
+                        plans.clear();
+                    }
+                }
+                Err(poisoned) => {
+                    if let Some(plans) = poisoned.into_inner().as_mut() {
+                        plans.clear();
+                    }
+                }
             }
         }
 
         let handle = mem::replace(&mut self.handle, std::ptr::null_mut());
-
         if !handle.is_null() {
             unsafe {
                 let _ = result::destroy_handle(handle);
