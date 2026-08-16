@@ -30,6 +30,13 @@ impl CostCurve {
         Ok(Self { points })
     }
 
+    #[inline]
+    fn symmetric_ratio(lhs: usize, rhs: usize) -> f64 {
+        let high = lhs.max(rhs) as f64;
+        let low = lhs.min(rhs).max(1) as f64;
+        high / low
+    }
+
     pub fn predict(&self, batch: usize, tokens: usize, context: usize) -> f64 {
         let batch = batch.max(1);
         let tokens = tokens.max(1);
@@ -45,9 +52,13 @@ impl CostCurve {
             if point.batch < batch || point.tokens < tokens || point.context < context {
                 continue;
             }
-            let distance = (point.batch as f64 / batch as f64).ln()
-                + (point.tokens as f64 / tokens as f64).ln()
-                + (point.context as f64 / context as f64).ln();
+            // The previous metric was the sum of logarithms of these three
+            // ratios. Since log is monotonic and sum(log(x)) == log(product(x)),
+            // comparing the products preserves the same ordering without three
+            // transcendental operations per candidate.
+            let distance = (point.batch as f64 / batch as f64)
+                * (point.tokens as f64 / tokens as f64)
+                * (point.context as f64 / context as f64);
             if distance < best_distance
                 || (distance == best_distance
                     && dominating
@@ -61,15 +72,15 @@ impl CostCurve {
             return point.milliseconds;
         }
 
-        // Outside the measured envelope, extrapolate conservatively from the
-        // nearest point. Multiplying each dimension's expansion ratio avoids
-        // inventing target-specific scaling exponents in the scheduler.
+        // Outside the measured envelope, preserve the previous nearest-point
+        // ordering by comparing the product of symmetric expansion ratios rather
+        // than sum(abs(log(ratio))).
         let mut nearest = self.points[0];
         best_distance = f64::INFINITY;
         for point in &self.points {
-            let distance = (batch as f64 / point.batch as f64).ln().abs()
-                + (tokens as f64 / point.tokens as f64).ln().abs()
-                + (context as f64 / point.context as f64).ln().abs();
+            let distance = Self::symmetric_ratio(batch, point.batch)
+                * Self::symmetric_ratio(tokens, point.tokens)
+                * Self::symmetric_ratio(context, point.context);
             if distance < best_distance {
                 best_distance = distance;
                 nearest = *point;
