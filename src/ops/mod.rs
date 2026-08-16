@@ -3,6 +3,7 @@ mod attention_async;
 mod embedding;
 mod gather;
 mod linear;
+mod qk_postprocess;
 mod residual;
 mod rms_norm;
 mod rope;
@@ -16,6 +17,7 @@ pub use embedding::embedding_bf16;
 pub use gather::gather_rows_bf16;
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{linear_fp8_e4m3, linear_last_row_fp8_e4m3, quantize_weight_e4m3};
+pub(crate) use qk_postprocess::qk_norm_rope_kv_write_decode_bf16;
 #[allow(unused_imports)]
 pub use residual::residual_add_bf16;
 pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
