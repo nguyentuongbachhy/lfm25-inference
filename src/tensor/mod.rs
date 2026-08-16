@@ -1,11 +1,16 @@
 pub mod shape;
 
 use std::{
+    cell::UnsafeCell,
     mem::ManuallyDrop,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::ThreadId,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use cudarc::driver::CudaSlice;
 
 pub use shape::Shape;
@@ -28,28 +33,48 @@ struct BufferPoolState<T> {
     internal_fragment_elements: u64,
 }
 
+impl<T> BufferPoolState<T> {
+    fn new(per_size_class_capacity: usize) -> Self {
+        let available = (0..usize::BITS)
+            .map(|_| Vec::with_capacity(per_size_class_capacity))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            available,
+            available_elements: 0,
+            hits: 0,
+            misses: 0,
+            dropped_elements: 0,
+            internal_fragment_elements: 0,
+        }
+    }
+}
+
 pub(crate) struct BufferPool<T> {
-    state: Mutex<BufferPoolState<T>>,
+    shared_state: Mutex<Option<BufferPoolState<T>>>,
+    owner_state: UnsafeCell<Option<BufferPoolState<T>>>,
+    owner_mode: AtomicBool,
+    owner_thread: OnceLock<ThreadId>,
     max_available_elements: usize,
 }
+
+// Before owner mode all access goes through `shared_state`. After the one-way
+// transition, the runtime guarantees that the pool is accessed only by the
+// dedicated GPU-owner thread. `owner_state` therefore has no concurrent readers
+// or writers in that mode.
+unsafe impl<T: Send> Sync for BufferPool<T> {}
 
 impl<T> BufferPool<T> {
     const PER_SIZE_CLASS_CAPACITY: usize = 16;
 
     pub(crate) fn new(max_available_elements: usize) -> Self {
-        let available = (0..usize::BITS)
-            .map(|_| Vec::with_capacity(Self::PER_SIZE_CLASS_CAPACITY))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         Self {
-            state: Mutex::new(BufferPoolState {
-                available,
-                available_elements: 0,
-                hits: 0,
-                misses: 0,
-                dropped_elements: 0,
-                internal_fragment_elements: 0,
-            }),
+            shared_state: Mutex::new(Some(BufferPoolState::new(
+                Self::PER_SIZE_CLASS_CAPACITY,
+            ))),
+            owner_state: UnsafeCell::new(None),
+            owner_mode: AtomicBool::new(false),
+            owner_thread: OnceLock::new(),
             max_available_elements,
         }
     }
@@ -58,13 +83,56 @@ impl<T> BufferPool<T> {
         elements.max(1).checked_next_power_of_two()
     }
 
-    pub(crate) fn take(&self, elements: usize) -> Option<CudaSlice<T>> {
-        let allocation_elements = Self::allocation_elements(elements)?;
-        let first_class = allocation_elements.trailing_zeros() as usize;
-        let mut state = match self.state.lock() {
+    pub(crate) fn enter_owner_mode(&self) -> Result<()> {
+        ensure!(
+            !self.owner_mode.load(Ordering::Acquire),
+            "buffer pool owner mode is already enabled"
+        );
+        self.owner_thread
+            .set(std::thread::current().id())
+            .map_err(|_| anyhow::anyhow!("buffer pool owner thread is already set"))?;
+        let mut shared = match self.shared_state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let state = shared
+            .take()
+            .context("buffer pool shared state is unavailable")?;
+        // SAFETY: owner mode is still false, so no caller can access owner_state.
+        unsafe {
+            *self.owner_state.get() = Some(state);
+        }
+        self.owner_mode.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn owner_state_mut(&self) -> &mut BufferPoolState<T> {
+        debug_assert!(self.owner_mode.load(Ordering::Relaxed));
+        #[cfg(debug_assertions)]
+        {
+            let current = std::thread::current().id();
+            debug_assert!(
+                self.owner_thread
+                    .get()
+                    .is_some_and(|owner| *owner == current),
+                "owner-local buffer pool accessed from a non-owner thread"
+            );
+        }
+        // SAFETY: after enter_owner_mode the pool is exclusively owned by the
+        // GPU-owner thread. The debug assertion catches accidental violations in
+        // development builds without adding synchronization to release hot paths.
+        unsafe {
+            (*self.owner_state.get())
+                .as_mut()
+                .expect("owner-local buffer pool state is unavailable")
+        }
+    }
+
+    #[inline]
+    fn take_from_state(state: &mut BufferPoolState<T>, elements: usize) -> Option<CudaSlice<T>> {
+        let allocation_elements = Self::allocation_elements(elements)?;
+        let first_class = allocation_elements.trailing_zeros() as usize;
         let storage = state.available[first_class..].iter_mut().find_map(Vec::pop);
         if let Some(storage) = storage {
             let storage_elements = storage.len();
@@ -80,16 +148,33 @@ impl<T> BufferPool<T> {
         }
     }
 
-    fn recycle(&self, storage: CudaSlice<T>) {
-        let elements = storage.len();
-        let mut state = match self.state.lock() {
+    pub(crate) fn take(&self, elements: usize) -> Option<CudaSlice<T>> {
+        if self.owner_mode.load(Ordering::Acquire) {
+            return Self::take_from_state(self.owner_state_mut(), elements);
+        }
+        let mut shared = match self.shared_state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
+        Self::take_from_state(
+            shared
+                .as_mut()
+                .expect("buffer pool shared state is unavailable before owner mode"),
+            elements,
+        )
+    }
+
+    #[inline]
+    fn recycle_into_state(
+        state: &mut BufferPoolState<T>,
+        storage: CudaSlice<T>,
+        max_available_elements: usize,
+    ) {
+        let elements = storage.len();
         let Some(next_available) = state.available_elements.checked_add(elements) else {
             return;
         };
-        if next_available > self.max_available_elements {
+        if next_available > max_available_elements {
             state.dropped_elements = state.dropped_elements.saturating_add(elements as u64);
             return;
         }
@@ -104,11 +189,29 @@ impl<T> BufferPool<T> {
         state.available_elements = next_available;
     }
 
-    pub(crate) fn stats(&self) -> BufferPoolStats {
-        let state = match self.state.lock() {
+    fn recycle(&self, storage: CudaSlice<T>) {
+        if self.owner_mode.load(Ordering::Acquire) {
+            Self::recycle_into_state(
+                self.owner_state_mut(),
+                storage,
+                self.max_available_elements,
+            );
+            return;
+        }
+        let mut shared = match self.shared_state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
+        Self::recycle_into_state(
+            shared
+                .as_mut()
+                .expect("buffer pool shared state is unavailable before owner mode"),
+            storage,
+            self.max_available_elements,
+        );
+    }
+
+    fn stats_from_state(state: &BufferPoolState<T>) -> BufferPoolStats {
         BufferPoolStats {
             hits: state.hits,
             misses: state.misses,
@@ -116,6 +219,21 @@ impl<T> BufferPool<T> {
             dropped_elements: state.dropped_elements,
             internal_fragment_elements: state.internal_fragment_elements,
         }
+    }
+
+    pub(crate) fn stats(&self) -> BufferPoolStats {
+        if self.owner_mode.load(Ordering::Acquire) {
+            return Self::stats_from_state(self.owner_state_mut());
+        }
+        let shared = match self.shared_state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Self::stats_from_state(
+            shared
+                .as_ref()
+                .expect("buffer pool shared state is unavailable before owner mode"),
+        )
     }
 }
 
