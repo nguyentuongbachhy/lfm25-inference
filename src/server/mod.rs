@@ -37,7 +37,13 @@ pub fn serve(engine: Engine, address: &str, cost_model: HardwareCostModel) -> Re
                 eprintln!("GPU owner stopped during initialization");
                 return;
             }
+            let available_threads = std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .unwrap_or(2);
+            let frontend_threads = available_threads.saturating_sub(1).max(1);
             let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(frontend_threads)
+                .max_blocking_threads(frontend_threads)
                 .enable_all()
                 .build()
             {
@@ -145,14 +151,15 @@ async fn handle_connection(
                     completion.metrics.tokenization_ms = tokenization_ms;
                     let decode_started = Instant::now();
                     let tokenizer_worker = Arc::clone(&tokenizer);
-                    let ids = completion.token_ids.clone();
+                    let ids = std::mem::take(&mut completion.token_ids);
+                    let completion_tokens = ids.len();
                     let text = tokio::task::spawn_blocking(move || tokenizer_worker.decode(&ids))
                         .await
                         .context("detokenizer worker panicked")??;
                     completion.metrics.detokenization_ms =
                         decode_started.elapsed().as_secs_f64() * 1000.0;
                     completion.metrics.total_ms = request_started.elapsed().as_secs_f64() * 1000.0;
-                    routes::completion_response(completion, text)
+                    routes::completion_response(completion, text, completion_tokens)
                 }
                 Ok(Err(error)) => routes::error_response(error.status, &error.message),
                 Err(_) => routes::error_response("503 Service Unavailable", "GPU owner stopped"),
