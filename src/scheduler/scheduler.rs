@@ -60,6 +60,7 @@ struct SchedulerCostTable {
     decode_bf16: Box<[Box<[f64]>]>,
     decode_fp8: Box<[Box<[f64]>]>,
     prefill: Box<[(usize, f64)]>,
+    fallback: HardwareCostModel,
 }
 
 impl SchedulerCostTable {
@@ -109,13 +110,17 @@ impl SchedulerCostTable {
             decode_bf16: build_decode(false),
             decode_fp8: build_decode(true),
             prefill,
+            fallback: cost.clone(),
         })
     }
 
     #[inline]
     fn predict_decode_ms(&self, batch: usize, maximum_context: usize, fp8: bool) -> f64 {
-        debug_assert!(batch < self.decode_bf16.len());
-        debug_assert!(maximum_context <= MAX_SCHEDULER_CONTEXT);
+        if batch >= self.decode_bf16.len() || maximum_context > MAX_SCHEDULER_CONTEXT {
+            return self
+                .fallback
+                .predict_decode_ms(batch, maximum_context, fp8);
+        }
         let context_index = self
             .context_buckets
             .partition_point(|&bucket| bucket < maximum_context)
