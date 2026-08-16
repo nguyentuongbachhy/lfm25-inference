@@ -28,6 +28,11 @@ pub(crate) struct TimingEvent {
     event: CudaEvent,
 }
 
+pub(crate) struct TimingEventPair {
+    start: CudaEvent,
+    end: CudaEvent,
+}
+
 impl CudaRuntime {
     pub fn new(device: usize) -> Result<Self> {
         let context = CudaContext::new(device)
@@ -79,6 +84,17 @@ impl CudaRuntime {
 
     pub(crate) fn blaslt(&self) -> &BlasLt {
         &self.blaslt
+    }
+
+    pub(crate) fn enter_serving_owner_mode(&self) -> Result<()> {
+        self._context
+            .bind_to_thread()
+            .context("failed to bind CUDA context to serving owner")?;
+        self.blaslt.enter_owner_mode()?;
+        self.bf16_pool.enter_owner_mode()?;
+        self.fp8_pool.enter_owner_mode()?;
+        self.u32_pool.enter_owner_mode()?;
+        Ok(())
     }
 
     pub fn upload<T>(&self, src: &[T], shape: Shape) -> Result<Tensor<T>>
@@ -294,6 +310,41 @@ impl CudaRuntime {
             .record(&self.stream)
             .context("failed to record CUDA timing event")?;
         Ok(TimingEvent { event })
+    }
+
+    pub(crate) fn timing_event_pair(&self) -> Result<TimingEventPair> {
+        let start = self
+            ._context
+            .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+            .context("failed to create CUDA timing start event")?;
+        let end = self
+            ._context
+            .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+            .context("failed to create CUDA timing end event")?;
+        Ok(TimingEventPair { start, end })
+    }
+
+    pub(crate) fn record_timing_pair_start(&self, pair: &TimingEventPair) -> Result<()> {
+        pair.start
+            .record(&self.stream)
+            .context("failed to record CUDA timing start event")
+    }
+
+    pub(crate) fn record_timing_pair_end(&self, pair: &TimingEventPair) -> Result<()> {
+        pair.end
+            .record(&self.stream)
+            .context("failed to record CUDA timing end event")
+    }
+
+    pub(crate) fn elapsed_timing_pair_ms(&self, pair: &TimingEventPair) -> Result<f64> {
+        pair.end
+            .synchronize()
+            .context("failed to synchronize CUDA timing end event")?;
+        Ok(f64::from(
+            pair.start
+                .elapsed_ms(&pair.end)
+                .context("failed to measure CUDA timing pair")?,
+        ))
     }
 
     pub(crate) fn elapsed_ms(&self, start: &TimingEvent, end: &TimingEvent) -> Result<f64> {
