@@ -1,0 +1,125 @@
+{
+  "mode": "detailed",
+  "decode_steps": 48,
+  "decode_gpu_envelope_ms": 407.2285108566284,
+  "sum_measured_gpu_ops_ms": 386.7944651255384,
+  "other_cuda_ms": 20.43404573109001,
+  "components": [
+    {
+      "name": "mlp_gate_up_gemm",
+      "total_gpu_ms": 147.94390393793583,
+      "mean_us_per_decode_step": 3082.164665373663,
+      "percent_of_decode_envelope": 36.32945631108377
+    },
+    {
+      "name": "mlp_silu",
+      "total_gpu_ms": 3.368159961886704,
+      "mean_us_per_decode_step": 70.169999205973,
+      "percent_of_decode_envelope": 0.8270933571919086
+    },
+    {
+      "name": "mlp_down_gemm",
+      "total_gpu_ms": 77.47251255810261,
+      "mean_us_per_decode_step": 1614.0106782938044,
+      "percent_of_decode_envelope": 19.02433412511682
+    },
+    {
+      "name": "conv_in_proj",
+      "total_gpu_ms": 39.5260486677289,
+      "mean_us_per_decode_step": 823.4593472443521,
+      "percent_of_decode_envelope": 9.706110356709456
+    },
+    {
+      "name": "conv_kernel",
+      "total_gpu_ms": 2.1803839835338295,
+      "mean_us_per_decode_step": 45.424666323621445,
+      "percent_of_decode_envelope": 0.5354202678361757
+    },
+    {
+      "name": "conv_out_proj",
+      "total_gpu_ms": 15.521792020648718,
+      "mean_us_per_decode_step": 323.3706670968483,
+      "percent_of_decode_envelope": 3.811568101653232
+    },
+    {
+      "name": "attn_qkv_proj",
+      "total_gpu_ms": 14.752576015889645,
+      "mean_us_per_decode_step": 307.3453336643676,
+      "percent_of_decode_envelope": 3.6226775931912916
+    },
+    {
+      "name": "attn_postprocess",
+      "total_gpu_ms": 6.346239985898137,
+      "mean_us_per_decode_step": 132.21333303954452,
+      "percent_of_decode_envelope": 1.5583977586806137
+    },
+    {
+      "name": "attn_xqa",
+      "total_gpu_ms": 6.028800007887185,
+      "mean_us_per_decode_step": 125.60000016431634,
+      "percent_of_decode_envelope": 1.4804464439892138
+    },
+    {
+      "name": "attn_out_proj",
+      "total_gpu_ms": 9.118272015824914,
+      "mean_us_per_decode_step": 189.96400032968572,
+      "percent_of_decode_envelope": 2.239104525526493
+    },
+    {
+      "name": "residual_norm",
+      "total_gpu_ms": 10.784287970047444,
+      "mean_us_per_decode_step": 224.6726660426551,
+      "percent_of_decode_envelope": 2.6482153588318456
+    },
+    {
+      "name": "lm_head",
+      "total_gpu_ms": 43.345759987831116,
+      "mean_us_per_decode_step": 903.0366664131483,
+      "percent_of_decode_envelope": 10.644087737533612
+    },
+    {
+      "name": "sampling",
+      "total_gpu_ms": 10.40572801232338,
+      "mean_us_per_decode_step": 216.78600025673708,
+      "percent_of_decode_envelope": 2.555255276806218
+    }
+  ],
+  "aggregates": [
+    {
+      "name": "attention_total",
+      "total_gpu_ms": 36.24588802549988,
+      "mean_us_per_decode_step": 755.1226671979142,
+      "percent_of_decode_envelope": 8.900626321387612
+    },
+    {
+      "name": "conv_total",
+      "total_gpu_ms": 57.22822467191145,
+      "mean_us_per_decode_step": 1192.2546806648218,
+      "percent_of_decode_envelope": 14.053098726198863
+    },
+    {
+      "name": "lm_head",
+      "total_gpu_ms": 43.345759987831116,
+      "mean_us_per_decode_step": 903.0366664131483,
+      "percent_of_decode_envelope": 10.644087737533612
+    },
+    {
+      "name": "mlp_total",
+      "total_gpu_ms": 228.78457645792514,
+      "mean_us_per_decode_step": 4766.34534287344,
+      "percent_of_decode_envelope": 56.18088379339249
+    },
+    {
+      "name": "residual_norm",
+      "total_gpu_ms": 10.784287970047444,
+      "mean_us_per_decode_step": 224.6726660426551,
+      "percent_of_decode_envelope": 2.6482153588318456
+    },
+    {
+      "name": "sampling",
+      "total_gpu_ms": 10.40572801232338,
+      "mean_us_per_decode_step": 216.78600025673708,
+      "percent_of_decode_envelope": 2.555255276806218
+    }
+  ]
+}

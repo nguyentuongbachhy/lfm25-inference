@@ -1,0 +1,15 @@
+[package]
+name = "lfm25-inference"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+cudarc = { version = "0.19.8", features = ["std", "driver", "nvrtc", "cublaslt", "f16", "dynamic-loading", "cuda-version-from-build-system"] }
+half = "2.7.1"
+memmap2 = "0.9.11"
+safetensors = "0.8.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
+tokio = { version = "1.47", features = ["rt-multi-thread", "net", "sync", "io-util", "time", "macros"] }

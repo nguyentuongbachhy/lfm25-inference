@@ -1,0 +1,2 @@
+[env]
+LLM_CUDA_ARCH = "compute_120"
