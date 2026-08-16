@@ -3,7 +3,7 @@ use std::{ffi::c_void, mem::size_of};
 use anyhow::{Context as _, Result, ensure};
 use cudarc::cublaslt::{result, sys};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct MatmulKey {
     pub(crate) m: usize,
     pub(crate) n: usize,
@@ -69,7 +69,7 @@ impl MatrixLayout {
             unsafe {
                 result::set_matrix_layout_attribute(
                     layout.raw,
-                    sys::cublasLtMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_LD,
+                    sys::cublasltMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_LD,
                     &row_ld as *const _ as *const c_void,
                     size_of::<i64>(),
                 )
@@ -240,19 +240,16 @@ impl MatmulPlan {
 
         ensure!(
             heuristic.workspaceSize <= workspace_size,
-            "cuBLASLt algorithm requires {} bytes, \
-             workspace has {} bytes",
+            "cuBLASLt algorithm requires {} bytes, workspace has {} bytes",
             heuristic.workspaceSize,
             workspace_size,
         );
 
         Ok(Self {
             desc,
-
             a_layout,
             b_layout,
             c_layout,
-
             algo: heuristic.algo,
         })
     }
