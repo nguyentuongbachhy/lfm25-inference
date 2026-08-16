@@ -5,6 +5,7 @@ mod fp8_quantize;
 mod gather;
 mod kernel_set;
 mod kv_cache;
+mod qk_postprocess;
 mod residual;
 mod rms_norm;
 mod rope;
@@ -24,6 +25,7 @@ use fp8_quantize::Fp8QuantizeKernels;
 use gather::GatherKernels;
 use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
+use qk_postprocess::QkPostprocessKernels;
 use residual::ResidualKernels;
 use rms_norm::RmsNormKernels;
 use rope::RopeKernels;
@@ -41,6 +43,7 @@ pub(crate) struct Kernels {
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
     attention_async: AsyncAttentionKernels,
+    qk_postprocess: QkPostprocessKernels,
     short_conv: ShortConvKernels,
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
@@ -58,6 +61,7 @@ impl Kernels {
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
             attention_async: AsyncAttentionKernels::load(context)?,
+            qk_postprocess: QkPostprocessKernels::load(context)?,
             short_conv: ShortConvKernels::load(context)?,
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
@@ -96,6 +100,10 @@ impl Kernels {
 
     pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
         &self.attention_async
+    }
+
+    pub(crate) fn qk_postprocess(&self) -> &QkPostprocessKernels {
+        &self.qk_postprocess
     }
 
     pub(crate) fn short_conv(&self) -> &ShortConvKernels {
