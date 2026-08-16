@@ -69,7 +69,7 @@ impl MatrixLayout {
             unsafe {
                 result::set_matrix_layout_attribute(
                     layout.raw,
-                    sys::cublasltMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_LD,
+                    sys::cublasLtMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_LD,
                     &row_ld as *const _ as *const c_void,
                     size_of::<i64>(),
                 )
