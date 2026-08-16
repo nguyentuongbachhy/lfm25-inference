@@ -7,7 +7,7 @@ use crate::{
     tensor::Tensor,
 };
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
     runtime: &CudaRuntime,
     query: &mut Tensor<bf16>,
