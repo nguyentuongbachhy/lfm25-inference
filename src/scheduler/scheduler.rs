@@ -2,6 +2,8 @@ use anyhow::{Result, ensure};
 
 use super::{HardwareCostModel, RequestPhase, RequestSlotId, RequestSlots};
 
+const PREFILL_CANDIDATES: [usize; 11] = [1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1];
+
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerConfig {
     pub step_budget_ms: f64,
@@ -52,19 +54,117 @@ impl BatchPlan {
     }
 }
 
+struct SchedulerCostTable {
+    context_buckets: Box<[usize]>,
+    decode_bf16: Box<[Box<[f64]>]>,
+    decode_fp8: Box<[Box<[f64]>]>,
+    prefill: Box<[(usize, f64)]>,
+}
+
+impl SchedulerCostTable {
+    fn new(
+        capacity: usize,
+        maximum_context: usize,
+        maximum_prefill_tokens: usize,
+        cost: &HardwareCostModel,
+    ) -> Result<Self> {
+        ensure!(maximum_context > 0, "scheduler maximum context must be positive");
+
+        let mut context_buckets = Vec::new();
+        let mut bucket = 1usize;
+        loop {
+            context_buckets.push(bucket);
+            if bucket >= maximum_context {
+                break;
+            }
+            bucket = bucket.saturating_mul(2).min(maximum_context);
+        }
+
+        let build_decode = |fp8: bool| {
+            (0..=capacity)
+                .map(|batch| {
+                    context_buckets
+                        .iter()
+                        .map(|&context| {
+                            if batch == 0 {
+                                0.0
+                            } else {
+                                cost.predict_decode_ms(batch, context, fp8)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
+
+        let prefill = PREFILL_CANDIDATES
+            .into_iter()
+            .filter(|&tokens| tokens <= maximum_prefill_tokens)
+            .map(|tokens| (tokens, cost.predict_prefill_ms(tokens)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        Ok(Self {
+            context_buckets: context_buckets.into_boxed_slice(),
+            decode_bf16: build_decode(false),
+            decode_fp8: build_decode(true),
+            prefill,
+        })
+    }
+
+    #[inline]
+    fn predict_decode_ms(&self, batch: usize, maximum_context: usize, fp8: bool) -> f64 {
+        debug_assert!(batch < self.decode_bf16.len());
+        let context_index = self
+            .context_buckets
+            .partition_point(|&bucket| bucket < maximum_context)
+            .min(self.context_buckets.len() - 1);
+        let table = if fp8 {
+            &self.decode_fp8
+        } else {
+            &self.decode_bf16
+        };
+        table[batch][context_index]
+    }
+
+    #[inline]
+    fn largest_prefill_chunk(&self, remaining: usize, budget_ms: f64) -> Option<(usize, f64)> {
+        if remaining == 0 || budget_ms <= 0.0 {
+            return None;
+        }
+        self.prefill
+            .iter()
+            .copied()
+            .find(|&(tokens, milliseconds)| tokens <= remaining && milliseconds <= budget_ms)
+    }
+}
+
 pub struct Scheduler {
     config: SchedulerConfig,
-    cost: HardwareCostModel,
+    cost: SchedulerCostTable,
     plan: BatchPlan,
 }
 
 impl Scheduler {
-    pub fn new(capacity: usize, config: SchedulerConfig, cost: HardwareCostModel) -> Result<Self> {
+    pub fn new(
+        capacity: usize,
+        maximum_context: usize,
+        config: SchedulerConfig,
+        cost: HardwareCostModel,
+    ) -> Result<Self> {
         ensure!(capacity > 0, "scheduler capacity must be positive");
         ensure!(
             config.step_budget_ms.is_finite() && config.step_budget_ms > 0.0,
             "scheduler step budget must be positive"
         );
+        let cost = SchedulerCostTable::new(
+            capacity,
+            maximum_context,
+            config.maximum_prefill_tokens,
+            &cost,
+        )?;
         Ok(Self {
             config,
             cost,
@@ -87,13 +187,10 @@ impl Scheduler {
                 maximum_context = maximum_context.max(request.tokens().len());
             }
         }
-        self.plan.work.sort_unstable_by_key(|work| match work {
-            ScheduledWork::Decode { slot } => requests
-                .get(*slot)
-                .map(|request| request.next_token_deadline_us.saturating_sub(now_us))
-                .unwrap_or(u64::MAX),
-            ScheduledWork::Prefill { .. } => u64::MAX,
-        });
+
+        // Every active decode is included in the same batch. Without a decode
+        // batch cap, EDF ordering cannot change which requests execute, so sort
+        // work here only adds O(D log D) CPU overhead.
         self.plan.decode_count = self.plan.work.len();
         self.plan.predicted_ms = if self.plan.decode_count == 0 {
             0.0
@@ -128,14 +225,15 @@ impl Scheduler {
                 .prompt_len
                 .saturating_sub(request.prefilled)
                 .min(self.config.maximum_prefill_tokens);
-            let chunk = self.cost.largest_prefill_chunk(remaining, remaining_budget);
-            if chunk > 0 {
+            if let Some((chunk, milliseconds)) =
+                self.cost.largest_prefill_chunk(remaining, remaining_budget)
+            {
                 self.plan.work.push(ScheduledWork::Prefill {
                     slot,
                     tokens: chunk,
                 });
                 self.plan.prefill_tokens = chunk;
-                self.plan.predicted_ms += self.cost.predict_prefill_ms(chunk);
+                self.plan.predicted_ms += milliseconds;
             }
         }
         &self.plan
@@ -189,7 +287,7 @@ mod tests {
         slots
             .get_mut(prefill)?
             .initialize(2, &[2; 256], 512, 0, 400_000, 50_000, 32)?;
-        let mut scheduler = Scheduler::new(3, SchedulerConfig::default(), cost_model()?)?;
+        let mut scheduler = Scheduler::new(3, 1024, SchedulerConfig::default(), cost_model()?)?;
         let capacity = scheduler.plan.work.capacity();
         let plan = scheduler.schedule(&slots, 10_000);
         assert!(matches!(plan.work()[0], ScheduledWork::Decode { .. }));
