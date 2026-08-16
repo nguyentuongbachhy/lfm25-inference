@@ -3,6 +3,7 @@ use anyhow::{Result, ensure};
 use super::{HardwareCostModel, RequestPhase, RequestSlotId, RequestSlots};
 
 const PREFILL_CANDIDATES: [usize; 11] = [1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1];
+const MAX_SCHEDULER_CONTEXT: usize = 32_768;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerConfig {
@@ -64,20 +65,17 @@ struct SchedulerCostTable {
 impl SchedulerCostTable {
     fn new(
         capacity: usize,
-        maximum_context: usize,
         maximum_prefill_tokens: usize,
         cost: &HardwareCostModel,
     ) -> Result<Self> {
-        ensure!(maximum_context > 0, "scheduler maximum context must be positive");
-
         let mut context_buckets = Vec::new();
         let mut bucket = 1usize;
         loop {
             context_buckets.push(bucket);
-            if bucket >= maximum_context {
+            if bucket >= MAX_SCHEDULER_CONTEXT {
                 break;
             }
-            bucket = bucket.saturating_mul(2).min(maximum_context);
+            bucket = bucket.saturating_mul(2).min(MAX_SCHEDULER_CONTEXT);
         }
 
         let build_decode = |fp8: bool| {
@@ -117,6 +115,7 @@ impl SchedulerCostTable {
     #[inline]
     fn predict_decode_ms(&self, batch: usize, maximum_context: usize, fp8: bool) -> f64 {
         debug_assert!(batch < self.decode_bf16.len());
+        debug_assert!(maximum_context <= MAX_SCHEDULER_CONTEXT);
         let context_index = self
             .context_buckets
             .partition_point(|&bucket| bucket < maximum_context)
@@ -148,23 +147,13 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(
-        capacity: usize,
-        maximum_context: usize,
-        config: SchedulerConfig,
-        cost: HardwareCostModel,
-    ) -> Result<Self> {
+    pub fn new(capacity: usize, config: SchedulerConfig, cost: HardwareCostModel) -> Result<Self> {
         ensure!(capacity > 0, "scheduler capacity must be positive");
         ensure!(
             config.step_budget_ms.is_finite() && config.step_budget_ms > 0.0,
             "scheduler step budget must be positive"
         );
-        let cost = SchedulerCostTable::new(
-            capacity,
-            maximum_context,
-            config.maximum_prefill_tokens,
-            &cost,
-        )?;
+        let cost = SchedulerCostTable::new(capacity, config.maximum_prefill_tokens, &cost)?;
         Ok(Self {
             config,
             cost,
@@ -287,7 +276,7 @@ mod tests {
         slots
             .get_mut(prefill)?
             .initialize(2, &[2; 256], 512, 0, 400_000, 50_000, 32)?;
-        let mut scheduler = Scheduler::new(3, 1024, SchedulerConfig::default(), cost_model()?)?;
+        let mut scheduler = Scheduler::new(3, SchedulerConfig::default(), cost_model()?)?;
         let capacity = scheduler.plan.work.capacity();
         let plan = scheduler.schedule(&slots, 10_000);
         assert!(matches!(plan.work()[0], ScheduledWork::Decode { .. }));
