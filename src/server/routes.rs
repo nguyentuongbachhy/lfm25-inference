@@ -72,8 +72,11 @@ pub(crate) fn parse_completion(body: &[u8]) -> Result<(String, GenerationOptions
     Ok((request.prompt, options))
 }
 
-pub(crate) fn completion_response(completion: ServingCompletion, text: String) -> RouteResponse {
-    let completion_tokens = completion.token_ids.len();
+pub(crate) fn completion_response(
+    completion: ServingCompletion,
+    text: String,
+    completion_tokens: usize,
+) -> RouteResponse {
     json_response(
         "200 OK",
         &CompletionResponse {
