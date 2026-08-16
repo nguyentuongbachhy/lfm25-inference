@@ -16,6 +16,72 @@ pub struct TransferCounters {
     pub d2d_calls: u64,
 }
 
+fn align_up_8(value: usize) -> Result<usize> {
+    value
+        .checked_add(7)
+        .map(|value| value & !7usize)
+        .context("metadata alignment overflow")
+}
+
+fn packed_metadata_bytes(tokens: usize, segments: usize) -> Result<usize> {
+    let token_u32_bytes = tokens
+        .checked_mul(std::mem::size_of::<u32>())
+        .context("token metadata size overflow")?;
+    let physical_offset = align_up_8(
+        token_u32_bytes
+            .checked_mul(3)
+            .context("token metadata prefix overflow")?,
+    )?;
+    let physical_end = physical_offset
+        .checked_add(
+            tokens
+                .checked_mul(std::mem::size_of::<i64>())
+                .context("physical-slot metadata size overflow")?,
+        )
+        .context("physical-slot metadata end overflow")?;
+    let segment_u32s = segments
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(1))
+        .context("segment metadata count overflow")?;
+    physical_end
+        .checked_add(
+            segment_u32s
+                .checked_mul(std::mem::size_of::<u32>())
+                .context("segment metadata size overflow")?,
+        )
+        .context("packed metadata size overflow")
+}
+
+fn append_u32_bytes(destination: &mut Vec<u8>, values: &[u32]) {
+    if values.is_empty() {
+        return;
+    }
+    // SAFETY: u32 has no padding and the byte slice is used only for a native
+    // host-to-device copy consumed by the same process/GPU ABI.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            values.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(values),
+        )
+    };
+    destination.extend_from_slice(bytes);
+}
+
+fn append_i64_bytes(destination: &mut Vec<u8>, values: &[i64]) {
+    if values.is_empty() {
+        return;
+    }
+    // SAFETY: i64 has no padding and the destination is aligned before this
+    // section so the CUDA side may reinterpret it directly.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            values.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(values),
+        )
+    };
+    destination.extend_from_slice(bytes);
+}
+
 /// Fixed-capacity device metadata for a ragged model step.
 pub struct GpuBatch {
     maximum_tokens: usize,
@@ -28,6 +94,9 @@ pub struct GpuBatch {
     segment_slots: Tensor<u32>,
     output_rows: Tensor<u32>,
     block_tables: Tensor<u32>,
+    metadata_staging: Tensor<u8>,
+    metadata_host: Vec<u8>,
+    pending_tokens: usize,
     transfers: TransferCounters,
 }
 
@@ -53,6 +122,7 @@ impl GpuBatch {
         request_slots
             .checked_mul(block_table_stride)
             .context("block table capacity overflow")?;
+        let metadata_capacity = packed_metadata_bytes(maximum_tokens, request_slots)?;
         Ok(Self {
             maximum_tokens,
             block_table_stride,
@@ -64,6 +134,9 @@ impl GpuBatch {
             segment_slots: runtime.zeros::<u32>(Shape::new([request_slots]))?,
             output_rows: runtime.zeros::<u32>(Shape::new([request_slots]))?,
             block_tables: runtime.zeros::<u32>(Shape::new([request_slots, block_table_stride]))?,
+            metadata_staging: runtime.zeros::<u8>(Shape::new([metadata_capacity]))?,
+            metadata_host: Vec::with_capacity(metadata_capacity),
+            pending_tokens: 0,
             transfers: TransferCounters::default(),
         })
     }
@@ -84,26 +157,69 @@ impl GpuBatch {
             output_rows.len() == segment_slots.len(),
             "output row count mismatch"
         );
-        runtime.upload_prefix(segment_offsets, &mut self.segment_offsets)?;
-        runtime.upload_prefix(segment_slots, &mut self.segment_slots)?;
-        runtime.upload_prefix(output_rows, &mut self.output_rows)?;
+        ensure!(self.pending_tokens > 0, "GPU batch step metadata is missing");
+
+        let tokens = self.pending_tokens;
+        let segments = segment_slots.len();
+        append_u32_bytes(&mut self.metadata_host, segment_offsets);
+        append_u32_bytes(&mut self.metadata_host, segment_slots);
+        append_u32_bytes(&mut self.metadata_host, output_rows);
+
+        let packed_bytes = packed_metadata_bytes(tokens, segments)?;
+        ensure!(
+            self.metadata_host.len() == packed_bytes,
+            "packed metadata layout mismatch: expected {packed_bytes} bytes, got {}",
+            self.metadata_host.len()
+        );
+        ensure!(
+            packed_bytes <= self.metadata_staging.storage_capacity(),
+            "packed metadata exceeds staging capacity"
+        );
+
+        runtime.upload_prefix(&self.metadata_host, &mut self.metadata_staging)?;
+        self.metadata_staging
+            .set_logical_shape(Shape::new([packed_bytes]))?;
+
+        unsafe {
+            runtime.kernels().metadata().launch_scatter(
+                runtime.stream(),
+                self.metadata_staging.storage(),
+                self.token_ids.storage_mut(),
+                self.positions.storage_mut(),
+                self.request_slots.storage_mut(),
+                self.physical_slots.storage_mut(),
+                self.segment_offsets.storage_mut(),
+                self.segment_slots.storage_mut(),
+                self.output_rows.storage_mut(),
+                tokens,
+                segments,
+            )?;
+        }
+
+        self.token_ids.set_logical_shape(Shape::new([tokens]))?;
+        self.positions.set_logical_shape(Shape::new([tokens]))?;
+        self.request_slots.set_logical_shape(Shape::new([tokens]))?;
+        self.physical_slots
+            .set_logical_shape(Shape::new([tokens]))?;
         self.segment_offsets
             .set_logical_shape(Shape::new([segment_offsets.len()]))?;
         self.segment_slots
-            .set_logical_shape(Shape::new([segment_slots.len()]))?;
+            .set_logical_shape(Shape::new([segments]))?;
         self.output_rows
-            .set_logical_shape(Shape::new([output_rows.len()]))?;
-        let bytes = std::mem::size_of_val(segment_offsets)
-            .saturating_add(std::mem::size_of_val(segment_slots))
-            .saturating_add(std::mem::size_of_val(output_rows));
-        self.transfers.h2d_bytes = self.transfers.h2d_bytes.saturating_add(bytes as u64);
-        self.transfers.h2d_calls = self.transfers.h2d_calls.saturating_add(3);
+            .set_logical_shape(Shape::new([segments]))?;
+
+        self.transfers.h2d_bytes = self
+            .transfers
+            .h2d_bytes
+            .saturating_add(packed_bytes as u64);
+        self.transfers.h2d_calls = self.transfers.h2d_calls.saturating_add(1);
+        self.pending_tokens = 0;
         Ok(())
     }
 
     pub fn update_step(
         &mut self,
-        runtime: &CudaRuntime,
+        _runtime: &CudaRuntime,
         token_ids: &[u32],
         positions: &[u32],
         request_slots: &[u32],
@@ -120,20 +236,15 @@ impl GpuBatch {
             physical_slots.len() == tokens,
             "physical slot count mismatch"
         );
-        runtime.upload_prefix(token_ids, &mut self.token_ids)?;
-        runtime.upload_prefix(positions, &mut self.positions)?;
-        runtime.upload_prefix(request_slots, &mut self.request_slots)?;
-        runtime.upload_prefix(physical_slots, &mut self.physical_slots)?;
-        self.token_ids.set_logical_shape(Shape::new([tokens]))?;
-        self.positions.set_logical_shape(Shape::new([tokens]))?;
-        self.request_slots.set_logical_shape(Shape::new([tokens]))?;
-        self.physical_slots
-            .set_logical_shape(Shape::new([tokens]))?;
-        let bytes = tokens
-            .checked_mul(std::mem::size_of::<u32>() * 3 + std::mem::size_of::<i64>())
-            .context("transfer byte counter overflow")?;
-        self.transfers.h2d_bytes = self.transfers.h2d_bytes.saturating_add(bytes as u64);
-        self.transfers.h2d_calls = self.transfers.h2d_calls.saturating_add(4);
+
+        self.metadata_host.clear();
+        append_u32_bytes(&mut self.metadata_host, token_ids);
+        append_u32_bytes(&mut self.metadata_host, positions);
+        append_u32_bytes(&mut self.metadata_host, request_slots);
+        let physical_offset = align_up_8(self.metadata_host.len())?;
+        self.metadata_host.resize(physical_offset, 0);
+        append_i64_bytes(&mut self.metadata_host, physical_slots);
+        self.pending_tokens = tokens;
         Ok(())
     }
 
