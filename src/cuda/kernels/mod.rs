@@ -4,6 +4,7 @@ mod fp8_quantize;
 mod gather;
 mod kernel_set;
 mod kv_cache;
+mod metadata;
 mod residual;
 mod rms_norm;
 mod rope;
@@ -22,6 +23,7 @@ use fp8_quantize::Fp8QuantizeKernels;
 use gather::GatherKernels;
 use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
+use metadata::MetadataKernels;
 use residual::ResidualKernels;
 use rms_norm::RmsNormKernels;
 use rope::RopeKernels;
@@ -42,6 +44,7 @@ pub(crate) struct Kernels {
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
     gather: GatherKernels,
+    metadata: MetadataKernels,
 }
 
 impl Kernels {
@@ -58,6 +61,7 @@ impl Kernels {
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
             gather: GatherKernels::load(context)?,
+            metadata: MetadataKernels::load(context)?,
         })
     }
 
@@ -85,12 +89,15 @@ impl Kernels {
     pub(crate) fn kv_cache(&self) -> &KvCacheKernels {
         &self.kv_cache
     }
+
     pub(crate) fn attention(&self) -> &AttentionKernels {
         &self.attention
     }
+
     pub(crate) fn short_conv(&self) -> &ShortConvKernels {
         &self.short_conv
     }
+
     pub(crate) fn sampling(&self) -> &SamplingKernels {
         &self.sampling
     }
@@ -98,8 +105,13 @@ impl Kernels {
     pub(crate) fn fp8_quantize(&self) -> &Fp8QuantizeKernels {
         &self.fp8_quantize
     }
+
     pub(crate) fn gather(&self) -> &GatherKernels {
         &self.gather
+    }
+
+    pub(crate) fn metadata(&self) -> &MetadataKernels {
+        &self.metadata
     }
 }
 
