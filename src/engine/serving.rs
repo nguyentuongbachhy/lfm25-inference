@@ -26,6 +26,7 @@ pub struct ContinuousEngineConfig {
     pub maximum_batch_tokens: usize,
     pub physical_kv_pages: usize,
     pub queue_capacity: usize,
+    pub maximum_admissions_per_step: usize,
     pub scheduler: SchedulerConfig,
     pub cost_model: HardwareCostModel,
     pub trace_steps: bool,
@@ -44,6 +45,7 @@ impl ContinuousEngineConfig {
             maximum_batch_tokens: 64 + 512,
             physical_kv_pages: 1,
             queue_capacity: 128,
+            maximum_admissions_per_step: 4,
             scheduler: SchedulerConfig::default(),
             cost_model,
             trace_steps: false,
@@ -204,6 +206,10 @@ impl Engine {
             "continuous engine needs request slots"
         );
         ensure!(
+            config.maximum_admissions_per_step > 0,
+            "continuous engine needs a positive admission budget"
+        );
+        ensure!(
             config
                 .maximum_request_slots
                 .checked_add(config.scheduler.maximum_prefill_tokens)
@@ -305,6 +311,11 @@ fn run_owner(
         .runtime
         .pinned_u32(config.maximum_request_slots + 1)?;
     warm_serving_path(&engine, &config, &mut cache)?;
+    engine.runtime.enter_serving_owner_mode()?;
+    let timing_events = config
+        .trace_steps
+        .then(|| engine.runtime.timing_event_pair())
+        .transpose()?;
     cache.begin_serving_measurement();
     let serving_bf16_pool_started = engine.runtime.bf16_pool_stats();
     let serving_fp8_pool_started = engine.runtime.fp8_pool_stats();
@@ -319,16 +330,6 @@ fn run_owner(
     let mut maximum_active_requests = 0usize;
 
     loop {
-        while let Ok(request) = receiver.try_recv() {
-            admit_request(
-                &engine,
-                &config,
-                &mut cache,
-                &mut slots,
-                &mut responses,
-                request,
-            )?;
-        }
         if slots.free_count() == config.maximum_request_slots {
             let Some(request) = receiver.blocking_recv() else {
                 break;
@@ -341,8 +342,28 @@ fn run_owner(
                 &mut responses,
                 request,
             )?;
-            continue;
+            if slots.free_count() == config.maximum_request_slots {
+                continue;
+            }
+        } else {
+            for _ in 0..config.maximum_admissions_per_step {
+                if slots.free_count() == 0 {
+                    break;
+                }
+                let Ok(request) = receiver.try_recv() else {
+                    break;
+                };
+                admit_request(
+                    &engine,
+                    &config,
+                    &mut cache,
+                    &mut slots,
+                    &mut responses,
+                    request,
+                )?;
+            }
         }
+
         maximum_active_requests = maximum_active_requests.max(
             config
                 .maximum_request_slots
@@ -409,7 +430,9 @@ fn run_owner(
         }
         let bf16_pool_started = engine.runtime.bf16_pool_stats();
         let fp8_pool_started = engine.runtime.fp8_pool_stats();
-        let gpu_started = engine.runtime.record_timing_event()?;
+        if let Some(events) = timing_events.as_ref() {
+            engine.runtime.record_timing_pair_start(events)?;
+        }
         let submit_started = Instant::now();
         let logits = engine.model.forward_ragged_batch(
             &engine.runtime,
@@ -422,9 +445,13 @@ fn run_owner(
             &output_rows,
         )?;
         let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
-        let gpu_finished = engine.runtime.record_timing_event()?;
         let submit_cpu_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
-        let gpu_ms = engine.runtime.elapsed_ms(&gpu_started, &gpu_finished)?;
+        let gpu_ms = if let Some(events) = timing_events.as_ref() {
+            engine.runtime.record_timing_pair_end(events)?;
+            engine.runtime.elapsed_timing_pair_ms(events)?
+        } else {
+            0.0
+        };
         let download_started = Instant::now();
         engine
             .runtime
@@ -831,10 +858,14 @@ fn finish_request(
     } else {
         Some(state.inter_token_ms.iter().sum::<f64>() / state.inter_token_ms.len() as f64)
     };
+    let mut sorted_inter_token_ms = state.inter_token_ms.clone();
+    sorted_inter_token_ms.sort_unstable_by(f64::total_cmp);
     let total_ms = state
         .last_token_ready
         .map(|time| time.duration_since(state.arrived).as_secs_f64() * 1000.0)
         .unwrap_or(ttft_ms);
+    let bf16_pool = engine.runtime.bf16_pool_stats();
+    let fp8_pool = engine.runtime.fp8_pool_stats();
     let metrics = GenerationMetrics {
         tokenization_ms: 0.0,
         queue_delay_ms: state
@@ -854,8 +885,8 @@ fn finish_request(
         decode_d2h_ms: state.decode_d2h_ms,
         decode_total_ms: (total_ms - ttft_ms).max(0.0),
         tpot_mean_ms: tpot_mean,
-        tpot_p50_ms: percentile(&state.inter_token_ms, 0.50),
-        tpot_p95_ms: percentile(&state.inter_token_ms, 0.95),
+        tpot_p50_ms: percentile_sorted(&sorted_inter_token_ms, 0.50),
+        tpot_p95_ms: percentile_sorted(&sorted_inter_token_ms, 0.95),
         decode_tokens_per_second: tpot_mean.map(|value| 1000.0 / value),
         gpu_wait_and_sampling_total_ms: 0.0,
         bf16_pool_hits: state.bf16_pool_hits,
@@ -866,18 +897,12 @@ fn finish_request(
         decode_bf16_pool_misses: 0,
         decode_fp8_pool_hits: 0,
         decode_fp8_pool_misses: 0,
-        bf16_pool_available_elements: engine.runtime.bf16_pool_stats().available_elements,
-        bf16_pool_dropped_elements: engine.runtime.bf16_pool_stats().dropped_elements,
-        fp8_pool_available_elements: engine.runtime.fp8_pool_stats().available_elements,
-        fp8_pool_dropped_elements: engine.runtime.fp8_pool_stats().dropped_elements,
-        bf16_pool_internal_fragment_elements: engine
-            .runtime
-            .bf16_pool_stats()
-            .internal_fragment_elements,
-        fp8_pool_internal_fragment_elements: engine
-            .runtime
-            .fp8_pool_stats()
-            .internal_fragment_elements,
+        bf16_pool_available_elements: bf16_pool.available_elements,
+        bf16_pool_dropped_elements: bf16_pool.dropped_elements,
+        fp8_pool_available_elements: fp8_pool.available_elements,
+        fp8_pool_dropped_elements: fp8_pool.dropped_elements,
+        bf16_pool_internal_fragment_elements: bf16_pool.internal_fragment_elements,
+        fp8_pool_internal_fragment_elements: fp8_pool.internal_fragment_elements,
         detokenization_ms: 0.0,
         total_ms,
     };
@@ -894,14 +919,12 @@ fn finish_request(
     Ok(())
 }
 
-fn percentile(samples: &[f64], quantile: f64) -> Option<f64> {
+fn percentile_sorted(samples: &[f64], quantile: f64) -> Option<f64> {
     if samples.is_empty() {
         return None;
     }
-    let mut values = samples.to_vec();
-    values.sort_unstable_by(f64::total_cmp);
-    values
-        .get(((values.len() - 1) as f64 * quantile).round() as usize)
+    samples
+        .get(((samples.len() - 1) as f64 * quantile).round() as usize)
         .copied()
 }
 
