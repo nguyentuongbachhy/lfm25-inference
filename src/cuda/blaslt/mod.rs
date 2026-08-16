@@ -39,6 +39,9 @@ impl<T> PlanAccess<'_, T> {
     }
 }
 
+type OwnerPlans = Vec<(MatmulKey, Arc<MatmulPlan>)>;
+type OwnerFp8Plans = Vec<(Fp8MatmulKey, Arc<Fp8MatmulPlan>)>;
+
 pub(crate) struct BlasLt {
     handle: sys::cublasLtHandle_t,
     stream: Arc<CudaStream>,
@@ -46,15 +49,15 @@ pub(crate) struct BlasLt {
     workspace_size: usize,
     plans: RwLock<Option<HashMap<MatmulKey, Arc<MatmulPlan>>>>,
     fp8_plans: RwLock<Option<HashMap<Fp8MatmulKey, Arc<Fp8MatmulPlan>>>>,
-    owner_plans: UnsafeCell<Option<HashMap<MatmulKey, Arc<MatmulPlan>>>>,
-    owner_fp8_plans: UnsafeCell<Option<HashMap<Fp8MatmulKey, Arc<Fp8MatmulPlan>>>>,
+    owner_plans: UnsafeCell<Option<OwnerPlans>>,
+    owner_fp8_plans: UnsafeCell<Option<OwnerFp8Plans>>,
     owner_mode: AtomicBool,
     owner_thread: OnceLock<ThreadId>,
 }
 
 // Dynamic setup remains protected by RwLock. Once owner mode is enabled, all
-// accesses are restricted to the dedicated GPU-owner thread and use the
-// UnsafeCell-backed maps without synchronization.
+// accesses are restricted to the dedicated GPU-owner thread and use compact
+// vectors without locks, hashes, or Arc refcount traffic.
 unsafe impl Sync for BlasLt {}
 
 impl BlasLt {
@@ -119,14 +122,19 @@ impl BlasLt {
             Ok(plans) => plans,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let owner_plans = plans
+        let mut owner_plans = plans
             .take()
-            .context("cuBLASLt BF16 plan cache is unavailable")?;
+            .context("cuBLASLt BF16 plan cache is unavailable")?
+            .into_iter()
+            .collect::<OwnerPlans>();
+        owner_plans.sort_unstable_by_key(|(key, _)| *key);
         let owner_fp8_plans = fp8_plans
             .take()
-            .context("cuBLASLt FP8 plan cache is unavailable")?;
+            .context("cuBLASLt FP8 plan cache is unavailable")?
+            .into_iter()
+            .collect::<OwnerFp8Plans>();
 
-        // SAFETY: owner mode is not visible until both maps have been moved.
+        // SAFETY: owner mode is not visible until both caches have been moved.
         unsafe {
             *self.owner_plans.get() = Some(owner_plans);
             *self.owner_fp8_plans.get() = Some(owner_fp8_plans);
@@ -210,68 +218,72 @@ impl BlasLt {
 
     fn get_or_create_plan_owner(&self, key: MatmulKey) -> Result<&MatmulPlan> {
         self.assert_owner_thread();
-        // SAFETY: owner mode guarantees exclusive access from one thread.
-        let missing = unsafe {
+        let search = unsafe {
             (*self.owner_plans.get())
                 .as_ref()
                 .expect("cuBLASLt owner BF16 cache is unavailable")
-                .get(&key)
-                .is_none()
+                .binary_search_by_key(&key, |(candidate, _)| *candidate)
         };
-        if missing {
-            let created = Arc::new(MatmulPlan::new(self.handle, key, self.workspace_size)?);
-            // SAFETY: the GPU owner is the only thread mutating this map.
-            unsafe {
-                (*self.owner_plans.get())
-                    .as_mut()
-                    .expect("cuBLASLt owner BF16 cache is unavailable")
-                    .insert(key, created);
+        let index = match search {
+            Ok(index) => index,
+            Err(index) => {
+                let created = Arc::new(MatmulPlan::new(self.handle, key, self.workspace_size)?);
+                // SAFETY: the GPU owner is the only thread mutating this vector.
+                unsafe {
+                    (*self.owner_plans.get())
+                        .as_mut()
+                        .expect("cuBLASLt owner BF16 cache is unavailable")
+                        .insert(index, (key, created));
+                }
+                index
             }
-        }
-        // SAFETY: plans are heap allocated behind Arc and remain in the owner map
-        // for the lifetime of BlasLt, so the returned plan reference is stable.
+        };
+        // SAFETY: the returned reference is consumed by the current matmul call
+        // before another plan resolution can mutate this owner-only vector.
         Ok(unsafe {
             (*self.owner_plans.get())
                 .as_ref()
-                .expect("cuBLASLt owner BF16 cache is unavailable")
-                .get(&key)
-                .expect("cuBLASLt owner BF16 plan insertion failed")
+                .expect("cuBLASLt owner BF16 cache is unavailable")[index]
+                .1
                 .as_ref()
         })
     }
 
     fn get_or_create_fp8_plan_owner(&self, key: Fp8MatmulKey) -> Result<&Fp8MatmulPlan> {
         self.assert_owner_thread();
-        // SAFETY: owner mode guarantees exclusive access from one thread.
-        let missing = unsafe {
+        let found = unsafe {
             (*self.owner_fp8_plans.get())
                 .as_ref()
                 .expect("cuBLASLt owner FP8 cache is unavailable")
-                .get(&key)
-                .is_none()
+                .iter()
+                .position(|(candidate, _)| *candidate == key)
         };
-        if missing {
-            let created = Arc::new(Fp8MatmulPlan::new(
-                self.handle,
-                &self.stream,
-                key,
-                self.workspace_size,
-            )?);
-            // SAFETY: the GPU owner is the only thread mutating this map.
-            unsafe {
-                (*self.owner_fp8_plans.get())
-                    .as_mut()
-                    .expect("cuBLASLt owner FP8 cache is unavailable")
-                    .insert(key, created);
+        let index = match found {
+            Some(index) => index,
+            None => {
+                let created = Arc::new(Fp8MatmulPlan::new(
+                    self.handle,
+                    &self.stream,
+                    key,
+                    self.workspace_size,
+                )?);
+                // SAFETY: the GPU owner is the only thread mutating this vector.
+                let plans = unsafe {
+                    (*self.owner_fp8_plans.get())
+                        .as_mut()
+                        .expect("cuBLASLt owner FP8 cache is unavailable")
+                };
+                plans.push((key, created));
+                plans.len() - 1
             }
-        }
-        // SAFETY: plans remain owned by the map for the lifetime of BlasLt.
+        };
+        // SAFETY: the returned reference is consumed before the next owner-only
+        // lookup can append to the vector.
         Ok(unsafe {
             (*self.owner_fp8_plans.get())
                 .as_ref()
-                .expect("cuBLASLt owner FP8 cache is unavailable")
-                .get(&key)
-                .expect("cuBLASLt owner FP8 plan insertion failed")
+                .expect("cuBLASLt owner FP8 cache is unavailable")[index]
+                .1
                 .as_ref()
         })
     }
@@ -501,7 +513,7 @@ impl BlasLt {
             return unsafe {
                 (*self.owner_plans.get())
                     .as_ref()
-                    .map_or(0, HashMap::len)
+                    .map_or(0, Vec::len)
             };
         }
         match self.plans.read() {
@@ -518,7 +530,7 @@ impl BlasLt {
             return unsafe {
                 (*self.owner_fp8_plans.get())
                     .as_ref()
-                    .map_or(0, HashMap::len)
+                    .map_or(0, Vec::len)
             };
         }
         match self.fp8_plans.read() {
