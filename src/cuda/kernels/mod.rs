@@ -1,4 +1,5 @@
 mod attention;
+#[cfg(test)]
 mod attention_async;
 mod attention_async_fast;
 mod attention_fused;
@@ -21,6 +22,7 @@ use anyhow::Result;
 use cudarc::driver::CudaContext;
 
 use attention::AttentionKernels;
+#[cfg(test)]
 use attention_async::AsyncAttentionKernels;
 use attention_async_fast::AsyncAttentionFastKernels;
 use attention_fused::FusedAttentionKernels;
@@ -46,6 +48,7 @@ pub(crate) struct Kernels {
     rope: RopeKernels,
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
+    #[cfg(test)]
     attention_async: AsyncAttentionKernels,
     attention_async_fast: AsyncAttentionFastKernels,
     attention_fused: FusedAttentionKernels,
@@ -66,6 +69,7 @@ impl Kernels {
             rope: RopeKernels::load(context)?,
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
+            #[cfg(test)]
             attention_async: AsyncAttentionKernels::load(context)?,
             attention_async_fast: AsyncAttentionFastKernels::load(context)?,
             attention_fused: FusedAttentionKernels::load(context)?,
@@ -106,6 +110,7 @@ impl Kernels {
         &self.attention
     }
 
+    #[cfg(test)]
     pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
         &self.attention_async
     }
