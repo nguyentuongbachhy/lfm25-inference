@@ -3,6 +3,8 @@ mod attention;
 mod attention_async;
 mod attention_fused;
 #[cfg(test)]
+mod attention_async_fast_tests;
+#[cfg(test)]
 mod attention_async_w4_tests;
 #[cfg(test)]
 mod attention_regression_tests;
@@ -11,6 +13,8 @@ mod gather;
 mod linear;
 #[cfg(test)]
 mod mok_bench_tests;
+#[cfg(test)]
+mod mok_fast_exp_bench_tests;
 #[cfg(test)]
 mod mok_fused_bench_tests;
 #[cfg(test)]
