@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
-use cudarc::driver::{CudaModule, CudaSlice, CudaStream, PushKernelArg};
+use cudarc::driver::{
+    CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
+};
 use half::bf16;
 
 use crate::cuda::{launch::KernelLaunch, module::load_function};
@@ -30,6 +32,15 @@ impl KernelSet for QkPostprocessKernels {
             Self::MODULE_NAME,
             "qk_norm_rope_kv_write_decode_ps32",
         )?;
+
+        ensure!(
+            ps16.max_threads_per_block()? >= BLOCK_SIZE as i32,
+            "PS16 fused QK kernel cannot launch required 256-thread block"
+        );
+        ensure!(
+            ps32.max_threads_per_block()? >= BLOCK_SIZE as i32,
+            "PS32 fused QK kernel cannot launch required 256-thread block"
+        );
 
         Ok(Self {
             ps16: KernelLaunch::new_with_multiple(ps16, BLOCK_SIZE, 32)?,
@@ -88,7 +99,12 @@ impl QkPostprocessKernels {
             32 => &self.ps32,
             other => anyhow::bail!("unsupported fused QK page size {other}"),
         };
-        let config = kernel.policy().exact_blocks(num_tokens)?;
+        let grid_x = u32::try_from(num_tokens).context("fused QK grid size exceeds u32")?;
+        let config = LaunchConfig {
+            grid_dim: (grid_x, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
         let mut args = stream.launch_builder(kernel.function());
         args.arg(query)
             .arg(key)
