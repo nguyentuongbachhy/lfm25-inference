@@ -6,6 +6,8 @@ mod attention_regression_tests;
 mod embedding;
 mod gather;
 mod linear;
+#[cfg(test)]
+mod mok_bench_tests;
 mod qk_postprocess;
 mod residual;
 mod rms_norm;
