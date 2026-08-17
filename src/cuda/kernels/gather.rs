@@ -10,6 +10,15 @@ use super::kernel_set::KernelSet;
 
 const MAX_BLOCK_SIZE: u32 = 256;
 
+pub(crate) struct GatherLaunch<'a> {
+    pub(crate) input: &'a CudaSlice<bf16>,
+    pub(crate) row_indices: &'a CudaSlice<u32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) output_rows: usize,
+    pub(crate) input_rows: usize,
+    pub(crate) columns: usize,
+}
+
 pub(crate) struct GatherKernels {
     rows_bf16: KernelLaunch,
 }
@@ -17,6 +26,7 @@ pub(crate) struct GatherKernels {
 impl KernelSet for GatherKernels {
     const MODULE_NAME: &'static str = "gather";
     const PTX: &'static str = include_str!(concat!(env!("OUT_DIR"), "/gather.ptx"));
+
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
         let function = load_function(&module, Self::MODULE_NAME, "gather_rows_bf16")?;
         Ok(Self {
@@ -29,13 +39,16 @@ impl GatherKernels {
     pub(crate) unsafe fn launch_rows_bf16(
         &self,
         stream: &CudaStream,
-        input: &CudaSlice<bf16>,
-        row_indices: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        output_rows: usize,
-        input_rows: usize,
-        columns: usize,
+        launch: GatherLaunch<'_>,
     ) -> Result<()> {
+        let GatherLaunch {
+            input,
+            row_indices,
+            output,
+            output_rows,
+            input_rows,
+            columns,
+        } = launch;
         ensure!(
             output_rows > 0 && input_rows > 0 && columns > 0,
             "invalid gather shape"
