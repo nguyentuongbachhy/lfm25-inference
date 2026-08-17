@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 mod attention;
 mod attention_async;
+mod attention_async_fast;
 mod attention_fused;
 #[cfg(test)]
 mod attention_async_fast_tests;
@@ -13,6 +14,8 @@ mod gather;
 mod linear;
 #[cfg(test)]
 mod mok_bench_tests;
+#[cfg(test)]
+mod mok_dispatch_bench_tests;
 #[cfg(test)]
 mod mok_fast_exp_bench_tests;
 #[cfg(test)]
@@ -32,6 +35,9 @@ mod silu_mul;
 pub use attention::{hybrid_ragged_attention_lfm2_bf16, prefill_attention_lfm2_bf16};
 pub use attention_async::paged_attention_lfm2_bf16;
 pub(crate) use attention_async::paged_ragged_attention_lfm2_bf16;
+pub(crate) use attention_async_fast::{
+    paged_attention_fast_lfm2_bf16, paged_ragged_attention_fast_lfm2_bf16,
+};
 pub(crate) use attention_fused::{
     fused_paged_attention_decode_lfm2_bf16,
     fused_ragged_paged_attention_decode_lfm2_bf16,
