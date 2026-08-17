@@ -20,6 +20,7 @@ pub struct TransferCounters {
 pub struct GpuBatch {
     maximum_tokens: usize,
     block_table_stride: usize,
+    max_context_tokens: usize,
     token_ids: Tensor<u32>,
     positions: Tensor<u32>,
     request_slots: Tensor<u32>,
@@ -56,6 +57,7 @@ impl GpuBatch {
         Ok(Self {
             maximum_tokens,
             block_table_stride,
+            max_context_tokens: 0,
             token_ids: runtime.zeros::<u32>(Shape::new([maximum_tokens]))?,
             positions: runtime.zeros::<u32>(Shape::new([maximum_tokens]))?,
             request_slots: runtime.zeros::<u32>(Shape::new([maximum_tokens]))?,
@@ -120,6 +122,17 @@ impl GpuBatch {
             physical_slots.len() == tokens,
             "physical slot count mismatch"
         );
+
+        let max_position = positions
+            .iter()
+            .copied()
+            .max()
+            .context("GPU batch positions are unexpectedly empty")?;
+        self.max_context_tokens = usize::try_from(max_position)
+            .context("GPU batch position exceeds usize")?
+            .checked_add(1)
+            .context("GPU batch context length overflow")?;
+
         runtime.upload_prefix(token_ids, &mut self.token_ids)?;
         runtime.upload_prefix(positions, &mut self.positions)?;
         runtime.upload_prefix(request_slots, &mut self.request_slots)?;
@@ -189,6 +202,9 @@ impl GpuBatch {
     }
     pub fn block_table_stride(&self) -> usize {
         self.block_table_stride
+    }
+    pub(crate) fn max_context_tokens(&self) -> usize {
+        self.max_context_tokens
     }
     pub fn transfers(&self) -> TransferCounters {
         self.transfers
