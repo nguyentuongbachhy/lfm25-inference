@@ -42,11 +42,8 @@ __device__ __forceinline__ size_t cache_index(
     size_t offset,
     size_t dim
 ) {
-    return (
-        ((page * LFM2_NUM_KV_HEADS + kv_head) * PAGE_SIZE + offset)
-        * LFM2_HEAD_DIM
-        + dim
-    );
+    return (((page * LFM2_NUM_KV_HEADS + kv_head) * PAGE_SIZE + offset)
+        * LFM2_HEAD_DIM + dim);
 }
 
 template <int PAGE_SIZE>
@@ -65,43 +62,49 @@ __device__ __forceinline__ void stage_page_async(
 
     for (size_t copy = threadIdx.x; copy < COPIES; copy += blockDim.x) {
         const size_t element = copy * ELEMENTS_PER_COPY;
-        cp_async_16(
-            key_stage + element,
-            key_cache + cache_base + element
-        );
-        cp_async_16(
-            value_stage + element,
-            value_cache + cache_base + element
-        );
+        cp_async_16(key_stage + element, key_cache + cache_base + element);
+        cp_async_16(value_stage + element, value_cache + cache_base + element);
     }
     cp_async_commit();
 }
 
-template <int PAGE_SIZE>
+template <int PAGE_SIZE, bool RAGGED>
 __device__ __forceinline__ void paged_gqa_lfm2_bf16_async_body(
     const __nv_bfloat16* __restrict__ query,
     const __nv_bfloat16* __restrict__ key_cache,
     const __nv_bfloat16* __restrict__ value_cache,
-    const uint32_t* __restrict__ block_table,
+    const uint32_t* __restrict__ block_tables,
+    const uint32_t* __restrict__ request_slots,
     const uint32_t* __restrict__ position_ids,
     __nv_bfloat16* __restrict__ output,
     size_t num_tokens,
     size_t num_pages,
-    size_t block_table_length
+    size_t block_table_stride,
+    size_t block_table_rows
 ) {
     const size_t token = blockIdx.x / LFM2_NUM_KV_HEADS;
     const uint32_t kv_head = blockIdx.x % LFM2_NUM_KV_HEADS;
-    if (token >= num_tokens) {
+    if (token >= num_tokens || block_table_stride == 0) {
         return;
     }
+
+    size_t table_row = 0;
+    if constexpr (RAGGED) {
+        table_row = static_cast<size_t>(request_slots[token]);
+        if (table_row >= block_table_rows) {
+            return;
+        }
+    }
+    const uint32_t* __restrict__ block_table =
+        block_tables + table_row * block_table_stride;
 
     const uint32_t position = position_ids[token];
-    if (position >= block_table_length * PAGE_SIZE) {
+    if (static_cast<size_t>(position) >= block_table_stride * PAGE_SIZE) {
         return;
     }
 
-    const size_t last_page = position / PAGE_SIZE;
-    const size_t first_physical_page = block_table[0];
+    const size_t last_page = static_cast<size_t>(position) / PAGE_SIZE;
+    const size_t first_physical_page = static_cast<size_t>(block_table[0]);
     if (first_physical_page >= num_pages) {
         return;
     }
@@ -141,7 +144,7 @@ __device__ __forceinline__ void paged_gqa_lfm2_bf16_async_body(
         const bool has_next = page < last_page;
 
         if (has_next) {
-            const size_t next_physical_page = block_table[page + 1];
+            const size_t next_physical_page = static_cast<size_t>(block_table[page + 1]);
             if (next_physical_page >= num_pages) {
                 return;
             }
@@ -213,16 +216,18 @@ void paged_gqa_lfm2_bf16_async_ps16(
     size_t num_pages,
     size_t block_table_length
 ) {
-    paged_gqa_lfm2_bf16_async_body<16>(
+    paged_gqa_lfm2_bf16_async_body<16, false>(
         query,
         key_cache,
         value_cache,
         block_table,
+        nullptr,
         position_ids,
         output,
         num_tokens,
         num_pages,
-        block_table_length
+        block_table_length,
+        1
     );
 }
 
@@ -239,15 +244,77 @@ void paged_gqa_lfm2_bf16_async_ps32(
     size_t num_pages,
     size_t block_table_length
 ) {
-    paged_gqa_lfm2_bf16_async_body<32>(
+    paged_gqa_lfm2_bf16_async_body<32, false>(
         query,
         key_cache,
         value_cache,
         block_table,
+        nullptr,
         position_ids,
         output,
         num_tokens,
         num_pages,
-        block_table_length
+        block_table_length,
+        1
+    );
+}
+
+extern "C" __global__
+__launch_bounds__(ATTENTION_ASYNC_BLOCK_SIZE)
+void paged_ragged_gqa_lfm2_bf16_async_ps16(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ value_cache,
+    const uint32_t* __restrict__ block_tables,
+    const uint32_t* __restrict__ request_slots,
+    const uint32_t* __restrict__ position_ids,
+    __nv_bfloat16* __restrict__ output,
+    size_t num_tokens,
+    size_t num_pages,
+    size_t block_table_stride,
+    size_t block_table_rows
+) {
+    paged_gqa_lfm2_bf16_async_body<16, true>(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        request_slots,
+        position_ids,
+        output,
+        num_tokens,
+        num_pages,
+        block_table_stride,
+        block_table_rows
+    );
+}
+
+extern "C" __global__
+__launch_bounds__(ATTENTION_ASYNC_BLOCK_SIZE)
+void paged_ragged_gqa_lfm2_bf16_async_ps32(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ value_cache,
+    const uint32_t* __restrict__ block_tables,
+    const uint32_t* __restrict__ request_slots,
+    const uint32_t* __restrict__ position_ids,
+    __nv_bfloat16* __restrict__ output,
+    size_t num_tokens,
+    size_t num_pages,
+    size_t block_table_stride,
+    size_t block_table_rows
+) {
+    paged_gqa_lfm2_bf16_async_body<32, true>(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        request_slots,
+        position_ids,
+        output,
+        num_tokens,
+        num_pages,
+        block_table_stride,
+        block_table_rows
     );
 }
