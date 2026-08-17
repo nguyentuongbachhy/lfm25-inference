@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod attention;
+#[cfg(test)]
 mod attention_async;
 mod attention_async_fast;
 mod attention_fused;
@@ -28,7 +29,9 @@ mod short_conv;
 mod silu_mul;
 
 pub use attention::{hybrid_ragged_attention_lfm2_bf16, prefill_attention_lfm2_bf16};
+#[cfg(test)]
 pub use attention_async::paged_attention_lfm2_bf16;
+#[cfg(test)]
 pub(crate) use attention_async::paged_ragged_attention_lfm2_bf16;
 pub(crate) use attention_async_fast::{
     paged_attention_fast_lfm2_bf16, paged_ragged_attention_fast_lfm2_bf16,
