@@ -1,5 +1,7 @@
 mod attention;
 mod attention_async;
+#[cfg(test)]
+mod attention_regression_tests;
 mod embedding;
 mod gather;
 mod linear;
