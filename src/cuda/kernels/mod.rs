@@ -9,7 +9,6 @@ mod gather;
 mod kernel_set;
 mod kv_cache;
 mod qk_postprocess;
-mod residual;
 mod rms_norm;
 mod rope;
 mod sampling;
@@ -32,7 +31,6 @@ use gather::GatherKernels;
 use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
 use qk_postprocess::QkPostprocessKernels;
-use residual::ResidualKernels;
 use rms_norm::RmsNormKernels;
 use rope::RopeKernels;
 use sampling::SamplingKernels;
@@ -40,8 +38,6 @@ use short_conv::ShortConvKernels;
 use silu_mul::SiluMulKernels;
 
 pub(crate) struct Kernels {
-    #[allow(dead_code)]
-    residual: ResidualKernels,
     embedding: EmbeddingKernels,
     rms_norm: RmsNormKernels,
     silu_mul: SiluMulKernels,
@@ -62,7 +58,6 @@ pub(crate) struct Kernels {
 impl Kernels {
     pub(crate) fn load(context: &Arc<CudaContext>) -> Result<Self> {
         Ok(Self {
-            residual: ResidualKernels::load(context)?,
             embedding: EmbeddingKernels::load(context)?,
             rms_norm: RmsNormKernels::load(context)?,
             silu_mul: SiluMulKernels::load(context)?,
@@ -79,11 +74,6 @@ impl Kernels {
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
             gather: GatherKernels::load(context)?,
         })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn residual(&self) -> &ResidualKernels {
-        &self.residual
     }
 
     pub(crate) fn embedding(&self) -> &EmbeddingKernels {
