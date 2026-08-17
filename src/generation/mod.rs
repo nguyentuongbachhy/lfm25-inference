@@ -1,3 +1,3 @@
 mod sampler;
 
-pub use sampler::{Sampler, SamplingConfig};
+pub use sampler::{DEFAULT_SAMPLING_SEED, Sampler, SamplingConfig};
