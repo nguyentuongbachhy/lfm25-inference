@@ -34,10 +34,14 @@ use kernel_set::KernelSet;
 pub(crate) use kv_cache::KvCacheWriteLaunch;
 use kv_cache::KvCacheKernels;
 use qk_postprocess::QkPostprocessKernels;
+pub(crate) use rms_norm::{ResidualRmsNormLaunch, RmsNormLaunch};
 use rms_norm::RmsNormKernels;
 pub(crate) use rope::RopeLaunch;
 use rope::RopeKernels;
 use sampling::SamplingKernels;
+pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch};
+#[cfg(test)]
+pub(crate) use short_conv::RaggedShortConvLaunch;
 use short_conv::ShortConvKernels;
 use silu_mul::SiluMulKernels;
 
