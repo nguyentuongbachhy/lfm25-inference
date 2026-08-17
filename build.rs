@@ -77,25 +77,9 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
                     )?;
                     cache.write_lfm2(runtime, &key, &value, slots)
                 } else {
-                    Ok(())
-                }
-            },"#;
-
-    const SINGLE_ATTN_REFERENCE: &str = r#"            || {
-                if contiguous_prefill {
-                    ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)
-                } else {
-                    ops::paged_attention_lfm2_bf16(runtime, &query, cache, positions)
-                }
-            },"#;
-
-    const SINGLE_ATTN_MOK: &str = r#"            || {
-                if contiguous_prefill {
-                    ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)
-                } else {
-                    ops::fused_paged_attention_decode_lfm2_bf16(
+                    ops::qk_norm_rope_kv_write_decode_bf16(
                         runtime,
-                        &query,
+                        &mut query,
                         &key,
                         &value,
                         &weights.query_norm,
@@ -136,21 +120,27 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
     const BATCH_MOK: &str = r#"        let decode_only = metadata.segment_slots().numel() == num_tokens
             && metadata.segment_offsets().numel() == num_tokens + 1;
         let attended = if decode_only {
-            ops::fused_ragged_paged_attention_decode_lfm2_bf16(
+            ops::qk_norm_rope_kv_write_arena_decode_bf16(
                 runtime,
-                &query,
+                &mut query,
                 &key,
                 &value,
                 &weights.query_norm,
                 &weights.key_norm,
                 &self.inv_freq,
-                metadata.block_tables(),
-                metadata.block_table_stride(),
-                metadata.request_slots(),
                 metadata.positions(),
                 metadata.physical_slots(),
                 arena,
                 self.config.norm_eps,
+            )?;
+            ops::paged_ragged_attention_lfm2_bf16(
+                runtime,
+                &query,
+                arena,
+                metadata.block_tables(),
+                metadata.block_table_stride(),
+                metadata.request_slots(),
+                metadata.positions(),
             )?
         } else {
             query = ops::rms_norm_bf16(
@@ -193,12 +183,6 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
         SINGLE_REFERENCE,
         SINGLE_MOK,
         "single-request attention postprocess",
-    );
-    replace_once(
-        &mut source,
-        SINGLE_ATTN_REFERENCE,
-        SINGLE_ATTN_MOK,
-        "single-request fused attention",
     );
     replace_once(
         &mut source,
