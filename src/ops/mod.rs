@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod attention;
 mod attention_async;
 #[cfg(test)]
