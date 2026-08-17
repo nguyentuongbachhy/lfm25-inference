@@ -28,8 +28,10 @@ use attention_fused::FusedAttentionKernels;
 pub(crate) use embedding::EmbeddingLaunch;
 use embedding::EmbeddingKernels;
 use fp8_quantize::Fp8QuantizeKernels;
+pub(crate) use gather::GatherLaunch;
 use gather::GatherKernels;
 use kernel_set::KernelSet;
+pub(crate) use kv_cache::KvCacheWriteLaunch;
 use kv_cache::KvCacheKernels;
 use qk_postprocess::QkPostprocessKernels;
 use rms_norm::RmsNormKernels;
@@ -78,62 +80,23 @@ impl Kernels {
         })
     }
 
-    pub(crate) fn embedding(&self) -> &EmbeddingKernels {
-        &self.embedding
-    }
-
-    pub(crate) fn rms_norm(&self) -> &RmsNormKernels {
-        &self.rms_norm
-    }
-
-    pub(crate) fn silu_mul(&self) -> &SiluMulKernels {
-        &self.silu_mul
-    }
-
-    pub(crate) fn rope(&self) -> &RopeKernels {
-        &self.rope
-    }
-
-    pub(crate) fn kv_cache(&self) -> &KvCacheKernels {
-        &self.kv_cache
-    }
-
-    pub(crate) fn attention(&self) -> &AttentionKernels {
-        &self.attention
-    }
+    pub(crate) fn embedding(&self) -> &EmbeddingKernels { &self.embedding }
+    pub(crate) fn rms_norm(&self) -> &RmsNormKernels { &self.rms_norm }
+    pub(crate) fn silu_mul(&self) -> &SiluMulKernels { &self.silu_mul }
+    pub(crate) fn rope(&self) -> &RopeKernels { &self.rope }
+    pub(crate) fn kv_cache(&self) -> &KvCacheKernels { &self.kv_cache }
+    pub(crate) fn attention(&self) -> &AttentionKernels { &self.attention }
 
     #[cfg(test)]
-    pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
-        &self.attention_async
-    }
+    pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels { &self.attention_async }
 
-    pub(crate) fn attention_async_fast(&self) -> &AsyncAttentionFastKernels {
-        &self.attention_async_fast
-    }
-
-    pub(crate) fn attention_fused(&self) -> &FusedAttentionKernels {
-        &self.attention_fused
-    }
-
-    pub(crate) fn qk_postprocess(&self) -> &QkPostprocessKernels {
-        &self.qk_postprocess
-    }
-
-    pub(crate) fn short_conv(&self) -> &ShortConvKernels {
-        &self.short_conv
-    }
-
-    pub(crate) fn sampling(&self) -> &SamplingKernels {
-        &self.sampling
-    }
-
-    pub(crate) fn fp8_quantize(&self) -> &Fp8QuantizeKernels {
-        &self.fp8_quantize
-    }
-
-    pub(crate) fn gather(&self) -> &GatherKernels {
-        &self.gather
-    }
+    pub(crate) fn attention_async_fast(&self) -> &AsyncAttentionFastKernels { &self.attention_async_fast }
+    pub(crate) fn attention_fused(&self) -> &FusedAttentionKernels { &self.attention_fused }
+    pub(crate) fn qk_postprocess(&self) -> &QkPostprocessKernels { &self.qk_postprocess }
+    pub(crate) fn short_conv(&self) -> &ShortConvKernels { &self.short_conv }
+    pub(crate) fn sampling(&self) -> &SamplingKernels { &self.sampling }
+    pub(crate) fn fp8_quantize(&self) -> &Fp8QuantizeKernels { &self.fp8_quantize }
+    pub(crate) fn gather(&self) -> &GatherKernels { &self.gather }
 }
 
 #[cfg(test)]
