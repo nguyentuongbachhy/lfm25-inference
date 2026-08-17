@@ -94,3 +94,117 @@ pub(crate) fn paged_ragged_attention_lfm2_bf16(
     }
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use crate::{
+        cache::KvPageSize,
+        cuda::testing::{assert_close_bf16, readback},
+        ops::attention::paged_ragged_attention_lfm2_bf16 as paged_ragged_sync,
+    };
+
+    use super::*;
+
+    fn check_ragged_matches_sync(page_size: KvPageSize) -> Result<()> {
+        let runtime = CudaRuntime::new(0)?;
+        const CONTEXT: usize = 33;
+        const REQUESTS: usize = 2;
+        let page = page_size.value();
+        let pages_per_request = CONTEXT.div_ceil(page);
+        let total_pages = REQUESTS * pages_per_request;
+
+        let mut block_tables_host = Vec::with_capacity(total_pages);
+        for request in 0..REQUESTS {
+            let base = request * pages_per_request;
+            for logical in 0..pages_per_request {
+                block_tables_host.push(u32::try_from(base + pages_per_request - 1 - logical)?);
+            }
+        }
+
+        let mut physical_slots_host = Vec::with_capacity(REQUESTS * CONTEXT);
+        for request in 0..REQUESTS {
+            for position in 0..CONTEXT {
+                let logical_page = position / page;
+                let offset = position % page;
+                let table_index = request * pages_per_request + logical_page;
+                let physical_page = usize::try_from(block_tables_host[table_index])?;
+                physical_slots_host.push(i64::try_from(physical_page * page + offset)?);
+            }
+        }
+
+        let key_host: Vec<bf16> = (0..REQUESTS * CONTEXT * 8 * 64)
+            .map(|index| bf16::from_f32(((index * 13 % 89) as f32 - 44.0) / 64.0))
+            .collect();
+        let value_host: Vec<bf16> = (0..REQUESTS * CONTEXT * 8 * 64)
+            .map(|index| bf16::from_f32(((index * 7 % 79) as f32 - 39.0) / 32.0))
+            .collect();
+        let query_host: Vec<bf16> = (0..REQUESTS * 32 * 64)
+            .map(|index| bf16::from_f32(((index * 17 % 101) as f32 - 50.0) / 64.0))
+            .collect();
+
+        let key = runtime.upload(
+            &key_host,
+            Shape::new([REQUESTS * CONTEXT, 8, 64]),
+        )?;
+        let value = runtime.upload(
+            &value_host,
+            Shape::new([REQUESTS * CONTEXT, 8, 64]),
+        )?;
+        let physical_slots = runtime.upload(
+            &physical_slots_host,
+            Shape::new([REQUESTS * CONTEXT]),
+        )?;
+        let mut arena = PagedKvArena::new(&runtime, total_pages, page_size)?;
+        arena.write_lfm2(&runtime, &key, &value, &physical_slots)?;
+
+        let query = runtime.upload(&query_host, Shape::new([REQUESTS, 32, 64]))?;
+        let block_tables = runtime.upload(
+            &block_tables_host,
+            Shape::new([REQUESTS, pages_per_request]),
+        )?;
+        let request_slots = runtime.upload(&[0u32, 1], Shape::new([REQUESTS]))?;
+        let positions = runtime.upload(
+            &[u32::try_from(CONTEXT - 1)?, u32::try_from(CONTEXT - 1)?],
+            Shape::new([REQUESTS]),
+        )?;
+
+        let reference = paged_ragged_sync(
+            &runtime,
+            &query,
+            &arena,
+            &block_tables,
+            pages_per_request,
+            &request_slots,
+            &positions,
+        )?;
+        let candidate = paged_ragged_attention_lfm2_bf16(
+            &runtime,
+            &query,
+            &arena,
+            &block_tables,
+            pages_per_request,
+            &request_slots,
+            &positions,
+        )?;
+
+        assert_close_bf16(
+            &readback(&runtime, &candidate)?,
+            &readback(&runtime, &reference)?,
+            0.03,
+            0.02,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn async_ragged_paged_attention_ps16_matches_sync() -> Result<()> {
+        check_ragged_matches_sync(KvPageSize::P16)
+    }
+
+    #[test]
+    fn async_ragged_paged_attention_ps32_matches_sync() -> Result<()> {
+        check_ragged_matches_sync(KvPageSize::P32)
+    }
+}
