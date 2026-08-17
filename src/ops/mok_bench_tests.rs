@@ -96,7 +96,7 @@ fn bench_mok_paged_attention_paired_ab() -> Result<()> {
             )?;
 
             println!(
-                "mok_attention page_size={} context={} sync_mean={:.3}us sync_p50={:.3}us sync_p95={:.3}us async_mean={:.3}us async_p50={:.3}us async_p95={:.3}us paired_speedup_mean={:.4}x paired_speedup_p50={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
+                "mok_attention page_size={} context={} sync_mean={:.3}us sync_p50={:.3}us sync_p95={:.3}us async_mean={:.3}us async_p50={:.3}us async_p95={:.3}us paired_speedup_mean={:.4}x paired_speedup_p50={:.4}x paired_speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
                 page_size.value(),
                 sequence_length,
                 paired.reference.mean_us,
@@ -107,6 +107,7 @@ fn bench_mok_paged_attention_paired_ab() -> Result<()> {
                 paired.candidate.p95_us,
                 paired.speedup_mean,
                 paired.speedup_p50,
+                paired.speedup_p95,
                 paired.speedup_min,
                 paired.speedup_max,
             );
@@ -191,7 +192,7 @@ fn bench_mok_qk_postprocess_paired_ab() -> Result<()> {
         )?;
 
         println!(
-            "mok_qk_postprocess page_size={} reference_mean={:.3}us reference_p50={:.3}us reference_p95={:.3}us fused_mean={:.3}us fused_p50={:.3}us fused_p95={:.3}us paired_speedup_mean={:.4}x paired_speedup_p50={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
+            "mok_qk_postprocess page_size={} reference_mean={:.3}us reference_p50={:.3}us reference_p95={:.3}us fused_mean={:.3}us fused_p50={:.3}us fused_p95={:.3}us paired_speedup_mean={:.4}x paired_speedup_p50={:.4}x paired_speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
             page_size.value(),
             paired.reference.mean_us,
             paired.reference.p50_us,
@@ -201,6 +202,7 @@ fn bench_mok_qk_postprocess_paired_ab() -> Result<()> {
             paired.candidate.p95_us,
             paired.speedup_mean,
             paired.speedup_p50,
+            paired.speedup_p95,
             paired.speedup_min,
             paired.speedup_max,
         );
