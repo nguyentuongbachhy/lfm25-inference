@@ -197,10 +197,10 @@ async fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>
     );
     let mut content_length = 0usize;
     for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().context("invalid Content-Length")?;
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse().context("invalid Content-Length")?;
         }
     }
     ensure!(content_length <= MAX_BODY_BYTES, "HTTP body is too large");
