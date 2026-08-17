@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     engine::{Engine, PreparedRequest, ServingHandle, ServingOwnerReport},
-    generation::SamplingConfig,
+    generation::{DEFAULT_SAMPLING_SEED, SamplingConfig},
     scheduler::HardwareCostModel,
 };
 
@@ -187,7 +187,7 @@ async fn run_poisson_scenario(
     let mut receivers = Vec::with_capacity(prompt_lengths.len());
     let mut arrivals = ArrivalSchedule::new(ArrivalPattern::Poisson {
         requests_per_second,
-        seed: 0x4c_46_4d_32,
+        seed: DEFAULT_SAMPLING_SEED,
     })?;
     let mut previous_us = 0u64;
     for &prompt_tokens in prompt_lengths {
