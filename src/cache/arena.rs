@@ -45,6 +45,10 @@ impl PagedKvArena {
         &self.value
     }
 
+    pub(crate) fn kv_mut(&mut self) -> (&mut Tensor<bf16>, &mut Tensor<bf16>) {
+        (&mut self.key, &mut self.value)
+    }
+
     pub fn write_lfm2(
         &mut self,
         runtime: &CudaRuntime,

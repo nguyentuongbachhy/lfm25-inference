@@ -1,9 +1,14 @@
 mod attention;
+#[cfg(test)]
+mod attention_async;
+mod attention_async_fast;
+mod attention_fused;
 mod embedding;
 mod fp8_quantize;
 mod gather;
 mod kernel_set;
 mod kv_cache;
+mod qk_postprocess;
 mod residual;
 mod rms_norm;
 mod rope;
@@ -17,11 +22,16 @@ use anyhow::Result;
 use cudarc::driver::CudaContext;
 
 use attention::AttentionKernels;
+#[cfg(test)]
+use attention_async::AsyncAttentionKernels;
+use attention_async_fast::AsyncAttentionFastKernels;
+use attention_fused::FusedAttentionKernels;
 use embedding::EmbeddingKernels;
 use fp8_quantize::Fp8QuantizeKernels;
 use gather::GatherKernels;
 use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
+use qk_postprocess::QkPostprocessKernels;
 use residual::ResidualKernels;
 use rms_norm::RmsNormKernels;
 use rope::RopeKernels;
@@ -38,6 +48,11 @@ pub(crate) struct Kernels {
     rope: RopeKernels,
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
+    #[cfg(test)]
+    attention_async: AsyncAttentionKernels,
+    attention_async_fast: AsyncAttentionFastKernels,
+    attention_fused: FusedAttentionKernels,
+    qk_postprocess: QkPostprocessKernels,
     short_conv: ShortConvKernels,
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
@@ -54,6 +69,11 @@ impl Kernels {
             rope: RopeKernels::load(context)?,
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
+            #[cfg(test)]
+            attention_async: AsyncAttentionKernels::load(context)?,
+            attention_async_fast: AsyncAttentionFastKernels::load(context)?,
+            attention_fused: FusedAttentionKernels::load(context)?,
+            qk_postprocess: QkPostprocessKernels::load(context)?,
             short_conv: ShortConvKernels::load(context)?,
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
@@ -85,12 +105,32 @@ impl Kernels {
     pub(crate) fn kv_cache(&self) -> &KvCacheKernels {
         &self.kv_cache
     }
+
     pub(crate) fn attention(&self) -> &AttentionKernels {
         &self.attention
     }
+
+    #[cfg(test)]
+    pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
+        &self.attention_async
+    }
+
+    pub(crate) fn attention_async_fast(&self) -> &AsyncAttentionFastKernels {
+        &self.attention_async_fast
+    }
+
+    pub(crate) fn attention_fused(&self) -> &FusedAttentionKernels {
+        &self.attention_fused
+    }
+
+    pub(crate) fn qk_postprocess(&self) -> &QkPostprocessKernels {
+        &self.qk_postprocess
+    }
+
     pub(crate) fn short_conv(&self) -> &ShortConvKernels {
         &self.short_conv
     }
+
     pub(crate) fn sampling(&self) -> &SamplingKernels {
         &self.sampling
     }
@@ -98,6 +138,7 @@ impl Kernels {
     pub(crate) fn fp8_quantize(&self) -> &Fp8QuantizeKernels {
         &self.fp8_quantize
     }
+
     pub(crate) fn gather(&self) -> &GatherKernels {
         &self.gather
     }

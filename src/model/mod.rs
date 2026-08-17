@@ -1,7 +1,9 @@
 mod calibration;
 mod evaluation;
 mod fp8_analysis;
-mod lfm2;
+mod lfm2 {
+    include!(concat!(env!("OUT_DIR"), "/lfm2_mok.rs"));
+}
 mod profile;
 pub(crate) mod quantization;
 
