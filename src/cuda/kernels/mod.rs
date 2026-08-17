@@ -32,6 +32,7 @@ use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
 use qk_postprocess::QkPostprocessKernels;
 use rms_norm::RmsNormKernels;
+pub(crate) use rope::RopeLaunch;
 use rope::RopeKernels;
 use sampling::SamplingKernels;
 use short_conv::ShortConvKernels;
