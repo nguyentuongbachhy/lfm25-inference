@@ -7,6 +7,38 @@ pub enum RequestPhase {
     Decoding,
 }
 
+pub struct RequestInit<'a> {
+    request_id: u64,
+    prompt: &'a [u32],
+    maximum_tokens: usize,
+    now_us: u64,
+    ttft_slo_us: u64,
+    tpot_slo_us: u64,
+    reserved_pages: usize,
+}
+
+impl<'a> RequestInit<'a> {
+    pub fn new(
+        request_id: u64,
+        prompt: &'a [u32],
+        maximum_tokens: usize,
+        now_us: u64,
+        ttft_slo_us: u64,
+        tpot_slo_us: u64,
+        reserved_pages: usize,
+    ) -> Self {
+        Self {
+            request_id,
+            prompt,
+            maximum_tokens,
+            now_us,
+            ttft_slo_us,
+            tpot_slo_us,
+            reserved_pages,
+        }
+    }
+}
+
 pub struct SequenceRequest {
     pub request_id: u64,
     pub phase: RequestPhase,
@@ -36,33 +68,25 @@ impl SequenceRequest {
         }
     }
 
-    pub fn initialize(
-        &mut self,
-        request_id: u64,
-        prompt: &[u32],
-        maximum_tokens: usize,
-        now_us: u64,
-        ttft_slo_us: u64,
-        tpot_slo_us: u64,
-        reserved_pages: usize,
-    ) -> Result<()> {
+    pub fn initialize(&mut self, init: RequestInit<'_>) -> Result<()> {
         ensure!(self.phase == RequestPhase::Free, "request slot is not free");
-        ensure!(!prompt.is_empty(), "request prompt is empty");
+        ensure!(!init.prompt.is_empty(), "request prompt is empty");
         ensure!(
-            maximum_tokens >= prompt.len() && maximum_tokens <= self.tokens.capacity(),
+            init.maximum_tokens >= init.prompt.len()
+                && init.maximum_tokens <= self.tokens.capacity(),
             "request exceeds fixed token capacity"
         );
         self.tokens.clear();
-        self.tokens.extend_from_slice(prompt);
-        self.request_id = request_id;
+        self.tokens.extend_from_slice(init.prompt);
+        self.request_id = init.request_id;
         self.phase = RequestPhase::QueuedPrefill;
-        self.arrival_us = now_us;
-        self.first_token_deadline_us = now_us.saturating_add(ttft_slo_us);
-        self.next_token_deadline_us = now_us.saturating_add(tpot_slo_us);
-        self.prompt_len = prompt.len();
+        self.arrival_us = init.now_us;
+        self.first_token_deadline_us = init.now_us.saturating_add(init.ttft_slo_us);
+        self.next_token_deadline_us = init.now_us.saturating_add(init.tpot_slo_us);
+        self.prompt_len = init.prompt.len();
         self.prefilled = 0;
-        self.maximum_tokens = maximum_tokens;
-        self.reserved_pages = reserved_pages;
+        self.maximum_tokens = init.maximum_tokens;
+        self.reserved_pages = init.reserved_pages;
         Ok(())
     }
 
