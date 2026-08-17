@@ -40,6 +40,30 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
         panic!("failed to read {}: {error}", source_path.display())
     });
 
+    const SINGLE_CALL_CALIBRATION_REFERENCE: &str = r#"                                    &positions,
+                                    contiguous_prefill,
+                                    None,"#;
+    const SINGLE_CALL_CALIBRATION_MOK: &str = r#"                                    &positions,
+                                    contiguous_prefill,
+                                    next_sequence_length,
+                                    None,"#;
+
+    const SINGLE_CALL_PROFILE_REFERENCE: &str = r#"                            &positions,
+                            contiguous_prefill,
+                            profile.as_deref_mut(),"#;
+    const SINGLE_CALL_PROFILE_MOK: &str = r#"                            &positions,
+                            contiguous_prefill,
+                            next_sequence_length,
+                            profile.as_deref_mut(),"#;
+
+    const SINGLE_SIGNATURE_REFERENCE: &str = r#"        positions: &Tensor<u32>,
+        contiguous_prefill: bool,
+        mut profile: Option<&mut ModelProfileRecorder>,"#;
+    const SINGLE_SIGNATURE_MOK: &str = r#"        positions: &Tensor<u32>,
+        contiguous_prefill: bool,
+        context_tokens: usize,
+        mut profile: Option<&mut ModelProfileRecorder>,"#;
+
     const SINGLE_REFERENCE: &str = r#"            || {
                 query =
                     ops::rms_norm_bf16(runtime, &query, &weights.query_norm, self.config.norm_eps)?;
@@ -76,6 +100,12 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
                         positions,
                     )?;
                     cache.write_lfm2(runtime, &key, &value, slots)
+                } else if ops::should_use_mok_one_kernel(
+                    cache.page_size().value(),
+                    context_tokens,
+                    1,
+                ) {
+                    Ok(())
                 } else {
                     ops::qk_norm_rope_kv_write_decode_bf16(
                         runtime,
@@ -90,6 +120,40 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
                         cache,
                         self.config.norm_eps,
                     )
+                }
+            },"#;
+
+    const SINGLE_ATTN_REFERENCE: &str = r#"            || {
+                if contiguous_prefill {
+                    ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)
+                } else {
+                    ops::paged_attention_lfm2_bf16(runtime, &query, cache, positions)
+                }
+            },"#;
+
+    const SINGLE_ATTN_MOK: &str = r#"            || {
+                if contiguous_prefill {
+                    ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)
+                } else if ops::should_use_mok_one_kernel(
+                    cache.page_size().value(),
+                    context_tokens,
+                    1,
+                ) {
+                    ops::fused_paged_attention_decode_lfm2_bf16(
+                        runtime,
+                        &query,
+                        &key,
+                        &value,
+                        &weights.query_norm,
+                        &weights.key_norm,
+                        &self.inv_freq,
+                        positions,
+                        slots,
+                        cache,
+                        self.config.norm_eps,
+                    )
+                } else {
+                    ops::paged_attention_fast_lfm2_bf16(runtime, &query, cache, positions)
                 }
             },"#;
 
@@ -119,7 +183,30 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
 
     const BATCH_MOK: &str = r#"        let decode_only = metadata.segment_slots().numel() == num_tokens
             && metadata.segment_offsets().numel() == num_tokens + 1;
-        let attended = if decode_only {
+        let one_kernel_decode = decode_only
+            && ops::should_use_mok_one_kernel(
+                arena.page_size().value(),
+                metadata.max_context_tokens(),
+                num_tokens,
+            );
+        let attended = if one_kernel_decode {
+            ops::fused_ragged_paged_attention_decode_lfm2_bf16(
+                runtime,
+                &query,
+                &key,
+                &value,
+                &weights.query_norm,
+                &weights.key_norm,
+                &self.inv_freq,
+                metadata.block_tables(),
+                metadata.block_table_stride(),
+                metadata.request_slots(),
+                metadata.positions(),
+                metadata.physical_slots(),
+                arena,
+                self.config.norm_eps,
+            )?
+        } else if decode_only {
             ops::qk_norm_rope_kv_write_arena_decode_bf16(
                 runtime,
                 &mut query,
@@ -133,7 +220,7 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
                 arena,
                 self.config.norm_eps,
             )?;
-            ops::paged_ragged_attention_lfm2_bf16(
+            ops::paged_ragged_attention_fast_lfm2_bf16(
                 runtime,
                 &query,
                 arena,
@@ -180,15 +267,39 @@ fn generate_mok_lfm2(manifest_dir: &Path, out_dir: &Path) {
 
     replace_once(
         &mut source,
+        SINGLE_CALL_CALIBRATION_REFERENCE,
+        SINGLE_CALL_CALIBRATION_MOK,
+        "single-request calibration attention call",
+    );
+    replace_once(
+        &mut source,
+        SINGLE_CALL_PROFILE_REFERENCE,
+        SINGLE_CALL_PROFILE_MOK,
+        "single-request profiled attention call",
+    );
+    replace_once(
+        &mut source,
+        SINGLE_SIGNATURE_REFERENCE,
+        SINGLE_SIGNATURE_MOK,
+        "single-request attention signature",
+    );
+    replace_once(
+        &mut source,
         SINGLE_REFERENCE,
         SINGLE_MOK,
         "single-request attention postprocess",
     );
     replace_once(
         &mut source,
+        SINGLE_ATTN_REFERENCE,
+        SINGLE_ATTN_MOK,
+        "single-request attention dispatch",
+    );
+    replace_once(
+        &mut source,
         BATCH_REFERENCE,
         BATCH_MOK,
-        "batched attention postprocess",
+        "batched attention dispatch",
     );
 
     let generated = out_dir.join("lfm2_mok.rs");
