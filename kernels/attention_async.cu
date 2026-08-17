@@ -89,7 +89,7 @@ __device__ __forceinline__ void paged_gqa_lfm2_bf16_async_body(
     }
 
     size_t table_row = 0;
-    if constexpr (RAGGED) {
+    if (RAGGED) {
         table_row = static_cast<size_t>(request_slots[token]);
         if (table_row >= block_table_rows) {
             return;
