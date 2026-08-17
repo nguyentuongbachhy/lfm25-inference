@@ -23,6 +23,8 @@ output projection
 
 Continuous decode batches use the same fused postprocess and an async ragged paged-GQA kernel. Mixed ragged steps that contain a multi-token prefill segment keep the existing hybrid reference path.
 
+The branch keeps `src/model/lfm2.rs` as the canonical source. `build.rs` generates the branch-local decode variant into `OUT_DIR` by replacing exactly two guarded integration points; the build fails if either reference pattern is missing or appears more than once.
+
 ## Correctness gate
 
 Run formatting/build checks first:
@@ -79,9 +81,9 @@ cargo test --release bench_mok_qk_postprocess_paired_ab -- \
 
 For both tests, `paired_speedup_mean > 1.0` means the MoK candidate is faster. Prefer the paired mean/median over comparing two unrelated process runs.
 
-## End-to-end serving A/B
+## End-to-end continuous-decode A/B
 
-Run the exact same serving benchmark on `main` and on `agent/mok-fused-attention`.
+The lightweight `--benchmark-serving` command currently covers batch sizes `1/2/4/8/16` at contexts `16` and `128`. Run the exact same command on `main` and on `agent/mok-fused-attention`.
 
 Reference:
 
@@ -101,7 +103,7 @@ cargo run --release -- \
   --page-size 16
 ```
 
-Repeat with page size 32 if it is a deployment candidate. Compare at least:
+Compare each matching point using:
 
 ```text
 step_mean_ms
@@ -109,9 +111,35 @@ step_p50_ms
 step_p95_ms
 output_tokens_per_second
 goodput_tokens_per_second
+bf16_pool_misses_after_warmup
+fp8_pool_misses_after_warmup
+identical_sequence_row_nrmse_max
+identical_sequence_top1_agreement
 ```
 
-Pay particular attention to contexts `512`, `2048`, and `8192`, where paged KV traffic is a larger fraction of TPOT.
+## Long-context continuous-decode A/B
+
+For contexts where async KV staging matters most, use the hardware benchmark. Its decode matrix covers batch sizes through 64 and contexts `128/512/2048/8192`.
+
+Reference:
+
+```bash
+git switch main
+cargo run --release -- \
+  --benchmark-hardware docs/serving/mok-main-hardware-ps16.json \
+  --page-size 16
+```
+
+Candidate:
+
+```bash
+git switch agent/mok-fused-attention
+cargo run --release -- \
+  --benchmark-hardware docs/serving/mok-branch-hardware-ps16.json \
+  --page-size 16
+```
+
+Compare `decode.points` at identical batch/context pairs, especially contexts `512`, `2048`, and `8192`. Repeat PS32 only if page size 32 is still a deployment candidate.
 
 ## Promotion gate
 
