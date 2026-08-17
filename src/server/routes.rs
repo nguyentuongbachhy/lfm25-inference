@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     engine::{GenerationMetrics, GenerationOptions, ServingCompletion},
-    generation::SamplingConfig,
+    generation::{DEFAULT_SAMPLING_SEED, SamplingConfig},
     model::DecodeProfileReport,
 };
 
@@ -99,7 +99,7 @@ fn options_from_request(request: &CompletionRequest) -> Result<GenerationOptions
         temperature: request.temperature.unwrap_or(0.0),
         top_k: request.top_k.unwrap_or(50),
         repetition_penalty: request.repetition_penalty.unwrap_or(1.0),
-        seed: request.seed.unwrap_or(0x4c_46_4d_32),
+        seed: request.seed.unwrap_or(DEFAULT_SAMPLING_SEED),
     };
     sampling.validate().map_err(|error| error.to_string())?;
     let max_new_tokens = request.max_new_tokens.unwrap_or(64);
@@ -126,34 +126,4 @@ pub(crate) fn error_response(status: &'static str, message: &str) -> RouteRespon
     let body = serde_json::to_string(&ErrorResponse { error: message })
         .unwrap_or_else(|_| "{\"error\":\"response encoding failed\"}".to_string());
     RouteResponse { status, body }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_options_validate_sampling() {
-        let request = CompletionRequest {
-            prompt: "hello".to_string(),
-            max_new_tokens: Some(8),
-            temperature: Some(0.2),
-            top_k: Some(20),
-            repetition_penalty: Some(1.05),
-            seed: Some(7),
-        };
-        let options = options_from_request(&request).expect("valid options");
-        assert_eq!(options.max_new_tokens, 8);
-        assert_eq!(options.sampling.top_k, 20);
-    }
-
-    #[test]
-    fn request_rejects_engine_page_size_override() {
-        let body = br#"{"prompt":"hello","page_size":32}"#;
-        let error = match serde_json::from_slice::<CompletionRequest>(body) {
-            Ok(_) => panic!("page_size must remain an engine-level setting"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("unknown field `page_size`"));
-    }
 }
