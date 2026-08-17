@@ -14,5 +14,6 @@ pub(crate) mod benchmark;
 pub(crate) mod testing;
 
 pub(crate) use blaslt::fp8::Fp8ScaleMode;
+pub(crate) use kernels::RopeLaunch;
 pub use runtime::CudaRuntime;
 pub(crate) use runtime::TimingEvent;
