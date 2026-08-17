@@ -100,6 +100,12 @@ impl PagedKvCache {
         (&mut self.key, &mut self.value)
     }
 
+    pub(crate) fn attention_parts_mut(
+        &mut self,
+    ) -> (&Tensor<u32>, &mut Tensor<bf16>, &mut Tensor<bf16>) {
+        (&self.block_table, &mut self.key, &mut self.value)
+    }
+
     pub fn write_lfm2(
         &mut self,
         runtime: &CudaRuntime,
