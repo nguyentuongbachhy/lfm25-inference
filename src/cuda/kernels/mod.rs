@@ -1,5 +1,6 @@
 mod attention;
 mod attention_async;
+mod attention_async_w4;
 mod attention_fused;
 mod embedding;
 mod fp8_quantize;
@@ -21,6 +22,7 @@ use cudarc::driver::CudaContext;
 
 use attention::AttentionKernels;
 use attention_async::AsyncAttentionKernels;
+use attention_async_w4::AsyncAttentionW4Kernels;
 use attention_fused::FusedAttentionKernels;
 use embedding::EmbeddingKernels;
 use fp8_quantize::Fp8QuantizeKernels;
@@ -45,6 +47,7 @@ pub(crate) struct Kernels {
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
     attention_async: AsyncAttentionKernels,
+    attention_async_w4: AsyncAttentionW4Kernels,
     attention_fused: FusedAttentionKernels,
     qk_postprocess: QkPostprocessKernels,
     short_conv: ShortConvKernels,
@@ -64,6 +67,7 @@ impl Kernels {
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
             attention_async: AsyncAttentionKernels::load(context)?,
+            attention_async_w4: AsyncAttentionW4Kernels::load(context)?,
             attention_fused: FusedAttentionKernels::load(context)?,
             qk_postprocess: QkPostprocessKernels::load(context)?,
             short_conv: ShortConvKernels::load(context)?,
@@ -104,6 +108,10 @@ impl Kernels {
 
     pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
         &self.attention_async
+    }
+
+    pub(crate) fn attention_async_w4(&self) -> &AsyncAttentionW4Kernels {
+        &self.attention_async_w4
     }
 
     pub(crate) fn attention_fused(&self) -> &FusedAttentionKernels {
