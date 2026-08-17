@@ -3,6 +3,8 @@ mod attention;
 mod attention_async;
 mod attention_fused;
 #[cfg(test)]
+mod attention_async_w4_tests;
+#[cfg(test)]
 mod attention_regression_tests;
 mod embedding;
 mod gather;
