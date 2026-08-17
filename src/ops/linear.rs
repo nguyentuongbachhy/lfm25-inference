@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use half::bf16;
 
 use crate::{
-    cuda::{CudaRuntime, Fp8ScaleMode},
+    cuda::{CudaRuntime, Fp8LinearConfig, Fp8ScaleMode},
     model::quantization::ScalarScale,
     tensor::{Shape, Tensor},
 };
@@ -58,17 +58,19 @@ pub(crate) fn linear_fp8_e4m3(
         )?;
     }
     let mut output = runtime.alloc_bf16(Shape::new(output_dims))?;
-    let output_scale = activation_scale.dequantize_multiplier * weight_scale.dequantize_multiplier;
     unsafe {
         runtime.blaslt().linear_fp8_scaled(
             quantized_input.storage(),
             weight.storage(),
             output.storage_mut(),
-            m,
-            n,
-            k,
-            Fp8ScaleMode::Tensorwide,
-            output_scale,
+            Fp8LinearConfig {
+                m,
+                n,
+                k,
+                scale_mode: Fp8ScaleMode::Tensorwide,
+                output_scale: activation_scale.dequantize_multiplier
+                    * weight_scale.dequantize_multiplier,
+            },
         )?;
     }
     Ok(output)
@@ -79,47 +81,32 @@ pub fn linear_bf16(
     x: &Tensor<bf16>,
     weight: &Tensor<bf16>,
 ) -> Result<Tensor<bf16>> {
-    ensure!(x.rank() >= 1, "linear input must have rank >= 1",);
-
+    ensure!(x.rank() >= 1, "linear input must have rank >= 1");
     ensure!(
         weight.rank() == 2,
         "linear weight must have rank 2, got {:?}",
-        weight.dims(),
+        weight.dims()
     );
-
-    ensure!(x.numel() > 0, "linear does not support empty input",);
-
-    ensure!(weight.numel() > 0, "linear does not support empty weight",);
-
+    ensure!(x.numel() > 0, "linear does not support empty input");
+    ensure!(weight.numel() > 0, "linear does not support empty weight");
     let k = x.dims()[x.rank() - 1];
-
     let n = weight.dims()[0];
-
     let weight_k = weight.dims()[1];
-
     ensure!(
         k == weight_k,
-        "linear dimension mismatch: \
-         input K={k}, weight={:?}",
-        weight.dims(),
+        "linear dimension mismatch: input K={k}, weight={:?}",
+        weight.dims()
     );
-
     let m = x.numel() / k;
-
     let mut output_dims = x.dims().to_vec();
-
     let last = output_dims.len() - 1;
-
     output_dims[last] = n;
-
     let mut out = runtime.alloc_bf16(Shape::new(output_dims))?;
-
     unsafe {
         runtime
             .blaslt()
             .linear_bf16(x.storage(), weight.storage(), out.storage_mut(), m, n, k)?;
     }
-
     Ok(out)
 }
 
@@ -138,7 +125,6 @@ pub fn linear_last_row_bf16(
         "linear_last_row weight must have rank 2, got {:?}",
         weight.dims()
     );
-
     let rows = x.dims()[0];
     let k = x.dims()[1];
     let n = weight.dims()[0];
@@ -151,7 +137,6 @@ pub fn linear_last_row_bf16(
         "linear_last_row dimension mismatch: input K={k}, weight={:?}",
         weight.dims()
     );
-
     let start = (rows - 1)
         .checked_mul(k)
         .ok_or_else(|| anyhow::anyhow!("linear_last_row offset overflow"))?;
@@ -163,7 +148,6 @@ pub fn linear_last_row_bf16(
         .try_slice(start..end)
         .ok_or_else(|| anyhow::anyhow!("linear_last_row storage range is invalid"))?;
     let mut out = runtime.alloc_bf16(Shape::new([1, n]))?;
-
     unsafe {
         runtime
             .blaslt()
@@ -214,11 +198,14 @@ pub(crate) fn linear_last_row_fp8_e4m3(
             quantized_input.storage(),
             weight.storage(),
             output.storage_mut(),
-            1,
-            n,
-            k,
-            Fp8ScaleMode::Tensorwide,
-            activation_scale.dequantize_multiplier * weight_scale.dequantize_multiplier,
+            Fp8LinearConfig {
+                m: 1,
+                n,
+                k,
+                scale_mode: Fp8ScaleMode::Tensorwide,
+                output_scale: activation_scale.dequantize_multiplier
+                    * weight_scale.dequantize_multiplier,
+            },
         )?;
     }
     Ok(output)
@@ -242,39 +229,25 @@ mod tests {
     #[test]
     fn linear_bf16_preserves_prefix_shape() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
-
         let x_host = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(bf16::from_f32);
-
         let weight_host = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0].map(bf16::from_f32);
-
         let x = runtime.upload(&x_host, Shape::new([2, 2, 2]))?;
-
         let weight = runtime.upload(&weight_host, Shape::new([3, 2]))?;
-
         let out = linear_bf16(&runtime, &x, &weight)?;
-
-        assert_eq!(out.dims(), &[2, 2, 3],);
-
-        let actual = readback(&runtime, &out)?;
-
+        assert_eq!(out.dims(), &[2, 2, 3]);
         let expected =
-            [1.0, 2.0, 3.0, 3.0, 4.0, 7.0, 5.0, 6.0, 11.0, 7.0, 8.0, 15.0].map(bf16::from_f32);
-
-        assert_close_bf16(&actual, &expected, 0.01, 0.01);
-
+            [1.0, 2.0, 3.0, 3.0, 4.0, 7.0, 5.0, 6.0, 11.0, 7.0, 8.0, 15.0]
+                .map(bf16::from_f32);
+        assert_close_bf16(&readback(&runtime, &out)?, &expected, 0.01, 0.01);
         Ok(())
     }
 
     #[test]
     fn linear_rejects_k_mismatch() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
-
         let x = runtime.upload(&[bf16::from_f32(1.0); 8], Shape::new([2, 4]))?;
-
         let weight = runtime.upload(&[bf16::from_f32(1.0); 15], Shape::new([3, 5]))?;
-
-        assert!(linear_bf16(&runtime, &x, &weight,).is_err());
-
+        assert!(linear_bf16(&runtime, &x, &weight).is_err());
         Ok(())
     }
 
@@ -289,7 +262,6 @@ mod tests {
             &[1.0, 0.0, 0.0, 1.0].map(bf16::from_f32),
             Shape::new([2, 2]),
         )?;
-
         let out = linear_last_row_bf16(&runtime, &x, &weight)?;
         assert_eq!(out.dims(), &[1, 2]);
         assert_close_bf16(

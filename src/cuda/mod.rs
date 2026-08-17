@@ -13,7 +13,7 @@ pub(crate) mod benchmark;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub(crate) use blaslt::fp8::Fp8ScaleMode;
+pub(crate) use blaslt::{Fp8LinearConfig, fp8::Fp8ScaleMode};
 pub(crate) use kernels::{EmbeddingLaunch, GatherLaunch, KvCacheWriteLaunch, RopeLaunch};
 pub use runtime::CudaRuntime;
 pub(crate) use runtime::TimingEvent;
