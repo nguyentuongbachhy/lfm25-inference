@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use cudarc::driver::DeviceRepr;
 use half::bf16;
 
@@ -8,10 +8,10 @@ pub(crate) fn readback<T>(runtime: &CudaRuntime, tensor: &Tensor<T>) -> Result<V
 where
     T: DeviceRepr,
 {
-    runtime
-        .stream()
-        .clone_dtoh(tensor.storage())
-        .context("failed to read GPU tensor back to host")
+    // Pooled tensors may have power-of-two backing storage larger than their
+    // logical shape. Reuse the production download path so tests observe only
+    // the logical tensor prefix instead of pool-capacity padding.
+    runtime.download(tensor)
 }
 
 pub(crate) fn assert_eq_bf16(actual: &[bf16], expected: &[bf16]) {
@@ -33,9 +33,7 @@ pub(crate) fn assert_close_bf16(actual: &[bf16], expected: &[bf16], atol: f32, r
 
     for (i, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
         let actual = actual.to_f32();
-
         let expected = expected.to_f32();
-
         let tolerance = atol + rtol * expected.abs();
 
         assert!(
