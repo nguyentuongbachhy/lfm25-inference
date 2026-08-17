@@ -1,5 +1,6 @@
 mod attention;
 mod attention_async;
+mod attention_async_oneexp;
 mod attention_async_w4;
 mod attention_fused;
 mod embedding;
@@ -22,6 +23,7 @@ use cudarc::driver::CudaContext;
 
 use attention::AttentionKernels;
 use attention_async::AsyncAttentionKernels;
+use attention_async_oneexp::AsyncAttentionOneExpKernels;
 use attention_async_w4::AsyncAttentionW4Kernels;
 use attention_fused::FusedAttentionKernels;
 use embedding::EmbeddingKernels;
@@ -47,6 +49,7 @@ pub(crate) struct Kernels {
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
     attention_async: AsyncAttentionKernels,
+    attention_async_oneexp: AsyncAttentionOneExpKernels,
     attention_async_w4: AsyncAttentionW4Kernels,
     attention_fused: FusedAttentionKernels,
     qk_postprocess: QkPostprocessKernels,
@@ -67,6 +70,7 @@ impl Kernels {
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
             attention_async: AsyncAttentionKernels::load(context)?,
+            attention_async_oneexp: AsyncAttentionOneExpKernels::load(context)?,
             attention_async_w4: AsyncAttentionW4Kernels::load(context)?,
             attention_fused: FusedAttentionKernels::load(context)?,
             qk_postprocess: QkPostprocessKernels::load(context)?,
@@ -108,6 +112,10 @@ impl Kernels {
 
     pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
         &self.attention_async
+    }
+
+    pub(crate) fn attention_async_oneexp(&self) -> &AsyncAttentionOneExpKernels {
+        &self.attention_async_oneexp
     }
 
     pub(crate) fn attention_async_w4(&self) -> &AsyncAttentionW4Kernels {
