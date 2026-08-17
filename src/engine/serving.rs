@@ -12,8 +12,8 @@ use crate::{
     generation::SamplingConfig,
     ops,
     scheduler::{
-        HardwareCostModel, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork, Scheduler,
-        SchedulerConfig,
+        HardwareCostModel, RequestInit, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork,
+        Scheduler, SchedulerConfig,
     },
 };
 
@@ -776,7 +776,7 @@ fn admit_request(
         return Ok(());
     }
     let reserved_pages = total.div_ceil(engine.config.kv_page_size.value());
-    slots.get_mut(slot)?.initialize(
+    slots.get_mut(slot)?.initialize(RequestInit::new(
         request.request_id,
         &request.token_ids,
         total,
@@ -784,7 +784,7 @@ fn admit_request(
         config.scheduler.ttft_slo_us,
         config.scheduler.tpot_slo_us,
         reserved_pages,
-    )?;
+    ))?;
     let state = &mut responses[slot.0 as usize];
     state.response = Some(request.response);
     state.arrived = request.arrived;
