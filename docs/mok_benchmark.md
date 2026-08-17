@@ -1,59 +1,94 @@
-# MoK-style fused attention benchmark gate
+# MoK decode optimization benchmark gate
 
 This document is specific to `agent/mok-fused-attention`.
 
-The branch changes decode only. Multi-token prefill keeps the existing reference RMSNorm/RoPE/hybrid-attention path so TTFT should not be interpreted as a target of this optimization.
+The branch changes decode only. Multi-token prefill keeps the existing RMSNorm/RoPE/hybrid-attention path, so TTFT is not the primary target of this work.
 
-## Integrated decode path
+## Final decode policy
 
-Single-request and decode-only ragged batches now use one fused CUDA kernel per paged-attention layer:
+The production decode path is selected from the measured `(page_size, context, batch)` region.
+
+### Short context: one-kernel fused path
 
 ```text
-raw Q / K / V projection outputs
-        |
-        v
-Q RMSNorm + K RMSNorm + RoPE
-        |
-        +--> current K/V paged-cache write
-        |
-        v
-cp.async double-buffered paged GQA
-        |
-        v
+raw Q / K / V
+    |
+    v
+Q/K RMSNorm + RoPE
+    |
+    +--> current K/V paged-cache write
+    |
+    v
+cp.async paged GQA
+    |
+    v
 attention output
 ```
 
-The one-kernel path keeps rounded Q in registers instead of materializing post-RoPE Q to global memory. The first cache page starts staging before Q/K postprocess. For a one-page context, the newly written current token is patched into the staged page after the asynchronous copy completes. Online softmax uses one `expf` per key token rather than the two-exp update used by the earlier async kernel.
+The one-kernel path avoids materializing post-RoPE Q to global memory and removes one CUDA launch. It is used only where paired ragged benchmarks showed a stable advantage.
 
-The previous two-kernel MoK path remains in the branch as the correctness/performance reference:
+### Medium/long context: two-kernel fast path
 
 ```text
-fused Q/K postprocess + KV write
-        |
-        v
-async paged attention
+fused Q/K RMSNorm + RoPE + KV write
+    |
+    v
+W8 / 256-thread cp.async paged attention
+    |
+    v
+branch-free online softmax with __expf
 ```
 
-Mixed ragged steps containing a multi-token prefill segment still use the existing hybrid reference path.
+This path keeps the 256-thread staging geometry and uses CUDA fast exponential without introducing the branchy one-exp recurrence.
 
-`src/model/lfm2.rs` remains the canonical source. `build.rs` generates the branch-local decode variant into `OUT_DIR` with guarded exact replacements; the build fails if an expected integration point is missing or duplicated.
+### Measured dispatch policy
+
+```text
+PS16:
+  context <= 16                    -> one-kernel
+  context <= 32 && batch <= 32     -> one-kernel
+  context <= 64 && batch <= 8      -> one-kernel
+  otherwise                         -> two-kernel fast
+
+PS32:
+  context <= 32 && batch <= 16     -> one-kernel
+  context <= 64 && batch <= 8      -> one-kernel
+  otherwise                         -> two-kernel fast
+```
+
+For ragged batches, `max_context_tokens` is derived from the host-side `positions` slice already supplied to `GpuBatch::update_step`; dispatch adds no D2H copy or synchronization.
+
+Mixed ragged steps containing multi-token prefill segments continue to use the existing hybrid reference path.
+
+`src/model/lfm2.rs` remains the canonical source. `build.rs` currently generates the branch-local MoK decode variant into `OUT_DIR` using guarded exact replacements; the build fails if an expected integration point is missing or duplicated. Flatten this generated integration into canonical `lfm2.rs` only after the final correctness/hardware gate.
+
+## Promoted components
+
+- fused Q/K RMSNorm + RoPE + KV write
+- W8 / 256-thread double-buffered `cp.async` paged attention
+- `__expf` fast exponential for the medium/long decode path
+- one-kernel fused decode for the measured short-context region
+- PS16 as the validated default deployment page size until final PS32 capacity/performance review
+
+## Rejected experiments
+
+These variants were removed from the source tree because paired benchmarks regressed materially:
+
+- W4 / 128-thread async attention: staging/overlap loss at medium and long context
+- branchy one-exp async attention: long-context regression despite fewer exponential calls
+- global one-kernel dispatch: strong short-context win but large regression from medium/long context onward
+
+The precise W8 async kernel remains only as a correctness/performance reference.
 
 ## Correctness gate
-
-Run formatting/build checks first:
 
 ```bash
 cargo fmt --check
 cargo check --release
-```
-
-Run the complete non-ignored test suite:
-
-```bash
 cargo test --release -- --test-threads=1
 ```
 
-Run MoK-specific gates explicitly:
+MoK-specific gates:
 
 ```bash
 cargo test --release paged_attention_async_matches_sync_page_boundaries -- \
@@ -70,104 +105,73 @@ cargo test --release fused_decode_attention -- \
 
 cargo test --release fused_ragged_decode_attention -- \
   --nocapture --test-threads=1
+
+cargo test --release async_w8_fast_exp -- \
+  --nocapture --test-threads=1
 ```
 
-The one-kernel single-request tests compare directly against the previous two-kernel MoK path across one-page and multi-page contexts for PS16 and PS32. They compare attention output plus K/V cache contents. The ragged tests use multiple requests with non-contiguous physical page mappings and compare the same outputs/cache state.
+The fused single-request tests compare against the proven two-kernel MoK path across page boundaries. Ragged tests include non-contiguous physical page mappings. Fast-exp tests use non-zero K/V data and compare against the precise W8 reference.
 
-## Order-balanced microbenchmarks
-
-All paired A/B benchmarks use balanced `AB/BA` order inside one process to reduce laptop boost-clock and power-state bias.
-
-Earlier async attention vs sync reference:
+## Retained paired benchmarks
 
 ```bash
 cargo test --release bench_mok_paged_attention_paired_ab -- \
   --ignored --nocapture --test-threads=1
-```
 
-Earlier fused Q/K postprocess vs multi-kernel reference:
-
-```bash
 cargo test --release bench_mok_qk_postprocess_paired_ab -- \
   --ignored --nocapture --test-threads=1
-```
 
-New decisive microbenchmark, previous two-kernel MoK vs one-kernel MoK:
+cargo test --release bench_mok_async_w8_fast_exp_paired_ab -- \
+  --ignored --nocapture --test-threads=1
 
-```bash
 cargo test --release bench_mok_one_kernel_decode_attention_paired_ab -- \
+  --ignored --nocapture --test-threads=1
+
+cargo test --release bench_mok_short_dispatch_ragged_paired_ab -- \
   --ignored --nocapture --test-threads=1
 ```
 
-It covers page sizes 16/32 and contexts:
+All paired A/B benchmarks use balanced AB/BA ordering in one process to reduce boost-clock and power-state bias.
 
-```text
-16, 32, 128, 512, 2048, 8192
-```
+## Final E2E gate
 
-`paired_speedup_mean > 1.0` means the one-kernel candidate is faster. Prefer paired mean/p50/p95 over comparing unrelated process runs.
-
-## End-to-end continuous-decode A/B
-
-The lightweight `--benchmark-serving` command covers batch sizes `1/2/4/8/16` at contexts `16` and `128`.
-
-Reference baseline should remain the saved `main` report. Re-run only if the machine/runtime state materially changed.
-
-Candidate:
+PS16 serving benchmark:
 
 ```bash
-git switch agent/mok-fused-attention
 cargo run --release -- \
-  --benchmark-serving docs/serving/mok-branch-one-kernel-ps16.json \
+  --benchmark-serving docs/serving/mok-branch-final-ps16.json \
   --page-size 16
 ```
 
-Compare matching points using:
-
-```text
-step_mean_ms
-step_p50_ms
-step_p95_ms
-output_tokens_per_second
-goodput_tokens_per_second
-bf16_pool_misses_after_warmup
-fp8_pool_misses_after_warmup
-identical_sequence_row_nrmse_max
-identical_sequence_top1_agreement
-```
-
-## Long-context continuous-decode A/B
-
-The hardware benchmark is the merge-deciding performance gate because it covers contexts `128/512/2048/8192` and batch sizes through 64 where capacity permits.
-
-Candidate:
+PS16 hardware benchmark:
 
 ```bash
-git switch agent/mok-fused-attention
 cargo run --release -- \
-  --benchmark-hardware docs/serving/mok-branch-one-kernel-hardware-ps16.json \
+  --benchmark-hardware docs/serving/mok-branch-final-hardware-ps16.json \
   --page-size 16
 ```
 
-Compare it against the saved `mok-main-hardware-ps16.json`, especially contexts `512`, `2048`, and `8192`.
+Compare against the saved `main` PS16 reports using matched points only. Prioritize:
 
-Run PS32 only after PS16 correctness and paired A/B pass:
-
-```bash
-cargo run --release -- \
-  --benchmark-hardware docs/serving/mok-branch-one-kernel-hardware-ps32.json \
-  --page-size 32
+```text
+correctness NRMSE / top1
+step mean / p50 / p95
+output throughput / goodput
+KV fragmentation and capacity
+pool misses / H2D counters
+prefill neutrality
 ```
+
+After PS16 passes, optionally repeat hardware validation for PS32 before deciding whether PS32 should ever become the default page size.
 
 ## Merge gate
 
-Before merging MoK into `main` require all of the following:
+Before merging into `main` require:
 
-1. Full non-ignored test suite passes.
-2. One-kernel fused single and ragged correctness tests pass on PS16 and PS32.
-3. One-kernel paired A/B is not materially slower at short context and improves medium/long contexts.
-4. Hardware E2E keeps or improves the already validated two-kernel MoK gains at `512/2048/8192`.
-5. No new pool misses, KV-capacity regressions, top-1 mismatches, or sequence-row numerical regressions appear.
-6. Prefill remains effectively neutral because it is not a target of this optimization.
-
-If the one-kernel path regresses short context but wins materially from a measured context threshold onward, keep the two-kernel path as a measured short-context fallback rather than reverting the fusion globally.
+1. `cargo fmt --check` and `cargo check --release` pass.
+2. Full non-ignored tests pass.
+3. Fused short-path, fast-exp long-path, page-boundary, and ragged correctness tests pass.
+4. Model-level decode output equivalence passes across multiple decode steps.
+5. Final PS16 serving/hardware E2E keeps or improves the already validated MoK gains, especially at contexts 512/2048/8192.
+6. No new KV-capacity regression, pool misses, top-1 mismatch, or sequence-row numerical regression appears.
+7. Prefill remains effectively neutral.
