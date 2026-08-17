@@ -102,12 +102,11 @@ impl KvPageAllocator {
         if needed > self.free_pages.len() {
             return Err(KvAllocationError::PhysicalPagesExhausted);
         }
-        for logical_page in current_pages..target_pages {
-            let physical_page = self
+        for entry in block_table.iter_mut().take(target_pages).skip(current_pages) {
+            *entry = self
                 .free_pages
                 .pop()
                 .ok_or(KvAllocationError::PhysicalPagesExhausted)?;
-            block_table[logical_page] = physical_page;
         }
         self.peak_allocated_pages = self
             .peak_allocated_pages
