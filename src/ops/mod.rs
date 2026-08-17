@@ -13,6 +13,8 @@ mod linear;
 mod mok_bench_tests;
 #[cfg(test)]
 mod mok_fused_bench_tests;
+#[cfg(test)]
+mod mok_w4_bench_tests;
 mod qk_postprocess;
 mod residual;
 mod rms_norm;
