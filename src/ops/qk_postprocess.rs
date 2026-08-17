@@ -2,13 +2,13 @@ use anyhow::{Result, ensure};
 use half::bf16;
 
 use crate::{
-    cache::PagedKvCache,
+    cache::{PagedKvArena, PagedKvCache},
     cuda::CudaRuntime,
     tensor::Tensor,
 };
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
+fn launch_qk_postprocess(
     runtime: &CudaRuntime,
     query: &mut Tensor<bf16>,
     key: &Tensor<bf16>,
@@ -18,7 +18,10 @@ pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
     inv_freq: &Tensor<f32>,
     position_ids: &Tensor<u32>,
     slot_mapping: &Tensor<i64>,
-    cache: &mut PagedKvCache,
+    key_cache: &mut Tensor<bf16>,
+    value_cache: &mut Tensor<bf16>,
+    page_size: usize,
+    num_pages: usize,
     eps: f32,
 ) -> Result<()> {
     ensure!(
@@ -36,10 +39,6 @@ pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
     ensure!(inv_freq.numel() == 32, "RoPE inv_freq must have 32 elements");
     ensure!(position_ids.numel() == num_tokens, "position count mismatch");
     ensure!(slot_mapping.numel() == num_tokens, "slot mapping count mismatch");
-
-    let page_size = cache.page_size().value();
-    let num_pages = cache.num_pages();
-    let (key_cache, value_cache) = cache.kv_mut();
 
     unsafe {
         runtime.kernels().qk_postprocess().launch_decode(
@@ -60,8 +59,77 @@ pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
             eps,
         )?;
     }
-
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
+    runtime: &CudaRuntime,
+    query: &mut Tensor<bf16>,
+    key: &Tensor<bf16>,
+    value: &Tensor<bf16>,
+    query_norm: &Tensor<bf16>,
+    key_norm: &Tensor<bf16>,
+    inv_freq: &Tensor<f32>,
+    position_ids: &Tensor<u32>,
+    slot_mapping: &Tensor<i64>,
+    cache: &mut PagedKvCache,
+    eps: f32,
+) -> Result<()> {
+    let page_size = cache.page_size().value();
+    let num_pages = cache.num_pages();
+    let (key_cache, value_cache) = cache.kv_mut();
+    launch_qk_postprocess(
+        runtime,
+        query,
+        key,
+        value,
+        query_norm,
+        key_norm,
+        inv_freq,
+        position_ids,
+        slot_mapping,
+        key_cache,
+        value_cache,
+        page_size,
+        num_pages,
+        eps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn qk_norm_rope_kv_write_arena_decode_bf16(
+    runtime: &CudaRuntime,
+    query: &mut Tensor<bf16>,
+    key: &Tensor<bf16>,
+    value: &Tensor<bf16>,
+    query_norm: &Tensor<bf16>,
+    key_norm: &Tensor<bf16>,
+    inv_freq: &Tensor<f32>,
+    position_ids: &Tensor<u32>,
+    physical_slots: &Tensor<i64>,
+    arena: &mut PagedKvArena,
+    eps: f32,
+) -> Result<()> {
+    let page_size = arena.page_size().value();
+    let num_pages = arena.num_pages();
+    let (key_cache, value_cache) = arena.kv_mut();
+    launch_qk_postprocess(
+        runtime,
+        query,
+        key,
+        value,
+        query_norm,
+        key_norm,
+        inv_freq,
+        position_ids,
+        physical_slots,
+        key_cache,
+        value_cache,
+        page_size,
+        num_pages,
+        eps,
+    )
 }
 
 #[cfg(test)]
@@ -231,7 +299,6 @@ mod tests {
             let mut fused_cache = PagedKvCache::new(&runtime, size, page_size)?;
             let mut fused_query = runtime.upload(&query_host, Shape::new([1, 32, 64]))?;
 
-            // Prime pool size classes before measuring the multi-op reference path.
             let _ = run_reference(
                 &runtime,
                 &query_raw,
