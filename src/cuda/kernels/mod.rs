@@ -25,6 +25,7 @@ use attention::AttentionKernels;
 use attention_async::AsyncAttentionKernels;
 use attention_async_fast::AsyncAttentionFastKernels;
 use attention_fused::FusedAttentionKernels;
+pub(crate) use embedding::EmbeddingLaunch;
 use embedding::EmbeddingKernels;
 use fp8_quantize::Fp8QuantizeKernels;
 use gather::GatherKernels;
