@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
-use cudarc::driver::{CudaModule, CudaSlice, CudaStream, PushKernelArg};
+use cudarc::driver::{
+    CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
+};
 use half::bf16;
 
 use crate::cuda::{launch::KernelLaunch, module::load_function};
 
 use super::kernel_set::KernelSet;
 
-const MAX_BLOCK_SIZE: u32 = 256;
+const BLOCK_SIZE: u32 = 256;
 
 pub(crate) struct AsyncAttentionKernels {
     ps16: KernelLaunch,
@@ -43,16 +45,37 @@ impl KernelSet for AsyncAttentionKernels {
             "paged_ragged_gqa_lfm2_bf16_async_ps32",
         )?;
 
+        for (name, function) in [
+            ("ps16", &ps16),
+            ("ps32", &ps32),
+            ("ragged_ps16", &ragged_ps16),
+            ("ragged_ps32", &ragged_ps32),
+        ] {
+            ensure!(
+                function.max_threads_per_block()? >= BLOCK_SIZE as i32,
+                "async attention {name} cannot launch required 256-thread block"
+            );
+        }
+
         Ok(Self {
-            ps16: KernelLaunch::new_with_multiple(ps16, MAX_BLOCK_SIZE, 32)?,
-            ps32: KernelLaunch::new_with_multiple(ps32, MAX_BLOCK_SIZE, 32)?,
-            ragged_ps16: KernelLaunch::new_with_multiple(ragged_ps16, MAX_BLOCK_SIZE, 32)?,
-            ragged_ps32: KernelLaunch::new_with_multiple(ragged_ps32, MAX_BLOCK_SIZE, 32)?,
+            ps16: KernelLaunch::new_with_multiple(ps16, BLOCK_SIZE, 32)?,
+            ps32: KernelLaunch::new_with_multiple(ps32, BLOCK_SIZE, 32)?,
+            ragged_ps16: KernelLaunch::new_with_multiple(ragged_ps16, BLOCK_SIZE, 32)?,
+            ragged_ps32: KernelLaunch::new_with_multiple(ragged_ps32, BLOCK_SIZE, 32)?,
         })
     }
 }
 
 impl AsyncAttentionKernels {
+    fn launch_config(blocks: usize) -> Result<LaunchConfig> {
+        let grid_x = u32::try_from(blocks).context("async attention grid size exceeds u32")?;
+        Ok(LaunchConfig {
+            grid_dim: (grid_x, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_lfm2_bf16(
         &self,
@@ -103,7 +126,7 @@ impl AsyncAttentionKernels {
         let blocks = num_tokens
             .checked_mul(8)
             .context("attention grid size overflow")?;
-        let config = kernel.policy().exact_blocks(blocks)?;
+        let config = Self::launch_config(blocks)?;
         let block_table_length = block_table.len();
         let mut args = stream.launch_builder(kernel.function());
 
@@ -180,7 +203,7 @@ impl AsyncAttentionKernels {
         let blocks = num_tokens
             .checked_mul(8)
             .context("ragged attention grid size overflow")?;
-        let config = kernel.policy().exact_blocks(blocks)?;
+        let config = Self::launch_config(blocks)?;
         let block_table_rows = block_tables.len() / block_table_stride;
         let mut args = stream.launch_builder(kernel.function());
         args.arg(query)
