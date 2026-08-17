@@ -14,6 +14,7 @@ mod silu_mul;
 pub use attention::{hybrid_ragged_attention_lfm2_bf16, prefill_attention_lfm2_bf16};
 pub(crate) use attention::paged_attention_lfm2_bf16_sync;
 pub use attention_async::paged_attention_lfm2_bf16;
+pub(crate) use attention_async::paged_ragged_attention_lfm2_bf16;
 pub use embedding::embedding_bf16;
 pub use gather::gather_rows_bf16;
 pub use linear::{linear_bf16, linear_last_row_bf16};
