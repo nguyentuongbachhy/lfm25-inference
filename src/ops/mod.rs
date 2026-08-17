@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod attention;
 #[cfg(test)]
 mod attention_async;
@@ -21,7 +20,6 @@ mod mok_fast_exp_bench_tests;
 #[cfg(test)]
 mod mok_fused_bench_tests;
 mod qk_postprocess;
-mod residual;
 mod rms_norm;
 mod rope;
 mod sampling;
@@ -48,11 +46,8 @@ pub(crate) use mok_dispatch::should_use_mok_one_kernel;
 pub(crate) use qk_postprocess::{
     qk_norm_rope_kv_write_arena_decode_bf16, qk_norm_rope_kv_write_decode_bf16,
 };
-#[allow(unused_imports)]
-pub use residual::residual_add_bf16;
 pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
 pub use rope::rope_qk_bf16_inplace;
 pub use sampling::{argmax_bf16, argmax_rows_bf16};
 pub use short_conv::{short_conv_lfm2_bf16, short_conv_segmented_lfm2_bf16};
-#[allow(unused_imports)]
-pub use silu_mul::{silu_mul_bf16, silu_mul_packed_bf16};
+pub use silu_mul::silu_mul_packed_bf16;
