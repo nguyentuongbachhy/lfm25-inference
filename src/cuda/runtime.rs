@@ -342,9 +342,15 @@ impl CudaRuntime {
             .storage()
             .try_slice(0..tensor.numel())
             .context("invalid logical u32 download range")?;
+        let destination = destination
+            .as_mut_slice()
+            .context("failed to access pinned token output")?;
         self.stream
-            .memcpy_dtoh(&logical, destination)
-            .context("failed to download token IDs into pinned host memory")
+            .memcpy_dtoh(&logical, &mut destination[..tensor.numel()])
+            .context("failed to download token IDs into pinned host memory")?;
+        self.stream
+            .synchronize()
+            .context("failed to synchronize pinned token download")
     }
 
     pub(crate) fn synchronize(&self) -> Result<()> {
