@@ -808,6 +808,7 @@ impl Engine {
         let maximum_pages = maximum_batch
             .checked_mul(maximum_sequence_tokens.div_ceil(self.config.kv_page_size.value()))
             .context("serving benchmark page count overflow")?;
+        let (free_vram_bytes, _) = self.runtime.memory_info()?;
         let mut cache = self.model.new_batch_cache(
             &self.runtime,
             maximum_batch,
@@ -815,7 +816,6 @@ impl Engine {
             maximum_pages,
             self.config.kv_page_size,
         )?;
-        let (free_vram_bytes, _) = self.runtime.memory_info()?;
         let kv_bytes_per_token = self
             .model
             .config()
