@@ -34,7 +34,7 @@ pub(crate) struct FusedRaggedAttentionInput<'a> {
     pub(crate) request_slots: &'a Tensor<u32>,
 }
 
-pub(crate) unsafe fn fused_paged_attention_decode_lfm2_bf16(
+pub(crate) fn fused_paged_attention_decode_lfm2_bf16(
     runtime: &CudaRuntime,
     input: FusedPagedAttentionInput<'_>,
 ) -> Result<Tensor<bf16>> {
@@ -76,7 +76,7 @@ pub(crate) unsafe fn fused_paged_attention_decode_lfm2_bf16(
     Ok(output)
 }
 
-pub(crate) unsafe fn fused_ragged_paged_attention_decode_lfm2_bf16(
+pub(crate) fn fused_ragged_paged_attention_decode_lfm2_bf16(
     runtime: &CudaRuntime,
     input: FusedRaggedAttentionInput<'_>,
 ) -> Result<Tensor<bf16>> {
