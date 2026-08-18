@@ -3,7 +3,7 @@ use std::{ffi::c_void, mem::size_of};
 use anyhow::{Context as _, Result, ensure};
 use cudarc::cublaslt::{result, sys};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct MatmulKey {
     pub(crate) m: usize,
     pub(crate) n: usize,
@@ -240,19 +240,16 @@ impl MatmulPlan {
 
         ensure!(
             heuristic.workspaceSize <= workspace_size,
-            "cuBLASLt algorithm requires {} bytes, \
-             workspace has {} bytes",
+            "cuBLASLt algorithm requires {} bytes, workspace has {} bytes",
             heuristic.workspaceSize,
             workspace_size,
         );
 
         Ok(Self {
             desc,
-
             a_layout,
             b_layout,
             c_layout,
-
             algo: heuristic.algo,
         })
     }
