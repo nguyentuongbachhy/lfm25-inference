@@ -3,7 +3,6 @@ use anyhow::{Result, ensure};
 use super::{HardwareCostModel, RequestPhase, RequestSlotId, RequestSlots};
 
 const PREFILL_CANDIDATES: [usize; 11] = [1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1];
-const MAX_SCHEDULER_CONTEXT: usize = 32_768;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerConfig {
@@ -55,101 +54,10 @@ impl BatchPlan {
     }
 }
 
-struct SchedulerCostTable {
-    context_buckets: Box<[usize]>,
-    decode_bf16: Box<[Box<[f64]>]>,
-    decode_fp8: Box<[Box<[f64]>]>,
-    prefill: Box<[(usize, f64)]>,
-    fallback: HardwareCostModel,
-}
-
-impl SchedulerCostTable {
-    fn new(
-        capacity: usize,
-        maximum_prefill_tokens: usize,
-        cost: &HardwareCostModel,
-    ) -> Result<Self> {
-        let mut context_buckets = Vec::new();
-        let mut bucket = 1usize;
-        loop {
-            context_buckets.push(bucket);
-            if bucket >= MAX_SCHEDULER_CONTEXT {
-                break;
-            }
-            bucket = bucket.saturating_mul(2).min(MAX_SCHEDULER_CONTEXT);
-        }
-
-        let build_decode = |fp8: bool| {
-            (0..=capacity)
-                .map(|batch| {
-                    context_buckets
-                        .iter()
-                        .map(|&context| {
-                            if batch == 0 {
-                                0.0
-                            } else {
-                                cost.predict_decode_ms(batch, context, fp8)
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice()
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
-        };
-
-        let decode_bf16 = build_decode(false);
-        let decode_fp8 = build_decode(true);
-        let prefill = PREFILL_CANDIDATES
-            .into_iter()
-            .filter(|&tokens| tokens <= maximum_prefill_tokens)
-            .map(|tokens| (tokens, cost.predict_prefill_ms(tokens)))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-
-        Ok(Self {
-            context_buckets: context_buckets.into_boxed_slice(),
-            decode_bf16,
-            decode_fp8,
-            prefill,
-            fallback: cost.clone(),
-        })
-    }
-
-    #[inline]
-    fn predict_decode_ms(&self, batch: usize, maximum_context: usize, fp8: bool) -> f64 {
-        if batch >= self.decode_bf16.len() || maximum_context > MAX_SCHEDULER_CONTEXT {
-            return self
-                .fallback
-                .predict_decode_ms(batch, maximum_context, fp8);
-        }
-        let context_index = self
-            .context_buckets
-            .partition_point(|&bucket| bucket < maximum_context)
-            .min(self.context_buckets.len() - 1);
-        let table = if fp8 {
-            &self.decode_fp8
-        } else {
-            &self.decode_bf16
-        };
-        table[batch][context_index]
-    }
-
-    #[inline]
-    fn largest_prefill_chunk(&self, remaining: usize, budget_ms: f64) -> Option<(usize, f64)> {
-        if remaining == 0 || budget_ms <= 0.0 {
-            return None;
-        }
-        self.prefill
-            .iter()
-            .copied()
-            .find(|&(tokens, milliseconds)| tokens <= remaining && milliseconds <= budget_ms)
-    }
-}
-
 pub struct Scheduler {
     config: SchedulerConfig,
-    cost: SchedulerCostTable,
+    cost: HardwareCostModel,
+    prefill_costs: Box<[(usize, f64)]>,
     plan: BatchPlan,
 }
 
@@ -160,12 +68,29 @@ impl Scheduler {
             config.step_budget_ms.is_finite() && config.step_budget_ms > 0.0,
             "scheduler step budget must be positive"
         );
-        let cost = SchedulerCostTable::new(capacity, config.maximum_prefill_tokens, &cost)?;
+        let prefill_costs = PREFILL_CANDIDATES
+            .into_iter()
+            .filter(|&tokens| tokens <= config.maximum_prefill_tokens)
+            .map(|tokens| (tokens, cost.predict_prefill_ms(tokens)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Ok(Self {
             config,
             cost,
+            prefill_costs,
             plan: BatchPlan::with_capacity(capacity.saturating_add(1)),
         })
+    }
+
+    #[inline]
+    fn largest_prefill_chunk(&self, remaining: usize, budget_ms: f64) -> Option<(usize, f64)> {
+        if remaining == 0 || budget_ms <= 0.0 {
+            return None;
+        }
+        self.prefill_costs
+            .iter()
+            .copied()
+            .find(|&(tokens, milliseconds)| tokens <= remaining && milliseconds <= budget_ms)
     }
 
     pub fn schedule(&mut self, requests: &RequestSlots, now_us: u64) -> &BatchPlan {
@@ -191,6 +116,9 @@ impl Scheduler {
         self.plan.predicted_ms = if self.plan.decode_count == 0 {
             0.0
         } else {
+            // Keep the exact HardwareCostModel semantics for arbitrary mixed
+            // contexts. Bucketizing maximum_context changes the prefill budget
+            // around measured context boundaries and can starve queued prefills.
             self.cost.predict_decode_ms(
                 self.plan.decode_count,
                 maximum_context,
@@ -222,7 +150,7 @@ impl Scheduler {
                 .saturating_sub(request.prefilled)
                 .min(self.config.maximum_prefill_tokens);
             if let Some((chunk, milliseconds)) =
-                self.cost.largest_prefill_chunk(remaining, remaining_budget)
+                self.largest_prefill_chunk(remaining, remaining_budget)
             {
                 self.plan.work.push(ScheduledWork::Prefill {
                     slot,
