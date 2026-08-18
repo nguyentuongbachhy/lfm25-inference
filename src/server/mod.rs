@@ -52,6 +52,10 @@ pub fn serve(engine: Engine, address: &str, cost_model: HardwareCostModel) -> Re
             }
         })
         .context("failed to spawn async frontend")?;
+    // From this point onward the Engine is only touched by this dedicated GPU
+    // owner thread. Move synchronization-heavy runtime state into owner-local
+    // storage before the serving warmup populates its steady-state caches.
+    engine.enter_serving_owner_mode()?;
     engine
         .run_continuous_owner(config, receiver, ready_sender)
         .map(|_| ())
