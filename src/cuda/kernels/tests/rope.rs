@@ -42,8 +42,8 @@ fn rope_reference_inplace(
         let position = position_id as f32;
         for head in 0..num_heads {
             let base = (token * num_heads + head) * head_dim;
-            for pair in 0..half_dim {
-                let angle = position * inv_freq[pair];
+            for (pair, &frequency) in inv_freq.iter().take(half_dim).enumerate() {
+                let angle = position * frequency;
                 let sin_value = angle.sin();
                 let cos_value = angle.cos();
                 let idx1 = base + pair;

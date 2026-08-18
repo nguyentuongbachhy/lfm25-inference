@@ -169,11 +169,11 @@ mod tests {
     fn rope_rejects_qk_prefix_mismatch() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
         let mut query = runtime.upload(
-            &vec![bf16::from_f32(1.0); 2 * 3 * 4 * 8],
+            &[bf16::from_f32(1.0); 2 * 3 * 4 * 8],
             Shape::new([2, 3, 4, 8]),
         )?;
         let mut key = runtime.upload(
-            &vec![bf16::from_f32(1.0); 2 * 4 * 2 * 8],
+            &[bf16::from_f32(1.0); 2 * 4 * 2 * 8],
             Shape::new([2, 4, 2, 8]),
         )?;
         let inv_freq = runtime.upload(&[1.0f32; 4], Shape::new([4]))?;
@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn rope_rejects_inv_freq_mismatch() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
-        let mut query = runtime.upload(&vec![bf16::from_f32(1.0); 4 * 8], Shape::new([1, 4, 8]))?;
-        let mut key = runtime.upload(&vec![bf16::from_f32(1.0); 2 * 8], Shape::new([1, 2, 8]))?;
+        let mut query = runtime.upload(&[bf16::from_f32(1.0); 4 * 8], Shape::new([1, 4, 8]))?;
+        let mut key = runtime.upload(&[bf16::from_f32(1.0); 2 * 8], Shape::new([1, 2, 8]))?;
         let inv_freq = runtime.upload(&[1.0f32; 3], Shape::new([3]))?;
         let positions = runtime.upload(&[0u32], Shape::new([1]))?;
         assert!(

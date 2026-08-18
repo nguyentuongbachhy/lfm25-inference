@@ -3,13 +3,17 @@ use half::bf16;
 
 use crate::{
     cache::{KvPageSize, PagedKvArena, PagedKvCache},
-    cuda::{CudaRuntime, testing::{assert_close_bf16, readback}},
+    cuda::{
+        CudaRuntime,
+        testing::{assert_close_bf16, readback},
+    },
     tensor::Shape,
 };
 
 use super::attention::{
-    hybrid_ragged_attention_lfm2_bf16, paged_attention_lfm2_bf16_sync,
-    paged_ragged_attention_lfm2_bf16, prefill_attention_lfm2_bf16,
+    HybridRaggedAttentionInput, hybrid_ragged_attention_lfm2_bf16,
+    paged_attention_lfm2_bf16_sync, paged_ragged_attention_lfm2_bf16,
+    prefill_attention_lfm2_bf16,
 };
 
 #[test]
@@ -76,15 +80,17 @@ fn hybrid_attention_uses_paged_prefix_and_contiguous_current_chunk() -> Result<(
     let segment_offsets = runtime.upload(&[0u32, 2], Shape::new([2]))?;
     let output = hybrid_ragged_attention_lfm2_bf16(
         &runtime,
-        &query,
-        &key,
-        &current_value,
-        &arena,
-        &block_tables,
-        1,
-        &request_slots,
-        &positions,
-        &segment_offsets,
+        HybridRaggedAttentionInput {
+            query: &query,
+            current_key: &key,
+            current_value: &current_value,
+            arena: &arena,
+            block_tables: &block_tables,
+            block_table_stride: 1,
+            request_slots: &request_slots,
+            position_ids: &positions,
+            segment_offsets: &segment_offsets,
+        },
     )?;
     let actual = readback(&runtime, &output)?;
     let first_expected = (2.0 + 2.0 + 6.0) / 3.0;

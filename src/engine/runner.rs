@@ -12,12 +12,12 @@ use serde::Serialize;
 use crate::{
     cache::KvPageSize,
     cuda::CudaRuntime,
-    generation::{Sampler, SamplingConfig},
+    generation::{DEFAULT_SAMPLING_SEED, Sampler, SamplingConfig},
     model::{
         CalibrationCollector, CalibrationPhase, DecodeProfileMode, DecodeProfileReport,
         Fp8CalibrationReport, Fp8GemmErrorReport, Fp8PrecisionPolicy, HiddenCapture, Lfm2Model,
         LogitDistributionMetrics, LogitMetricAccumulator, ModelProfileRecorder, PrecisionClass,
-        ProfileRegion, PropagationAccumulator, PropagationPointMetrics,
+        ProfileRegion, PropagationAccumulator, PropagationPointMetrics, RaggedBatchInput,
     },
     scheduler::{CostCurve, CostPoint, HardwareCostModel},
     tokenizer::Lfm2Tokenizer,
@@ -153,7 +153,7 @@ pub struct Fp8BenchmarkReport {
     pub workloads: Vec<Fp8BenchmarkWorkload>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ServingDecodePoint {
     pub batch_size: usize,
     pub context_tokens: usize,
@@ -435,9 +435,6 @@ impl Engine {
             gpu_name: gpu_name.clone(),
             page_size: self.config.kv_page_size.value(),
             decode_bf16: CostCurve::new(decode_points.clone())?,
-            // Batched FP8 is not promoted yet. Keeping the BF16 curve here is
-            // conservative; Phase F replaces it only after the new quality and
-            // goodput gate passes for M>1.
             decode_fp8: CostCurve::new(decode_points)?,
             prefill_bf16: CostCurve::new(prefill_points)?,
             interactive_prompt_limit,
@@ -700,12 +697,14 @@ impl Engine {
                 let logits = self.model.forward_ragged_batch(
                     &self.runtime,
                     &mut cache,
-                    &token_ids,
-                    &positions,
-                    &request_slots,
-                    &segment_offsets,
-                    &segment_slots,
-                    &output_rows,
+                    RaggedBatchInput {
+                        token_ids: &token_ids,
+                        positions: &positions,
+                        request_slots: &request_slots,
+                        segment_offsets: &segment_offsets,
+                        segment_slots: &segment_slots,
+                        output_rows: &output_rows,
+                    },
                 )?;
                 let gpu_finished = self.runtime.record_timing_event()?;
                 let submit_ms = elapsed_ms(submit_started);
@@ -799,84 +798,88 @@ impl Engine {
                 .and_then(|value| value.checked_add(measured_steps))
                 .context("serving benchmark sequence length overflow")?
                 <= self.model.config().max_position_embeddings,
-            "serving benchmark exceeds model context limit"
+            "serving benchmark exceeds model context"
         );
-
-        let ragged_prefill_validation = self.validate_ragged_prefill(32, 2)?;
-        let mut points = Vec::with_capacity(batch_sizes.len() * contexts.len());
-        let mut skipped_capacity_points = Vec::new();
-        let attention_layers = self
+        let ragged_prefill_validation = self.validate_ragged_prefill(32, 4)?;
+        let maximum_sequence_tokens = maximum_context
+            .checked_add(warmup_steps)
+            .and_then(|value| value.checked_add(measured_steps))
+            .context("serving benchmark capacity overflow")?;
+        let maximum_pages = maximum_batch
+            .checked_mul(maximum_sequence_tokens.div_ceil(self.config.kv_page_size.value()))
+            .context("serving benchmark page count overflow")?;
+        let mut cache = self.model.new_batch_cache(
+            &self.runtime,
+            maximum_batch,
+            maximum_batch,
+            maximum_pages,
+            self.config.kv_page_size,
+        )?;
+        let (free_vram_bytes, _) = self.runtime.memory_info()?;
+        let kv_bytes_per_token = self
             .model
             .config()
             .layer_types
             .iter()
             .filter(|kind| kind.as_str() == "full_attention")
-            .count();
-        let kv_bytes_per_page = attention_layers
-            .checked_mul(2 * 8 * 64 * std::mem::size_of::<half::bf16>())
-            .and_then(|value| value.checked_mul(self.config.kv_page_size.value()))
-            .context("serving benchmark KV page bytes overflow")?;
+            .count()
+            .checked_mul(2)
+            .and_then(|value| value.checked_mul(self.model.config().num_key_value_heads))
+            .and_then(|value| value.checked_mul(self.model.config().head_dim()))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<half::bf16>()))
+            .context("serving benchmark KV byte size overflow")?;
+        let mut points = Vec::new();
+        let mut skipped_capacity_points = Vec::new();
         for &context in contexts {
-            ensure!(context > 0, "benchmark context must be positive");
             for &batch in batch_sizes {
-                ensure!(batch > 0, "benchmark batch must be positive");
-                let sequence_capacity = context + warmup_steps + measured_steps;
-                let pages_per_sequence =
-                    sequence_capacity.div_ceil(self.config.kv_page_size.value());
-                let physical_pages = batch
-                    .checked_mul(pages_per_sequence)
-                    .context("serving benchmark KV page count overflow")?;
-                let required_kv_bytes = physical_pages
-                    .checked_mul(kv_bytes_per_page)
-                    .context("serving benchmark KV bytes overflow")?;
-                let (free_vram_bytes, _) = self.runtime.memory_info()?;
-                if required_kv_bytes.saturating_add(256 * 1024 * 1024) > free_vram_bytes {
+                let capacity = context
+                    .checked_add(warmup_steps)
+                    .and_then(|value| value.checked_add(measured_steps))
+                    .context("serving decode capacity overflow")?;
+                let required_kv_bytes = batch
+                    .checked_mul(capacity)
+                    .and_then(|value| value.checked_mul(kv_bytes_per_token))
+                    .context("serving decode KV byte requirement overflow")?;
+                if required_kv_bytes > free_vram_bytes {
                     skipped_capacity_points.push(ServingSkippedPoint {
                         batch_size: batch,
                         context_tokens: context,
                         required_kv_bytes,
                         free_vram_bytes,
-                        reason: "KV arena plus safety margin exceeds free VRAM",
+                        reason: "insufficient_free_vram_before_kv_allocation",
                     });
                     continue;
                 }
-                let mut cache = self.model.new_batch_cache(
-                    &self.runtime,
-                    batch,
-                    batch,
-                    physical_pages,
-                    self.config.kv_page_size,
-                )?;
                 for slot in 0..batch {
-                    cache.reserve(slot, sequence_capacity)?;
+                    cache.reserve(slot, capacity)?;
                 }
-                let mut token_ids = vec![self.model.config().bos_token_id; batch];
-                let mut positions = vec![0u32; batch];
-                let request_slots: Vec<u32> = (0..batch)
-                    .map(u32::try_from)
-                    .collect::<std::result::Result<_, _>>()?;
-
                 cache.prime_context(&self.runtime, batch, context)?;
+                let request_slots = (0..batch)
+                    .map(u32::try_from)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let mut token_ids = vec![42u32; batch];
+                let mut positions = vec![u32::try_from(context)?; batch];
                 for step in 0..warmup_steps {
+                    token_ids.fill(42 + u32::try_from(step % 17)?);
                     positions.fill(u32::try_from(context + step)?);
-                    token_ids.fill(42 + u32::try_from(step % 7)?);
-                    let _ = self.model.forward_decode_batch(
+                    let logits = self.model.forward_decode_batch(
                         &self.runtime,
                         &mut cache,
                         &token_ids,
                         &positions,
                         &request_slots,
                     )?;
+                    drop(logits);
                 }
                 self.runtime.synchronize()?;
+                let transfers_started = cache.transfers();
                 let bf16_started = self.runtime.bf16_pool_stats();
                 let fp8_started = self.runtime.fp8_pool_stats();
-                let transfers_started = cache.transfers();
                 let mut samples = Vec::with_capacity(measured_steps);
                 let mut final_logits = None;
                 for step in 0..measured_steps {
+                    token_ids.fill(59 + u32::try_from(step % 23)?);
                     positions.fill(u32::try_from(context + warmup_steps + step)?);
-                    token_ids.fill(49 + u32::try_from(step % 11)?);
                     let started = self.runtime.record_timing_event()?;
                     let logits = self.model.forward_decode_batch(
                         &self.runtime,
@@ -887,16 +890,14 @@ impl Engine {
                     )?;
                     let finished = self.runtime.record_timing_event()?;
                     samples.push(self.runtime.elapsed_ms(&started, &finished)?);
-                    if step + 1 == measured_steps {
-                        final_logits = Some(logits);
-                    }
+                    final_logits = Some(logits);
                 }
+                let transfers_finished = cache.transfers();
                 let bf16_finished = self.runtime.bf16_pool_stats();
                 let fp8_finished = self.runtime.fp8_pool_stats();
-                let transfers_finished = cache.transfers();
-                let step_mean_ms = mean(&samples).context("missing step samples")?;
-                let step_p50_ms = percentile(&samples, 0.50).context("missing p50")?;
-                let step_p95_ms = percentile(&samples, 0.95).context("missing p95")?;
+                let step_mean_ms = mean(&samples).context("missing serving decode mean")?;
+                let step_p50_ms = percentile(&samples, 0.50).context("missing serving p50")?;
+                let step_p95_ms = percentile(&samples, 0.95).context("missing serving p95")?;
                 let output_tokens_per_second = batch as f64 * 1000.0 / step_mean_ms;
                 let tpot_slo_pass = step_p95_ms < 50.0;
                 let snapshot = cache.kv_snapshot();
@@ -1073,12 +1074,14 @@ impl Engine {
         let ragged_logits = self.model.forward_ragged_batch(
             &self.runtime,
             &mut cache,
-            &tokens,
-            &positions,
-            &request_slots,
-            &segment_offsets,
-            &segment_slots,
-            &output_rows,
+            RaggedBatchInput {
+                token_ids: &tokens,
+                positions: &positions,
+                request_slots: &request_slots,
+                segment_offsets: &segment_offsets,
+                segment_slots: &segment_slots,
+                output_rows: &output_rows,
+            },
         )?;
         let ragged_finished = self.runtime.record_timing_event()?;
         let ragged_ms = self.runtime.elapsed_ms(&ragged_started, &ragged_finished)?;
@@ -1373,7 +1376,7 @@ impl Engine {
             let _logits = self.model.forward_logits_calibrated(
                 &self.runtime,
                 &mut prefill_cache,
-                &token_ids,
+                token_ids,
                 &mut collector,
             )?;
             collector.record_prefill_forward();
@@ -1892,7 +1895,7 @@ impl Engine {
                 temperature: 0.0,
                 top_k: 50,
                 repetition_penalty: 1.0,
-                seed: 0x4c_46_4d_32,
+                seed: DEFAULT_SAMPLING_SEED,
             },
         };
         let mut diagnostics = Vec::with_capacity(prompts.len());
@@ -2264,10 +2267,10 @@ fn calibration_text_from_line(line: &str) -> Result<Option<String>> {
             .context("JSONL calibration row requires string field `text` or `prompt`")?;
         return Ok(Some(text.to_string()));
     }
-    if trimmed.starts_with('"') {
-        if let Ok(text) = serde_json::from_str::<String>(trimmed) {
-            return Ok(Some(text));
-        }
+    if trimmed.starts_with('"')
+        && let Ok(text) = serde_json::from_str::<String>(trimmed)
+    {
+        return Ok(Some(text));
     }
 
     Ok(Some(trimmed.to_string()))

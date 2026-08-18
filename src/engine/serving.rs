@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     generation::SamplingConfig,
+    model::RaggedBatchInput,
     ops,
     scheduler::{
         HardwareCostModel, RequestInit, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork,
@@ -414,12 +415,14 @@ fn run_owner(
         let logits = engine.model.forward_ragged_batch(
             &engine.runtime,
             &mut cache,
-            &token_ids,
-            &positions,
-            &request_slots,
-            &segment_offsets,
-            &segment_slots,
-            &output_rows,
+            RaggedBatchInput {
+                token_ids: &token_ids,
+                positions: &positions,
+                request_slots: &request_slots,
+                segment_offsets: &segment_offsets,
+                segment_slots: &segment_slots,
+                output_rows: &output_rows,
+            },
         )?;
         let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
         let gpu_finished = engine.runtime.record_timing_event()?;
@@ -631,12 +634,14 @@ fn warm_serving_path(
     let logits = engine.model.forward_ragged_batch(
         &engine.runtime,
         cache,
-        &token_ids,
-        &positions,
-        &request_slots,
-        &segment_offsets,
-        &segment_slots,
-        &output_rows,
+        RaggedBatchInput {
+            token_ids: &token_ids,
+            positions: &positions,
+            request_slots: &request_slots,
+            segment_offsets: &segment_offsets,
+            segment_slots: &segment_slots,
+            output_rows: &output_rows,
+        },
     )?;
     let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
     engine.runtime.synchronize()?;

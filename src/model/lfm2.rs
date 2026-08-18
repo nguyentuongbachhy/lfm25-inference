@@ -62,7 +62,7 @@ impl LinearWeight {
 
 enum OperatorWeights {
     Conv(ConvWeights),
-    Attention(AttentionWeights),
+    Attention(Box<AttentionWeights>),
 }
 
 struct LayerWeights {
@@ -102,7 +102,7 @@ impl Lfm2Weights {
                 down: LinearWeight::bf16(store.take(&format!("{prefix}.feed_forward.w2.weight"))?),
             };
             let operator = if config.is_attention_layer(layer) {
-                OperatorWeights::Attention(AttentionWeights {
+                OperatorWeights::Attention(Box::new(AttentionWeights {
                     query: LinearWeight::bf16(
                         store.take(&format!("{prefix}.self_attn.q_proj.weight"))?,
                     ),
@@ -117,7 +117,7 @@ impl Lfm2Weights {
                     ),
                     query_norm: store.take(&format!("{prefix}.self_attn.q_layernorm.weight"))?,
                     key_norm: store.take(&format!("{prefix}.self_attn.k_layernorm.weight"))?,
-                })
+                }))
             } else {
                 OperatorWeights::Conv(ConvWeights {
                     input: LinearWeight::bf16(
@@ -160,6 +160,30 @@ pub struct ModelCache {
 enum BatchLayerCache {
     Conv(Tensor<bf16>),
     Attention(PagedKvArena),
+}
+
+pub(crate) struct RaggedBatchInput<'a> {
+    pub(crate) token_ids: &'a [u32],
+    pub(crate) positions: &'a [u32],
+    pub(crate) request_slots: &'a [u32],
+    pub(crate) segment_offsets: &'a [u32],
+    pub(crate) segment_slots: &'a [u32],
+    pub(crate) output_rows: &'a [u32],
+}
+
+struct LayerExecution<'a> {
+    profile: Option<&'a mut ModelProfileRecorder>,
+    calibration: Option<&'a mut CalibrationCollector>,
+    layer: usize,
+    use_fp8: bool,
+}
+
+struct AttentionStep<'a> {
+    cache: &'a mut PagedKvCache,
+    slots: &'a Tensor<i64>,
+    positions: &'a Tensor<u32>,
+    contiguous_prefill: bool,
+    context_tokens: usize,
 }
 
 /// Shared serving cache. It owns one physical KV arena per attention layer,
@@ -391,39 +415,39 @@ impl BatchModelCache {
     fn prepare_ragged(
         &mut self,
         runtime: &CudaRuntime,
-        token_ids: &[u32],
-        positions: &[u32],
-        request_slots: &[u32],
-        segment_offsets: &[u32],
-        segment_slots: &[u32],
-        output_rows: &[u32],
+        input: &RaggedBatchInput<'_>,
     ) -> Result<()> {
         ensure!(
-            segment_offsets.last().copied() == Some(u32::try_from(token_ids.len())?),
+            input.segment_offsets.last().copied() == Some(u32::try_from(input.token_ids.len())?),
             "last segment offset must equal flattened token count"
         );
-        for window in segment_offsets.windows(2) {
+        for window in input.segment_offsets.windows(2) {
             ensure!(
                 window[0] < window[1],
                 "segments must be non-empty and ordered"
             );
         }
-        for (&row, &slot) in output_rows.iter().zip(segment_slots) {
+        for (&row, &slot) in input.output_rows.iter().zip(input.segment_slots) {
             let row = usize::try_from(row)?;
-            ensure!(row < token_ids.len(), "output row out of range");
+            ensure!(row < input.token_ids.len(), "output row out of range");
             ensure!(
-                request_slots[row] == slot,
+                input.request_slots[row] == slot,
                 "output row does not belong to segment slot"
             );
         }
-        self.prepare_tokens(runtime, token_ids, positions, request_slots)?;
-        self.gpu_batch
-            .update_segments(runtime, segment_offsets, segment_slots, output_rows)
+        self.prepare_tokens(runtime, input.token_ids, input.positions, input.request_slots)?;
+        self.gpu_batch.update_segments(
+            runtime,
+            input.segment_offsets,
+            input.segment_slots,
+            input.output_rows,
+        )
     }
 
     pub fn kv_snapshot(&self) -> KvPoolSnapshot {
         self.allocator.snapshot()
     }
+
     pub fn transfers(&self) -> TransferCounters {
         self.gpu_batch.transfers()
     }
@@ -624,10 +648,7 @@ impl Lfm2Model {
         runtime: &CudaRuntime,
         policy: &Fp8PrecisionPolicy,
     ) -> Result<usize> {
-        ensure!(
-            policy.decode_only,
-            "only decode-only FP8 policies are supported"
-        );
+        ensure!(policy.decode_only, "only decode-only FP8 policies are supported");
         let mut by_site = HashMap::with_capacity(policy.sites.len());
         for site in &policy.sites {
             ensure!(
@@ -877,9 +898,6 @@ impl Lfm2Model {
         )
     }
 
-    /// Runs one true ragged decode step: one token per active request, with all
-    /// linear layers seeing M=batch_size. Selective FP8 remains restricted to
-    /// M=1 until the batched quality/performance gate is run.
     pub fn forward_decode_batch(
         &self,
         runtime: &CudaRuntime,
@@ -893,28 +911,14 @@ impl Lfm2Model {
         self.forward_prepared_batch(runtime, cache)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_ragged_batch(
+    pub(crate) fn forward_ragged_batch(
         &self,
         runtime: &CudaRuntime,
         cache: &mut BatchModelCache,
-        token_ids: &[u32],
-        positions: &[u32],
-        request_slots: &[u32],
-        segment_offsets: &[u32],
-        segment_slots: &[u32],
-        output_rows: &[u32],
+        input: RaggedBatchInput<'_>,
     ) -> Result<Tensor<bf16>> {
-        ensure!(!token_ids.is_empty(), "ragged batch is empty");
-        cache.prepare_ragged(
-            runtime,
-            token_ids,
-            positions,
-            request_slots,
-            segment_offsets,
-            segment_slots,
-            output_rows,
-        )?;
+        ensure!(!input.token_ids.is_empty(), "ragged batch is empty");
+        cache.prepare_ragged(runtime, &input)?;
         self.forward_prepared_batch(runtime, cache)
     }
 
@@ -952,8 +956,17 @@ impl Lfm2Model {
                 &weights.ffn_norm,
                 self.config.norm_eps,
             )?;
-            let ffn_output =
-                self.feed_forward(runtime, weights, &ffn_input, None, None, layer, use_fp8)?;
+            let ffn_output = self.feed_forward(
+                runtime,
+                weights,
+                &ffn_input,
+                LayerExecution {
+                    profile: None,
+                    calibration: None,
+                    layer,
+                    use_fp8,
+                },
+            )?;
             let next_norm = if layer + 1 < self.config.num_hidden_layers {
                 &self.weights.layers[layer + 1].operator_norm
             } else {
@@ -1275,6 +1288,13 @@ impl Lfm2Model {
                 .is_some_and(|profile| profile.mode() == DecodeProfileMode::Coarse);
             let operator_output = match (&weights.operator, &mut cache.layers[layer]) {
                 (OperatorWeights::Attention(operator), LayerCache::Attention(kv_cache)) => {
+                    let step = AttentionStep {
+                        cache: kv_cache,
+                        slots: &slots,
+                        positions: &positions,
+                        contiguous_prefill,
+                        context_tokens: next_sequence_length,
+                    };
                     if coarse {
                         profiled(
                             runtime,
@@ -1285,14 +1305,13 @@ impl Lfm2Model {
                                     runtime,
                                     operator,
                                     normalized,
-                                    kv_cache,
-                                    &slots,
-                                    &positions,
-                                    contiguous_prefill,
-                                    None,
-                                    calibration.as_deref_mut(),
-                                    layer,
-                                    use_fp8_decode,
+                                    step,
+                                    LayerExecution {
+                                        profile: None,
+                                        calibration: calibration.as_deref_mut(),
+                                        layer,
+                                        use_fp8: use_fp8_decode,
+                                    },
                                 )
                             },
                         )?
@@ -1301,14 +1320,13 @@ impl Lfm2Model {
                             runtime,
                             operator,
                             normalized,
-                            kv_cache,
-                            &slots,
-                            &positions,
-                            contiguous_prefill,
-                            profile.as_deref_mut(),
-                            calibration.as_deref_mut(),
-                            layer,
-                            use_fp8_decode,
+                            step,
+                            LayerExecution {
+                                profile: profile.as_deref_mut(),
+                                calibration: calibration.as_deref_mut(),
+                                layer,
+                                use_fp8: use_fp8_decode,
+                            },
                         )?
                     }
                 }
@@ -1320,10 +1338,12 @@ impl Lfm2Model {
                                 operator,
                                 &normalized,
                                 state,
-                                None,
-                                calibration.as_deref_mut(),
-                                layer,
-                                use_fp8_decode,
+                                LayerExecution {
+                                    profile: None,
+                                    calibration: calibration.as_deref_mut(),
+                                    layer,
+                                    use_fp8: use_fp8_decode,
+                                },
                             )
                         })?
                     } else {
@@ -1332,10 +1352,12 @@ impl Lfm2Model {
                             operator,
                             &normalized,
                             state,
-                            profile.as_deref_mut(),
-                            calibration.as_deref_mut(),
-                            layer,
-                            use_fp8_decode,
+                            LayerExecution {
+                                profile: profile.as_deref_mut(),
+                                calibration: calibration.as_deref_mut(),
+                                layer,
+                                use_fp8: use_fp8_decode,
+                            },
                         )?
                     }
                 }
@@ -1369,10 +1391,12 @@ impl Lfm2Model {
                         runtime,
                         weights,
                         &ffn_input,
-                        None,
-                        calibration.as_deref_mut(),
-                        layer,
-                        use_fp8_decode,
+                        LayerExecution {
+                            profile: None,
+                            calibration: calibration.as_deref_mut(),
+                            layer,
+                            use_fp8: use_fp8_decode,
+                        },
                     )
                 })?
             } else {
@@ -1380,10 +1404,12 @@ impl Lfm2Model {
                     runtime,
                     weights,
                     &ffn_input,
-                    profile.as_deref_mut(),
-                    calibration.as_deref_mut(),
-                    layer,
-                    use_fp8_decode,
+                    LayerExecution {
+                        profile: profile.as_deref_mut(),
+                        calibration: calibration.as_deref_mut(),
+                        layer,
+                        use_fp8: use_fp8_decode,
+                    },
                 )?
             };
             let next_norm = if layer + 1 < self.config.num_hidden_layers {
@@ -1446,11 +1472,14 @@ impl Lfm2Model {
         weights: &ConvWeights,
         normalized: &Tensor<bf16>,
         state: &mut Tensor<bf16>,
-        mut profile: Option<&mut ModelProfileRecorder>,
-        mut calibration: Option<&mut CalibrationCollector>,
-        layer: usize,
-        use_fp8: bool,
+        execution: LayerExecution<'_>,
     ) -> Result<Tensor<bf16>> {
+        let LayerExecution {
+            mut profile,
+            mut calibration,
+            layer,
+            use_fp8,
+        } = execution;
         let projected = profiled(
             runtime,
             profile.as_deref_mut(),
@@ -1505,11 +1534,14 @@ impl Lfm2Model {
         runtime: &CudaRuntime,
         weights: &LayerWeights,
         input: &Tensor<bf16>,
-        mut profile: Option<&mut ModelProfileRecorder>,
-        mut calibration: Option<&mut CalibrationCollector>,
-        layer: usize,
-        use_fp8: bool,
+        execution: LayerExecution<'_>,
     ) -> Result<Tensor<bf16>> {
+        let LayerExecution {
+            mut profile,
+            mut calibration,
+            layer,
+            use_fp8,
+        } = execution;
         if let Some(calibration) = calibration.as_deref_mut() {
             calibration.observe(
                 runtime,
@@ -1551,15 +1583,22 @@ impl Lfm2Model {
         runtime: &CudaRuntime,
         weights: &AttentionWeights,
         normalized: Tensor<bf16>,
-        cache: &mut PagedKvCache,
-        slots: &Tensor<i64>,
-        positions: &Tensor<u32>,
-        contiguous_prefill: bool,
-        mut profile: Option<&mut ModelProfileRecorder>,
-        mut calibration: Option<&mut CalibrationCollector>,
-        layer: usize,
-        use_fp8: bool,
+        step: AttentionStep<'_>,
+        execution: LayerExecution<'_>,
     ) -> Result<Tensor<bf16>> {
+        let AttentionStep {
+            cache,
+            slots,
+            positions,
+            contiguous_prefill,
+            context_tokens,
+        } = step;
+        let LayerExecution {
+            mut profile,
+            mut calibration,
+            layer,
+            use_fp8,
+        } = execution;
         let num_tokens = normalized.dims()[0];
         let (mut query, mut key, value) = profiled(
             runtime,
@@ -1582,17 +1621,50 @@ impl Lfm2Model {
             profile.as_deref_mut(),
             ProfileRegion::AttnPostprocess,
             || {
-                query =
-                    ops::rms_norm_bf16(runtime, &query, &weights.query_norm, self.config.norm_eps)?;
-                key = ops::rms_norm_bf16(runtime, &key, &weights.key_norm, self.config.norm_eps)?;
-                ops::rope_qk_bf16_inplace(
-                    runtime,
-                    &mut query,
-                    &mut key,
-                    &self.inv_freq,
-                    positions,
-                )?;
-                cache.write_lfm2(runtime, &key, &value, slots)
+                if contiguous_prefill {
+                    query = ops::rms_norm_bf16(
+                        runtime,
+                        &query,
+                        &weights.query_norm,
+                        self.config.norm_eps,
+                    )?;
+                    key = ops::rms_norm_bf16(
+                        runtime,
+                        &key,
+                        &weights.key_norm,
+                        self.config.norm_eps,
+                    )?;
+                    ops::rope_qk_bf16_inplace(
+                        runtime,
+                        &mut query,
+                        &mut key,
+                        &self.inv_freq,
+                        positions,
+                    )?;
+                    cache.write_lfm2(runtime, &key, &value, slots)
+                } else if ops::should_use_mok_one_kernel(
+                    cache.page_size().value(),
+                    context_tokens,
+                    1,
+                ) {
+                    Ok(())
+                } else {
+                    ops::qk_norm_rope_kv_write_decode_bf16(
+                        runtime,
+                        ops::QkPostprocessInput {
+                            query: &mut query,
+                            key: &key,
+                            value: &value,
+                            query_norm: &weights.query_norm,
+                            key_norm: &weights.key_norm,
+                            inv_freq: &self.inv_freq,
+                            position_ids: positions,
+                            slot_mapping: slots,
+                            eps: self.config.norm_eps,
+                        },
+                        cache,
+                    )
+                }
             },
         )?;
         let attended = profiled(
@@ -1602,8 +1674,30 @@ impl Lfm2Model {
             || {
                 if contiguous_prefill {
                     ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)
+                } else if ops::should_use_mok_one_kernel(
+                    cache.page_size().value(),
+                    context_tokens,
+                    1,
+                ) {
+                    ops::fused_paged_attention_decode_lfm2_bf16(
+                        runtime,
+                        ops::FusedPagedAttentionInput {
+                            attention: ops::FusedAttentionInput {
+                                query_raw: &query,
+                                key_raw: &key,
+                                value_raw: &value,
+                                query_norm: &weights.query_norm,
+                                key_norm: &weights.key_norm,
+                                inv_freq: &self.inv_freq,
+                                position_ids: positions,
+                                slot_mapping: slots,
+                                eps: self.config.norm_eps,
+                            },
+                            cache,
+                        },
+                    )
                 } else {
-                    ops::paged_attention_lfm2_bf16(runtime, &query, cache, positions)
+                    ops::paged_attention_fast_lfm2_bf16(runtime, &query, cache, positions)
                 }
             },
         )?
@@ -1640,28 +1734,99 @@ impl Lfm2Model {
             .reshape(Shape::new([num_tokens, 8, 64]))?;
         let value = linear_dispatch(runtime, &normalized, &weights.value, use_fp8)?
             .reshape(Shape::new([num_tokens, 8, 64]))?;
-        query = ops::rms_norm_bf16(runtime, &query, &weights.query_norm, self.config.norm_eps)?;
-        key = ops::rms_norm_bf16(runtime, &key, &weights.key_norm, self.config.norm_eps)?;
-        ops::rope_qk_bf16_inplace(
-            runtime,
-            &mut query,
-            &mut key,
-            &self.inv_freq,
-            metadata.positions(),
-        )?;
-        arena.write_lfm2(runtime, &key, &value, metadata.physical_slots())?;
-        let attended = ops::hybrid_ragged_attention_lfm2_bf16(
-            runtime,
-            &query,
-            &key,
-            &value,
-            arena,
-            metadata.block_tables(),
-            metadata.block_table_stride(),
-            metadata.request_slots(),
-            metadata.positions(),
-            metadata.segment_offsets(),
-        )?
+
+        let decode_only = metadata.segment_slots().numel() == num_tokens
+            && metadata.segment_offsets().numel() == num_tokens + 1;
+        let one_kernel_decode = decode_only
+            && ops::should_use_mok_one_kernel(
+                arena.page_size().value(),
+                metadata.max_context_tokens(),
+                num_tokens,
+            );
+        let attended = if one_kernel_decode {
+            ops::fused_ragged_paged_attention_decode_lfm2_bf16(
+                runtime,
+                ops::FusedRaggedAttentionInput {
+                    attention: ops::FusedAttentionInput {
+                        query_raw: &query,
+                        key_raw: &key,
+                        value_raw: &value,
+                        query_norm: &weights.query_norm,
+                        key_norm: &weights.key_norm,
+                        inv_freq: &self.inv_freq,
+                        position_ids: metadata.positions(),
+                        slot_mapping: metadata.physical_slots(),
+                        eps: self.config.norm_eps,
+                    },
+                    arena,
+                    block_tables: metadata.block_tables(),
+                    block_table_stride: metadata.block_table_stride(),
+                    request_slots: metadata.request_slots(),
+                },
+            )?
+        } else if decode_only {
+            ops::qk_norm_rope_kv_write_arena_decode_bf16(
+                runtime,
+                ops::QkPostprocessInput {
+                    query: &mut query,
+                    key: &key,
+                    value: &value,
+                    query_norm: &weights.query_norm,
+                    key_norm: &weights.key_norm,
+                    inv_freq: &self.inv_freq,
+                    position_ids: metadata.positions(),
+                    slot_mapping: metadata.physical_slots(),
+                    eps: self.config.norm_eps,
+                },
+                arena,
+            )?;
+            ops::paged_ragged_attention_fast_lfm2_bf16(
+                runtime,
+                ops::FastRaggedAttentionInput {
+                    query: &query,
+                    arena,
+                    block_tables: metadata.block_tables(),
+                    block_table_stride: metadata.block_table_stride(),
+                    request_slots: metadata.request_slots(),
+                    position_ids: metadata.positions(),
+                },
+            )?
+        } else {
+            query = ops::rms_norm_bf16(
+                runtime,
+                &query,
+                &weights.query_norm,
+                self.config.norm_eps,
+            )?;
+            key = ops::rms_norm_bf16(
+                runtime,
+                &key,
+                &weights.key_norm,
+                self.config.norm_eps,
+            )?;
+            ops::rope_qk_bf16_inplace(
+                runtime,
+                &mut query,
+                &mut key,
+                &self.inv_freq,
+                metadata.positions(),
+            )?;
+            arena.write_lfm2(runtime, &key, &value, metadata.physical_slots())?;
+            ops::hybrid_ragged_attention_lfm2_bf16(
+                runtime,
+                ops::HybridRaggedAttentionInput {
+                    query: &query,
+                    current_key: &key,
+                    current_value: &value,
+                    arena,
+                    block_tables: metadata.block_tables(),
+                    block_table_stride: metadata.block_table_stride(),
+                    request_slots: metadata.request_slots(),
+                    position_ids: metadata.positions(),
+                    segment_offsets: metadata.segment_offsets(),
+                },
+            )?
+        }
         .reshape(Shape::new([num_tokens, self.config.hidden_size]))?;
         linear_dispatch(runtime, &attended, &weights.output, use_fp8)
     }

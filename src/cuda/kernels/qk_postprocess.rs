@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
-use cudarc::driver::{
-    CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
-};
+use cudarc::driver::{CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::bf16;
 
 use crate::cuda::{launch::KernelLaunch, module::load_function};
@@ -11,6 +9,23 @@ use crate::cuda::{launch::KernelLaunch, module::load_function};
 use super::kernel_set::KernelSet;
 
 const BLOCK_SIZE: u32 = 256;
+
+pub(crate) struct QkPostprocessLaunch<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query: &'a mut CudaSlice<bf16>,
+    pub(crate) key: &'a CudaSlice<bf16>,
+    pub(crate) value: &'a CudaSlice<bf16>,
+    pub(crate) query_norm: &'a CudaSlice<bf16>,
+    pub(crate) key_norm: &'a CudaSlice<bf16>,
+    pub(crate) inv_freq: &'a CudaSlice<f32>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) slot_mapping: &'a CudaSlice<i64>,
+    pub(crate) key_cache: &'a mut CudaSlice<bf16>,
+    pub(crate) value_cache: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+    pub(crate) eps: f32,
+}
 
 pub(crate) struct QkPostprocessKernels {
     ps16: KernelLaunch,
@@ -50,25 +65,27 @@ impl KernelSet for QkPostprocessKernels {
 }
 
 impl QkPostprocessKernels {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_decode(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query: &mut CudaSlice<bf16>,
-        key: &CudaSlice<bf16>,
-        value: &CudaSlice<bf16>,
-        query_norm: &CudaSlice<bf16>,
-        key_norm: &CudaSlice<bf16>,
-        inv_freq: &CudaSlice<f32>,
-        position_ids: &CudaSlice<u32>,
-        slot_mapping: &CudaSlice<i64>,
-        key_cache: &mut CudaSlice<bf16>,
-        value_cache: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        eps: f32,
+        launch: QkPostprocessLaunch<'_>,
     ) -> Result<()> {
+        let QkPostprocessLaunch {
+            page_size,
+            query,
+            key,
+            value,
+            query_norm,
+            key_norm,
+            inv_freq,
+            position_ids,
+            slot_mapping,
+            key_cache,
+            value_cache,
+            num_tokens,
+            num_pages,
+            eps,
+        } = launch;
         ensure!(num_tokens > 0, "fused QK postprocess requires tokens");
         ensure!(num_pages > 0, "fused QK postprocess requires cache pages");
         let q_required = num_tokens

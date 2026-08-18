@@ -11,9 +11,9 @@ use crate::{
 };
 
 use super::{
-    fused_ragged_paged_attention_decode_lfm2_bf16,
-    paged_ragged_attention_fast_lfm2_bf16,
-    qk_norm_rope_kv_write_arena_decode_bf16,
+    FastRaggedAttentionInput, FusedAttentionInput, FusedRaggedAttentionInput,
+    QkPostprocessInput, fused_ragged_paged_attention_decode_lfm2_bf16,
+    paged_ragged_attention_fast_lfm2_bf16, qk_norm_rope_kv_write_arena_decode_bf16,
 };
 
 const EPS: f32 = 1.0e-5;
@@ -70,10 +70,7 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                 let request_slots_host = (0..batch)
                     .map(u32::try_from)
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                let request_slots = runtime.upload(
-                    &request_slots_host,
-                    Shape::new([batch]),
-                )?;
+                let request_slots = runtime.upload(&request_slots_host, Shape::new([batch]))?;
                 let positions_host = vec![u32::try_from(context - 1)?; batch];
                 let positions = runtime.upload(&positions_host, Shape::new([batch]))?;
 
@@ -88,10 +85,7 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                         history_slots_host.push(i64::try_from(physical_page * page + offset)?);
                     }
                 }
-                let history_slots = runtime.upload(
-                    &history_slots_host,
-                    Shape::new([history_tokens]),
-                )?;
+                let history_slots = runtime.upload(&history_slots_host, Shape::new([history_tokens]))?;
                 let history_key = runtime.upload(
                     &bf16_values(history_tokens * 8 * 64, 11, 83, 41.0, 64.0),
                     Shape::new([history_tokens, 8, 64]),
@@ -108,10 +102,7 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                     let offset = position % page;
                     current_slots_host.push(i64::try_from(physical_page * page + offset)?);
                 }
-                let current_slots = runtime.upload(
-                    &current_slots_host,
-                    Shape::new([batch]),
-                )?;
+                let current_slots = runtime.upload(&current_slots_host, Shape::new([batch]))?;
 
                 let query_host = bf16_values(batch * 32 * 64, 17, 101, 50.0, 64.0);
                 let key_host = bf16_values(batch * 8 * 64, 13, 89, 44.0, 64.0);
@@ -138,41 +129,49 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
 
                 qk_norm_rope_kv_write_arena_decode_bf16(
                     &runtime,
-                    &mut reference_query,
-                    &key_raw,
-                    &value_raw,
-                    &query_norm,
-                    &key_norm,
-                    &inv_freq,
-                    &positions,
-                    &current_slots,
+                    QkPostprocessInput {
+                        query: &mut reference_query,
+                        key: &key_raw,
+                        value: &value_raw,
+                        query_norm: &query_norm,
+                        key_norm: &key_norm,
+                        inv_freq: &inv_freq,
+                        position_ids: &positions,
+                        slot_mapping: &current_slots,
+                        eps: EPS,
+                    },
                     &mut reference_arena,
-                    EPS,
                 )?;
                 drop(paged_ragged_attention_fast_lfm2_bf16(
                     &runtime,
-                    &reference_query,
-                    &reference_arena,
-                    &block_tables,
-                    pages_per_request,
-                    &request_slots,
-                    &positions,
+                    FastRaggedAttentionInput {
+                        query: &reference_query,
+                        arena: &reference_arena,
+                        block_tables: &block_tables,
+                        block_table_stride: pages_per_request,
+                        request_slots: &request_slots,
+                        position_ids: &positions,
+                    },
                 )?);
                 drop(fused_ragged_paged_attention_decode_lfm2_bf16(
                     &runtime,
-                    &query_raw,
-                    &key_raw,
-                    &value_raw,
-                    &query_norm,
-                    &key_norm,
-                    &inv_freq,
-                    &block_tables,
-                    pages_per_request,
-                    &request_slots,
-                    &positions,
-                    &current_slots,
-                    &mut fused_arena,
-                    EPS,
+                    FusedRaggedAttentionInput {
+                        attention: FusedAttentionInput {
+                            query_raw: &query_raw,
+                            key_raw: &key_raw,
+                            value_raw: &value_raw,
+                            query_norm: &query_norm,
+                            key_norm: &key_norm,
+                            inv_freq: &inv_freq,
+                            position_ids: &positions,
+                            slot_mapping: &current_slots,
+                            eps: EPS,
+                        },
+                        arena: &mut fused_arena,
+                        block_tables: &block_tables,
+                        block_table_stride: pages_per_request,
+                        request_slots: &request_slots,
+                    },
                 )?);
                 runtime.synchronize()?;
 
@@ -183,44 +182,52 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                     || {
                         qk_norm_rope_kv_write_arena_decode_bf16(
                             &runtime,
-                            &mut reference_query,
-                            &key_raw,
-                            &value_raw,
-                            &query_norm,
-                            &key_norm,
-                            &inv_freq,
-                            &positions,
-                            &current_slots,
+                            QkPostprocessInput {
+                                query: &mut reference_query,
+                                key: &key_raw,
+                                value: &value_raw,
+                                query_norm: &query_norm,
+                                key_norm: &key_norm,
+                                inv_freq: &inv_freq,
+                                position_ids: &positions,
+                                slot_mapping: &current_slots,
+                                eps: EPS,
+                            },
                             &mut reference_arena,
-                            EPS,
                         )?;
                         drop(paged_ragged_attention_fast_lfm2_bf16(
                             &runtime,
-                            &reference_query,
-                            &reference_arena,
-                            &block_tables,
-                            pages_per_request,
-                            &request_slots,
-                            &positions,
+                            FastRaggedAttentionInput {
+                                query: &reference_query,
+                                arena: &reference_arena,
+                                block_tables: &block_tables,
+                                block_table_stride: pages_per_request,
+                                request_slots: &request_slots,
+                                position_ids: &positions,
+                            },
                         )?);
                         Ok(())
                     },
                     || {
                         drop(fused_ragged_paged_attention_decode_lfm2_bf16(
                             &runtime,
-                            &query_raw,
-                            &key_raw,
-                            &value_raw,
-                            &query_norm,
-                            &key_norm,
-                            &inv_freq,
-                            &block_tables,
-                            pages_per_request,
-                            &request_slots,
-                            &positions,
-                            &current_slots,
-                            &mut fused_arena,
-                            EPS,
+                            FusedRaggedAttentionInput {
+                                attention: FusedAttentionInput {
+                                    query_raw: &query_raw,
+                                    key_raw: &key_raw,
+                                    value_raw: &value_raw,
+                                    query_norm: &query_norm,
+                                    key_norm: &key_norm,
+                                    inv_freq: &inv_freq,
+                                    position_ids: &positions,
+                                    slot_mapping: &current_slots,
+                                    eps: EPS,
+                                },
+                                arena: &mut fused_arena,
+                                block_tables: &block_tables,
+                                block_table_stride: pages_per_request,
+                                request_slots: &request_slots,
+                            },
                         )?);
                         Ok(())
                     },
