@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/mok-fused-attention
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/mok-fused-attention
           fetch-depth: 0
 
       - name: Apply audited lfm2 patch
