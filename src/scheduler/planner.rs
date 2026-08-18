@@ -98,6 +98,8 @@ impl SchedulerCostTable {
                 .into_boxed_slice()
         };
 
+        let decode_bf16 = build_decode(false);
+        let decode_fp8 = build_decode(true);
         let prefill = PREFILL_CANDIDATES
             .into_iter()
             .filter(|&tokens| tokens <= maximum_prefill_tokens)
@@ -107,8 +109,8 @@ impl SchedulerCostTable {
 
         Ok(Self {
             context_buckets: context_buckets.into_boxed_slice(),
-            decode_bf16: build_decode(false),
-            decode_fp8: build_decode(true),
+            decode_bf16,
+            decode_fp8,
             prefill,
             fallback: cost.clone(),
         })
