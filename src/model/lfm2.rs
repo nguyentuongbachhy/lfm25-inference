@@ -61,7 +61,7 @@ impl LinearWeight {
 }
 
 enum OperatorWeights {
-    Conv(ConvWeights),
+    Conv(Box<ConvWeights>),
     Attention(Box<AttentionWeights>),
 }
 
@@ -119,7 +119,7 @@ impl Lfm2Weights {
                     key_norm: store.take(&format!("{prefix}.self_attn.k_layernorm.weight"))?,
                 }))
             } else {
-                OperatorWeights::Conv(ConvWeights {
+                OperatorWeights::Conv(Box::new(ConvWeights {
                     input: LinearWeight::bf16(
                         store.take(&format!("{prefix}.conv.in_proj.weight"))?,
                     ),
@@ -127,7 +127,7 @@ impl Lfm2Weights {
                     output: LinearWeight::bf16(
                         store.take(&format!("{prefix}.conv.out_proj.weight"))?,
                     ),
-                })
+                }))
             };
             layers.push(LayerWeights {
                 operator_norm,
@@ -1440,16 +1440,16 @@ impl Lfm2Model {
             }
         }
 
-        if let Some(capture) = capture.as_deref_mut() {
+        if let Some(capture) = capture {
             capture.observe_last_row(runtime, "final_rms_norm", &normalized)?;
         }
 
-        if let Some(calibration) = calibration.as_deref_mut() {
+        if let Some(calibration) = calibration {
             calibration.observe_last_row(runtime, "lm_head.input", &normalized)?;
         }
         let logits = profiled(
             runtime,
-            profile.as_deref_mut(),
+            profile,
             ProfileRegion::LmHead,
             || match (use_fp8_decode, self.weights.lm_head_fp8.as_ref()) {
                 (true, Some(fp8)) => ops::linear_last_row_fp8_e4m3(
@@ -1476,7 +1476,7 @@ impl Lfm2Model {
     ) -> Result<Tensor<bf16>> {
         let LayerExecution {
             mut profile,
-            mut calibration,
+            calibration,
             layer,
             use_fp8,
         } = execution;
@@ -1492,7 +1492,7 @@ impl Lfm2Model {
             ProfileRegion::ConvKernel,
             || ops::short_conv_lfm2_bf16(runtime, &projected, &weights.convolution, state),
         )?;
-        if let Some(calibration) = calibration.as_deref_mut() {
+        if let Some(calibration) = calibration {
             calibration.observe(
                 runtime,
                 format!("layers.{layer}.conv.output.input"),
@@ -1502,7 +1502,7 @@ impl Lfm2Model {
         }
         profiled(
             runtime,
-            profile.as_deref_mut(),
+            profile,
             ProfileRegion::ConvOutProj,
             || linear_dispatch(runtime, &mixed, &weights.output, use_fp8),
         )
@@ -1562,7 +1562,7 @@ impl Lfm2Model {
             ProfileRegion::MlpSilu,
             || ops::silu_mul_packed_bf16(runtime, &gate_up),
         )?;
-        if let Some(calibration) = calibration.as_deref_mut() {
+        if let Some(calibration) = calibration {
             calibration.observe(
                 runtime,
                 format!("layers.{layer}.mlp.down.input"),
@@ -1572,7 +1572,7 @@ impl Lfm2Model {
         }
         profiled(
             runtime,
-            profile.as_deref_mut(),
+            profile,
             ProfileRegion::MlpDownGemm,
             || linear_dispatch(runtime, &activated, &weights.feed_forward.down, use_fp8),
         )
@@ -1595,7 +1595,7 @@ impl Lfm2Model {
         } = step;
         let LayerExecution {
             mut profile,
-            mut calibration,
+            calibration,
             layer,
             use_fp8,
         } = execution;
@@ -1702,7 +1702,7 @@ impl Lfm2Model {
             },
         )?
         .reshape(Shape::new([num_tokens, self.config.hidden_size]))?;
-        if let Some(calibration) = calibration.as_deref_mut() {
+        if let Some(calibration) = calibration {
             calibration.observe(
                 runtime,
                 format!("layers.{layer}.attention.output.input"),
@@ -1712,7 +1712,7 @@ impl Lfm2Model {
         }
         profiled(
             runtime,
-            profile.as_deref_mut(),
+            profile,
             ProfileRegion::AttnOutProj,
             || linear_dispatch(runtime, &attended, &weights.output, use_fp8),
         )
