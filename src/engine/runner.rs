@@ -996,6 +996,9 @@ impl Engine {
                     identical_sequence_row_nrmse_max: row_nrmse_max,
                     identical_sequence_top1_agreement: row_top1_agreement,
                 });
+                for slot in 0..batch {
+                    cache.release(&self.runtime, slot)?;
+                }
                 eprintln!(
                     "serving decode B={batch} ctx={context}: mean={step_mean_ms:.3}ms p95={step_p95_ms:.3}ms tok/s={output_tokens_per_second:.1}"
                 );
@@ -2379,15 +2382,15 @@ mod tests {
             Some("hello".into())
         );
         assert_eq!(
-            calibration_text_from_line(r#"{"text":"world"}"#)?,
+            calibration_text_from_line(r#"{\"text\":\"world\"}"#)?,
             Some("world".into())
         );
         assert_eq!(calibration_text_from_line("  ")?, None);
         assert_eq!(
-            calibration_text_from_line(r#""ordinary quoted prose without a closing JSON quote"#)?,
-            Some(r#""ordinary quoted prose without a closing JSON quote"#.into())
+            calibration_text_from_line(r#"\"ordinary quoted prose without a closing JSON quote"#)?,
+            Some(r#"\"ordinary quoted prose without a closing JSON quote"#.into())
         );
-        assert!(calibration_text_from_line(r#"{"id":1}"#).is_err());
+        assert!(calibration_text_from_line(r#"{\"id\":1}"#).is_err());
         Ok(())
     }
 }
