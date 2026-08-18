@@ -60,6 +60,9 @@ pub fn run_serving_load_benchmark(
             let _ = result_sender.send(result);
         })
         .context("failed to spawn serving load driver")?;
+    // The benchmark uses the same single-owner runtime contract as production
+    // serving so CPU hot-path measurements include the lock-free steady state.
+    engine.enter_serving_owner_mode()?;
     let owner = engine.run_continuous_owner(config, receiver, ready_sender)?;
     let scenarios = result_receiver
         .recv()
