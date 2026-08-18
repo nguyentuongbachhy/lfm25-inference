@@ -105,6 +105,7 @@ impl CudaRuntime {
             src.len() == shape.numel(),
             "upload shape mismatch: shape requires {} elements, source contains {}",
             shape.numel(),
+            src.len(),
         );
 
         let storage = self
