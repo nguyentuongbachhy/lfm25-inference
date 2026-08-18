@@ -3,27 +3,41 @@ use half::bf16;
 
 use crate::{
     cache::{PagedKvArena, PagedKvCache},
-    cuda::CudaRuntime,
+    cuda::{CudaRuntime, QkPostprocessLaunch},
     tensor::Tensor,
 };
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct QkPostprocessInput<'a> {
+    pub(crate) query: &'a mut Tensor<bf16>,
+    pub(crate) key: &'a Tensor<bf16>,
+    pub(crate) value: &'a Tensor<bf16>,
+    pub(crate) query_norm: &'a Tensor<bf16>,
+    pub(crate) key_norm: &'a Tensor<bf16>,
+    pub(crate) inv_freq: &'a Tensor<f32>,
+    pub(crate) position_ids: &'a Tensor<u32>,
+    pub(crate) slot_mapping: &'a Tensor<i64>,
+    pub(crate) eps: f32,
+}
+
 fn launch_qk_postprocess(
     runtime: &CudaRuntime,
-    query: &mut Tensor<bf16>,
-    key: &Tensor<bf16>,
-    value: &Tensor<bf16>,
-    query_norm: &Tensor<bf16>,
-    key_norm: &Tensor<bf16>,
-    inv_freq: &Tensor<f32>,
-    position_ids: &Tensor<u32>,
-    slot_mapping: &Tensor<i64>,
+    input: QkPostprocessInput<'_>,
     key_cache: &mut Tensor<bf16>,
     value_cache: &mut Tensor<bf16>,
     page_size: usize,
     num_pages: usize,
-    eps: f32,
 ) -> Result<()> {
+    let QkPostprocessInput {
+        query,
+        key,
+        value,
+        query_norm,
+        key_norm,
+        inv_freq,
+        position_ids,
+        slot_mapping,
+        eps,
+    } = input;
     ensure!(
         query.rank() == 3 && query.dims()[1..] == [32, 64],
         "fused query must have shape [N,32,64]"
@@ -34,8 +48,14 @@ fn launch_qk_postprocess(
         "fused key must have shape [N,8,64]"
     );
     ensure!(value.shape() == key.shape(), "fused K/V shape mismatch");
-    ensure!(query_norm.numel() == 64, "query norm weight must have 64 elements");
-    ensure!(key_norm.numel() == 64, "key norm weight must have 64 elements");
+    ensure!(
+        query_norm.numel() == 64,
+        "query norm weight must have 64 elements"
+    );
+    ensure!(
+        key_norm.numel() == 64,
+        "key norm weight must have 64 elements"
+    );
     ensure!(inv_freq.numel() == 32, "RoPE inv_freq must have 32 elements");
     ensure!(position_ids.numel() == num_tokens, "position count mismatch");
     ensure!(slot_mapping.numel() == num_tokens, "slot mapping count mismatch");
@@ -43,92 +63,60 @@ fn launch_qk_postprocess(
     unsafe {
         runtime.kernels().qk_postprocess().launch_decode(
             runtime.stream(),
-            page_size,
-            query.storage_mut(),
-            key.storage(),
-            value.storage(),
-            query_norm.storage(),
-            key_norm.storage(),
-            inv_freq.storage(),
-            position_ids.storage(),
-            slot_mapping.storage(),
-            key_cache.storage_mut(),
-            value_cache.storage_mut(),
-            num_tokens,
-            num_pages,
-            eps,
+            QkPostprocessLaunch {
+                page_size,
+                query: query.storage_mut(),
+                key: key.storage(),
+                value: value.storage(),
+                query_norm: query_norm.storage(),
+                key_norm: key_norm.storage(),
+                inv_freq: inv_freq.storage(),
+                position_ids: position_ids.storage(),
+                slot_mapping: slot_mapping.storage(),
+                key_cache: key_cache.storage_mut(),
+                value_cache: value_cache.storage_mut(),
+                num_tokens,
+                num_pages,
+                eps,
+            },
         )?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
     runtime: &CudaRuntime,
-    query: &mut Tensor<bf16>,
-    key: &Tensor<bf16>,
-    value: &Tensor<bf16>,
-    query_norm: &Tensor<bf16>,
-    key_norm: &Tensor<bf16>,
-    inv_freq: &Tensor<f32>,
-    position_ids: &Tensor<u32>,
-    slot_mapping: &Tensor<i64>,
+    input: QkPostprocessInput<'_>,
     cache: &mut PagedKvCache,
-    eps: f32,
 ) -> Result<()> {
     let page_size = cache.page_size().value();
     let num_pages = cache.num_pages();
     let (key_cache, value_cache) = cache.kv_mut();
     launch_qk_postprocess(
         runtime,
-        query,
-        key,
-        value,
-        query_norm,
-        key_norm,
-        inv_freq,
-        position_ids,
-        slot_mapping,
+        input,
         key_cache,
         value_cache,
         page_size,
         num_pages,
-        eps,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn qk_norm_rope_kv_write_arena_decode_bf16(
     runtime: &CudaRuntime,
-    query: &mut Tensor<bf16>,
-    key: &Tensor<bf16>,
-    value: &Tensor<bf16>,
-    query_norm: &Tensor<bf16>,
-    key_norm: &Tensor<bf16>,
-    inv_freq: &Tensor<f32>,
-    position_ids: &Tensor<u32>,
-    physical_slots: &Tensor<i64>,
+    input: QkPostprocessInput<'_>,
     arena: &mut PagedKvArena,
-    eps: f32,
 ) -> Result<()> {
     let page_size = arena.page_size().value();
     let num_pages = arena.num_pages();
     let (key_cache, value_cache) = arena.kv_mut();
     launch_qk_postprocess(
         runtime,
-        query,
-        key,
-        value,
-        query_norm,
-        key_norm,
-        inv_freq,
-        position_ids,
-        physical_slots,
+        input,
         key_cache,
         value_cache,
         page_size,
         num_pages,
-        eps,
     )
 }
 
@@ -150,11 +138,26 @@ mod tests {
 
     const EPS: f32 = 1.0e-5;
 
-    fn bf16_values(elements: usize, mul: usize, modulus: usize, center: f32, scale: f32) -> Vec<bf16> {
+    struct ReferenceInput<'a> {
+        query_raw: &'a Tensor<bf16>,
+        key_raw: &'a Tensor<bf16>,
+        value: &'a Tensor<bf16>,
+        query_norm: &'a Tensor<bf16>,
+        key_norm: &'a Tensor<bf16>,
+        inv_freq: &'a Tensor<f32>,
+        positions: &'a Tensor<u32>,
+        slots: &'a Tensor<i64>,
+    }
+
+    fn bf16_values(
+        elements: usize,
+        mul: usize,
+        modulus: usize,
+        center: f32,
+        scale: f32,
+    ) -> Vec<bf16> {
         (0..elements)
-            .map(|index| {
-                bf16::from_f32(((index * mul % modulus) as f32 - center) / scale)
-            })
+            .map(|index| bf16::from_f32(((index * mul % modulus) as f32 - center) / scale))
             .collect()
     }
 
@@ -172,20 +175,13 @@ mod tests {
 
     fn run_reference(
         runtime: &CudaRuntime,
-        query_raw: &Tensor<bf16>,
-        key_raw: &Tensor<bf16>,
-        value: &Tensor<bf16>,
-        query_norm: &Tensor<bf16>,
-        key_norm: &Tensor<bf16>,
-        inv_freq: &Tensor<f32>,
-        positions: &Tensor<u32>,
-        slots: &Tensor<i64>,
+        input: ReferenceInput<'_>,
         cache: &mut PagedKvCache,
     ) -> Result<Tensor<bf16>> {
-        let mut query = rms_norm_bf16(runtime, query_raw, query_norm, EPS)?;
-        let mut key = rms_norm_bf16(runtime, key_raw, key_norm, EPS)?;
-        rope_qk_bf16_inplace(runtime, &mut query, &mut key, inv_freq, positions)?;
-        cache.write_lfm2(runtime, &key, value, slots)?;
+        let mut query = rms_norm_bf16(runtime, input.query_raw, input.query_norm, EPS)?;
+        let mut key = rms_norm_bf16(runtime, input.key_raw, input.key_norm, EPS)?;
+        rope_qk_bf16_inplace(runtime, &mut query, &mut key, input.inv_freq, input.positions)?;
+        cache.write_lfm2(runtime, &key, input.value, input.slots)?;
         Ok(query)
     }
 
@@ -214,14 +210,16 @@ mod tests {
         let mut reference_cache = PagedKvCache::new(&runtime, size * 2, page_size)?;
         let reference_query = run_reference(
             &runtime,
-            &query_raw,
-            &key_raw,
-            &value,
-            &query_norm,
-            &key_norm,
-            &inv_freq,
-            &positions,
-            &slots,
+            ReferenceInput {
+                query_raw: &query_raw,
+                key_raw: &key_raw,
+                value: &value,
+                query_norm: &query_norm,
+                key_norm: &key_norm,
+                inv_freq: &inv_freq,
+                positions: &positions,
+                slots: &slots,
+            },
             &mut reference_cache,
         )?;
 
@@ -229,16 +227,18 @@ mod tests {
         let mut fused_cache = PagedKvCache::new(&runtime, size * 2, page_size)?;
         qk_norm_rope_kv_write_decode_bf16(
             &runtime,
-            &mut fused_query,
-            &key_raw,
-            &value,
-            &query_norm,
-            &key_norm,
-            &inv_freq,
-            &positions,
-            &slots,
+            QkPostprocessInput {
+                query: &mut fused_query,
+                key: &key_raw,
+                value: &value,
+                query_norm: &query_norm,
+                key_norm: &key_norm,
+                inv_freq: &inv_freq,
+                position_ids: &positions,
+                slot_mapping: &slots,
+                eps: EPS,
+            },
             &mut fused_cache,
-            EPS,
         )?;
 
         assert_close_bf16(
@@ -301,14 +301,16 @@ mod tests {
 
             let _ = run_reference(
                 &runtime,
-                &query_raw,
-                &key_raw,
-                &value,
-                &query_norm,
-                &key_norm,
-                &inv_freq,
-                &position,
-                &slot,
+                ReferenceInput {
+                    query_raw: &query_raw,
+                    key_raw: &key_raw,
+                    value: &value,
+                    query_norm: &query_norm,
+                    key_norm: &key_norm,
+                    inv_freq: &inv_freq,
+                    positions: &position,
+                    slots: &slot,
+                },
                 &mut reference_cache,
             )?;
             runtime.synchronize()?;
@@ -316,14 +318,16 @@ mod tests {
             let reference = benchmark_gpu(runtime.context(), runtime.stream(), config, || {
                 let _query = run_reference(
                     &runtime,
-                    &query_raw,
-                    &key_raw,
-                    &value,
-                    &query_norm,
-                    &key_norm,
-                    &inv_freq,
-                    &position,
-                    &slot,
+                    ReferenceInput {
+                        query_raw: &query_raw,
+                        key_raw: &key_raw,
+                        value: &value,
+                        query_norm: &query_norm,
+                        key_norm: &key_norm,
+                        inv_freq: &inv_freq,
+                        positions: &position,
+                        slots: &slot,
+                    },
                     &mut reference_cache,
                 )?;
                 Ok(())
@@ -332,16 +336,18 @@ mod tests {
             let fused = benchmark_gpu(runtime.context(), runtime.stream(), config, || {
                 qk_norm_rope_kv_write_decode_bf16(
                     &runtime,
-                    &mut fused_query,
-                    &key_raw,
-                    &value,
-                    &query_norm,
-                    &key_norm,
-                    &inv_freq,
-                    &position,
-                    &slot,
+                    QkPostprocessInput {
+                        query: &mut fused_query,
+                        key: &key_raw,
+                        value: &value,
+                        query_norm: &query_norm,
+                        key_norm: &key_norm,
+                        inv_freq: &inv_freq,
+                        position_ids: &position,
+                        slot_mapping: &slot,
+                        eps: EPS,
+                    },
                     &mut fused_cache,
-                    EPS,
                 )
             })?;
 

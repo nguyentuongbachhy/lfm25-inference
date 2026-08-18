@@ -3,7 +3,7 @@ use half::bf16;
 
 use crate::{
     cuda::{
-        CudaRuntime,
+        CudaRuntime, KvCacheWriteLaunch,
         benchmark::{BenchConfig, benchmark_gpu},
         testing::{assert_eq_bf16, readback},
     },
@@ -28,14 +28,16 @@ fn raw_write(page_size: usize) -> Result<()> {
     unsafe {
         runtime.kernels().kv_cache().launch_write_lfm2_bf16(
             runtime.stream(),
-            page_size,
-            key.storage(),
-            value.storage(),
-            key_cache.storage_mut(),
-            value_cache.storage_mut(),
-            slots.storage(),
-            num_tokens,
-            num_pages,
+            KvCacheWriteLaunch {
+                page_size,
+                key: key.storage(),
+                value: value.storage(),
+                key_cache: key_cache.storage_mut(),
+                value_cache: value_cache.storage_mut(),
+                slot_mapping: slots.storage(),
+                num_tokens,
+                num_pages,
+            },
         )?;
     }
     let actual = readback(&runtime, &key_cache)?;
@@ -89,14 +91,16 @@ fn bench_kv_cache_write_lfm2_bf16() -> Result<()> {
                 unsafe {
                     runtime.kernels().kv_cache().launch_write_lfm2_bf16(
                         runtime.stream(),
-                        page_size,
-                        key.storage(),
-                        value.storage(),
-                        key_cache.storage_mut(),
-                        value_cache.storage_mut(),
-                        slots.storage(),
-                        num_tokens,
-                        num_pages,
+                        KvCacheWriteLaunch {
+                            page_size,
+                            key: key.storage(),
+                            value: value.storage(),
+                            key_cache: key_cache.storage_mut(),
+                            value_cache: value_cache.storage_mut(),
+                            slot_mapping: slots.storage(),
+                            num_tokens,
+                            num_pages,
+                        },
                     )?;
                 }
                 Ok(())

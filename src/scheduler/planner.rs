@@ -144,7 +144,7 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use crate::scheduler::{CostCurve, CostPoint};
+    use crate::scheduler::{CostCurve, CostPoint, RequestInit};
 
     use super::*;
 
@@ -183,12 +183,18 @@ mod tests {
         let decode = slots.acquire().expect("decode slot");
         slots
             .get_mut(decode)?
-            .initialize(1, &[1], 512, 0, 400_000, 50_000, 32)?;
+            .initialize(RequestInit::new(1, &[1], 512, 0, 400_000, 50_000, 32))?;
         slots.get_mut(decode)?.phase = RequestPhase::Decoding;
         let prefill = slots.acquire().expect("prefill slot");
-        slots
-            .get_mut(prefill)?
-            .initialize(2, &[2; 256], 512, 0, 400_000, 50_000, 32)?;
+        slots.get_mut(prefill)?.initialize(RequestInit::new(
+            2,
+            &[2; 256],
+            512,
+            0,
+            400_000,
+            50_000,
+            32,
+        ))?;
         let mut scheduler = Scheduler::new(3, SchedulerConfig::default(), cost_model()?)?;
         let capacity = scheduler.plan.work.capacity();
         let plan = scheduler.schedule(&slots, 10_000);

@@ -1,6 +1,4 @@
 mod attention;
-#[cfg(test)]
-mod attention_async;
 mod attention_async_fast;
 mod attention_fused;
 mod embedding;
@@ -9,7 +7,6 @@ mod gather;
 mod kernel_set;
 mod kv_cache;
 mod qk_postprocess;
-mod residual;
 mod rms_norm;
 mod rope;
 mod sampling;
@@ -21,35 +18,44 @@ use std::sync::Arc;
 use anyhow::Result;
 use cudarc::driver::CudaContext;
 
-use attention::AttentionKernels;
+pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
 #[cfg(test)]
-use attention_async::AsyncAttentionKernels;
+pub(crate) use attention::RaggedAttentionLaunch;
+use attention::AttentionKernels;
+pub(crate) use attention_async_fast::FastRaggedAttentionLaunch;
 use attention_async_fast::AsyncAttentionFastKernels;
+pub(crate) use attention_fused::{
+    FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch,
+};
 use attention_fused::FusedAttentionKernels;
+pub(crate) use embedding::EmbeddingLaunch;
 use embedding::EmbeddingKernels;
 use fp8_quantize::Fp8QuantizeKernels;
+pub(crate) use gather::GatherLaunch;
 use gather::GatherKernels;
 use kernel_set::KernelSet;
+pub(crate) use kv_cache::KvCacheWriteLaunch;
 use kv_cache::KvCacheKernels;
+pub(crate) use qk_postprocess::QkPostprocessLaunch;
 use qk_postprocess::QkPostprocessKernels;
-use residual::ResidualKernels;
+pub(crate) use rms_norm::{ResidualRmsNormLaunch, RmsNormLaunch};
 use rms_norm::RmsNormKernels;
+pub(crate) use rope::RopeLaunch;
 use rope::RopeKernels;
 use sampling::SamplingKernels;
+#[cfg(test)]
+pub(crate) use short_conv::RaggedShortConvLaunch;
+pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch};
 use short_conv::ShortConvKernels;
 use silu_mul::SiluMulKernels;
 
 pub(crate) struct Kernels {
-    #[allow(dead_code)]
-    residual: ResidualKernels,
     embedding: EmbeddingKernels,
     rms_norm: RmsNormKernels,
     silu_mul: SiluMulKernels,
     rope: RopeKernels,
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
-    #[cfg(test)]
-    attention_async: AsyncAttentionKernels,
     attention_async_fast: AsyncAttentionFastKernels,
     attention_fused: FusedAttentionKernels,
     qk_postprocess: QkPostprocessKernels,
@@ -62,15 +68,12 @@ pub(crate) struct Kernels {
 impl Kernels {
     pub(crate) fn load(context: &Arc<CudaContext>) -> Result<Self> {
         Ok(Self {
-            residual: ResidualKernels::load(context)?,
             embedding: EmbeddingKernels::load(context)?,
             rms_norm: RmsNormKernels::load(context)?,
             silu_mul: SiluMulKernels::load(context)?,
             rope: RopeKernels::load(context)?,
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
-            #[cfg(test)]
-            attention_async: AsyncAttentionKernels::load(context)?,
             attention_async_fast: AsyncAttentionFastKernels::load(context)?,
             attention_fused: FusedAttentionKernels::load(context)?,
             qk_postprocess: QkPostprocessKernels::load(context)?,
@@ -79,11 +82,6 @@ impl Kernels {
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
             gather: GatherKernels::load(context)?,
         })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn residual(&self) -> &ResidualKernels {
-        &self.residual
     }
 
     pub(crate) fn embedding(&self) -> &EmbeddingKernels {
@@ -108,11 +106,6 @@ impl Kernels {
 
     pub(crate) fn attention(&self) -> &AttentionKernels {
         &self.attention
-    }
-
-    #[cfg(test)]
-    pub(crate) fn attention_async(&self) -> &AsyncAttentionKernels {
-        &self.attention_async
     }
 
     pub(crate) fn attention_async_fast(&self) -> &AsyncAttentionFastKernels {

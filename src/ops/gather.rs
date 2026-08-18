@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use half::bf16;
 
 use crate::{
-    cuda::CudaRuntime,
+    cuda::{CudaRuntime, GatherLaunch},
     tensor::{Shape, Tensor},
 };
 
@@ -20,12 +20,14 @@ pub fn gather_rows_bf16(
     unsafe {
         runtime.kernels().gather().launch_rows_bf16(
             runtime.stream(),
-            input.storage(),
-            rows.storage(),
-            output.storage_mut(),
-            rows.numel(),
-            input.dims()[0],
-            input.dims()[1],
+            GatherLaunch {
+                input: input.storage(),
+                row_indices: rows.storage(),
+                output: output.storage_mut(),
+                output_rows: rows.numel(),
+                input_rows: input.dims()[0],
+                columns: input.dims()[1],
+            },
         )?;
     }
     Ok(output)

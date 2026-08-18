@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result, ensure};
 use half::bf16;
 
 use crate::{
-    cuda::CudaRuntime,
+    cuda::{CudaRuntime, KvCacheWriteLaunch},
     tensor::{Shape, Tensor},
 };
 
@@ -47,14 +47,8 @@ impl PagedKvCache {
         num_physical_pages: usize,
         block_table_host: &[u32],
     ) -> Result<Self> {
-        ensure!(
-            num_physical_pages > 0,
-            "KV cache requires at least one physical page"
-        );
-        ensure!(
-            !block_table_host.is_empty(),
-            "KV cache block table must not be empty"
-        );
+        ensure!(num_physical_pages > 0, "KV cache requires at least one physical page");
+        ensure!(!block_table_host.is_empty(), "KV cache block table must not be empty");
         for &physical_page in block_table_host {
             let physical_page_index =
                 usize::try_from(physical_page).context("physical page index does not fit usize")?;
@@ -66,7 +60,6 @@ impl PagedKvCache {
         let size = page_size.value();
         let shape = Shape::new([num_physical_pages, 8, size, 64]);
         let block_table = runtime.upload(block_table_host, Shape::new([block_table_host.len()]))?;
-
         Ok(Self {
             page_size,
             num_pages: num_physical_pages,
@@ -130,23 +123,20 @@ impl PagedKvCache {
             "slot mapping must contain {num_tokens} entries, got {:?}",
             slot_mapping.dims()
         );
-
         unsafe {
-            runtime
-                .kernels()
-                .kv_cache()
-                .launch_write_lfm2_bf16(
-                    runtime.stream(),
-                    self.page_size.value(),
-                    key.storage(),
-                    value.storage(),
-                    self.key.storage_mut(),
-                    self.value.storage_mut(),
-                    slot_mapping.storage(),
+            runtime.kernels().kv_cache().launch_write_lfm2_bf16(
+                runtime.stream(),
+                KvCacheWriteLaunch {
+                    page_size: self.page_size.value(),
+                    key: key.storage(),
+                    value: value.storage(),
+                    key_cache: self.key.storage_mut(),
+                    value_cache: self.value.storage_mut(),
+                    slot_mapping: slot_mapping.storage(),
                     num_tokens,
-                    self.num_pages,
-                )
-                .context("failed to write paged LFM2 KV cache")?;
+                    num_pages: self.num_pages,
+                },
+            )?;
         }
         Ok(())
     }
@@ -187,14 +177,8 @@ mod tests {
                 for dim in 0..64 {
                     let source = (token * 8 + head) * 64 + dim;
                     let destination = ((page * 8 + head) * size + offset) * 64 + dim;
-                    assert_eq!(
-                        actual_key[destination].to_bits(),
-                        key_host[source].to_bits()
-                    );
-                    assert_eq!(
-                        actual_value[destination].to_bits(),
-                        value_host[source].to_bits()
-                    );
+                    assert_eq!(actual_key[destination].to_bits(), key_host[source].to_bits());
+                    assert_eq!(actual_value[destination].to_bits(), value_host[source].to_bits());
                 }
             }
         }

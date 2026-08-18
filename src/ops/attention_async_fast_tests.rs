@@ -3,8 +3,19 @@ use half::bf16;
 
 use crate::{
     cache::{KvPageSize, PagedKvArena, PagedKvCache},
-    cuda::{CudaRuntime, testing::{assert_close_bf16, readback}},
+    cuda::{
+        CudaRuntime,
+        testing::{assert_close_bf16, readback},
+    },
     tensor::Shape,
+};
+
+use super::{
+    attention::{paged_attention_lfm2_bf16_sync, paged_ragged_attention_lfm2_bf16},
+    attention_async_fast::{
+        FastRaggedAttentionInput, paged_attention_fast_lfm2_bf16,
+        paged_ragged_attention_fast_lfm2_bf16,
+    },
 };
 
 fn bf16_values(elements: usize, mul: usize, modulus: usize, center: f32, scale: f32) -> Vec<bf16> {
@@ -38,35 +49,8 @@ fn check_single_fast_exp_matches_reference(page_size: KvPageSize) -> Result<()> 
             Shape::new([1, 32, 64]),
         )?;
         let position = runtime.upload(&[u32::try_from(context - 1)?], Shape::new([1]))?;
-        let mut reference = runtime.alloc_bf16(Shape::new([1, 32, 64]))?;
-        let mut candidate = runtime.alloc_bf16(Shape::new([1, 32, 64]))?;
-
-        unsafe {
-            runtime.kernels().attention_async().launch_lfm2_bf16(
-                runtime.stream(),
-                page,
-                query.storage(),
-                cache.key().storage(),
-                cache.value().storage(),
-                cache.block_table().storage(),
-                position.storage(),
-                reference.storage_mut(),
-                1,
-                cache.num_pages(),
-            )?;
-            runtime.kernels().attention_async_fast().launch_lfm2_bf16(
-                runtime.stream(),
-                page,
-                query.storage(),
-                cache.key().storage(),
-                cache.value().storage(),
-                cache.block_table().storage(),
-                position.storage(),
-                candidate.storage_mut(),
-                1,
-                cache.num_pages(),
-            )?;
-        }
+        let reference = paged_attention_lfm2_bf16_sync(&runtime, &query, &cache, &position)?;
+        let candidate = paged_attention_fast_lfm2_bf16(&runtime, &query, &cache, &position)?;
 
         assert_close_bf16(
             &readback(&runtime, &candidate)?,
@@ -133,39 +117,26 @@ fn check_ragged_fast_exp_matches_reference(page_size: KvPageSize) -> Result<()> 
         &[u32::try_from(context - 1)?, u32::try_from(context - 1)?],
         Shape::new([REQUESTS]),
     )?;
-    let mut reference = runtime.alloc_bf16(Shape::new([REQUESTS, 32, 64]))?;
-    let mut candidate = runtime.alloc_bf16(Shape::new([REQUESTS, 32, 64]))?;
-
-    unsafe {
-        runtime.kernels().attention_async().launch_ragged_lfm2_bf16(
-            runtime.stream(),
-            page,
-            query.storage(),
-            arena.key().storage(),
-            arena.value().storage(),
-            block_tables.storage(),
-            request_slots.storage(),
-            positions.storage(),
-            reference.storage_mut(),
-            REQUESTS,
-            arena.num_pages(),
-            pages_per_request,
-        )?;
-        runtime.kernels().attention_async_fast().launch_ragged_lfm2_bf16(
-            runtime.stream(),
-            page,
-            query.storage(),
-            arena.key().storage(),
-            arena.value().storage(),
-            block_tables.storage(),
-            request_slots.storage(),
-            positions.storage(),
-            candidate.storage_mut(),
-            REQUESTS,
-            arena.num_pages(),
-            pages_per_request,
-        )?;
-    }
+    let reference = paged_ragged_attention_lfm2_bf16(
+        &runtime,
+        &query,
+        &arena,
+        &block_tables,
+        pages_per_request,
+        &request_slots,
+        &positions,
+    )?;
+    let candidate = paged_ragged_attention_fast_lfm2_bf16(
+        &runtime,
+        FastRaggedAttentionInput {
+            query: &query,
+            arena: &arena,
+            block_tables: &block_tables,
+            block_table_stride: pages_per_request,
+            request_slots: &request_slots,
+            position_ids: &positions,
+        },
+    )?;
 
     assert_close_bf16(
         &readback(&runtime, &candidate)?,

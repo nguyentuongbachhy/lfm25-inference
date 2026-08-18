@@ -3,7 +3,7 @@ use half::bf16;
 
 use crate::{
     cuda::{
-        CudaRuntime,
+        CudaRuntime, RmsNormLaunch,
         benchmark::{BenchConfig, benchmark_gpu},
         testing::{assert_close_bf16, readback},
     },
@@ -16,7 +16,6 @@ fn make_input(rows: usize, hidden_size: usize) -> Vec<bf16> {
     (0..rows * hidden_size)
         .map(|i| {
             let value = ((i.wrapping_mul(37) % 1024) as f32 - 512.0) / 256.0;
-
             bf16::from_f32(value)
         })
         .collect()
@@ -26,7 +25,6 @@ fn make_weight(hidden_size: usize) -> Vec<bf16> {
     (0..hidden_size)
         .map(|i| {
             let value = 0.5 + (i % 257) as f32 / 256.0;
-
             bf16::from_f32(value)
         })
         .collect()
@@ -43,21 +41,16 @@ fn rms_norm_reference(
 
     for row in 0..rows {
         let start = row * hidden_size;
-
         let end = start + hidden_size;
-
         let row_x = &x[start..end];
-
         let mut sum_sq = 0.0f32;
 
         for &value in row_x {
             let value = value.to_f32();
-
             sum_sq += value * value;
         }
 
         let variance = sum_sq / hidden_size as f32;
-
         let inv_rms = 1.0 / (variance + eps).sqrt();
 
         for i in 0..hidden_size {
@@ -66,11 +59,8 @@ fn rms_norm_reference(
             // FP32 normalize
             // -> BF16 cast
             // -> BF16 weight multiply
-
             let normalized = bf16::from_f32(row_x[i].to_f32() * inv_rms);
-
             let output = bf16::from_f32(normalized.to_f32() * weight[i].to_f32());
-
             out.push(output);
         }
     }
@@ -80,33 +70,28 @@ fn rms_norm_reference(
 
 fn run_rms_norm_case(runtime: &CudaRuntime, rows: usize, hidden_size: usize) -> Result<()> {
     let x_host = make_input(rows, hidden_size);
-
     let weight_host = make_weight(hidden_size);
-
     let expected = rms_norm_reference(&x_host, &weight_host, rows, hidden_size, EPS);
-
     let x = runtime.upload(&x_host, Shape::new([rows, hidden_size]))?;
-
     let weight = runtime.upload(&weight_host, Shape::new([hidden_size]))?;
-
     let mut out = runtime.zeros::<bf16>(Shape::new([rows, hidden_size]))?;
 
     unsafe {
         runtime.kernels().rms_norm().launch_bf16(
             runtime.stream(),
-            x.storage(),
-            weight.storage(),
-            out.storage_mut(),
-            rows,
-            hidden_size,
-            EPS,
+            RmsNormLaunch {
+                x: x.storage(),
+                weight: weight.storage(),
+                out: out.storage_mut(),
+                rows,
+                hidden_size,
+                eps: EPS,
+            },
         )?;
     }
 
     let actual = readback(runtime, &out)?;
-
     assert_close_bf16(&actual, &expected, 0.01, 0.01);
-
     Ok(())
 }
 
@@ -130,18 +115,13 @@ fn rms_norm_bf16_correctness() -> Result<()> {
 #[ignore = "GPU benchmark"]
 fn bench_rms_norm_bf16() -> Result<()> {
     let runtime = CudaRuntime::new(0)?;
-
     const HIDDEN_SIZE: usize = 2048;
-
     let weight_host = make_weight(HIDDEN_SIZE);
-
     let weight = runtime.upload(&weight_host, Shape::new([HIDDEN_SIZE]))?;
 
     for rows in [1, 4, 16, 64, 256, 1024, 4096] {
         let x_host = make_input(rows, HIDDEN_SIZE);
-
         let x = runtime.upload(&x_host, Shape::new([rows, HIDDEN_SIZE]))?;
-
         let mut out = runtime.zeros::<bf16>(Shape::new([rows, HIDDEN_SIZE]))?;
 
         let stats = benchmark_gpu(
@@ -152,52 +132,36 @@ fn bench_rms_norm_bf16() -> Result<()> {
                 unsafe {
                     runtime.kernels().rms_norm().launch_bf16(
                         runtime.stream(),
-                        x.storage(),
-                        weight.storage(),
-                        out.storage_mut(),
-                        rows,
-                        HIDDEN_SIZE,
-                        EPS,
+                        RmsNormLaunch {
+                            x: x.storage(),
+                            weight: weight.storage(),
+                            out: out.storage_mut(),
+                            rows,
+                            hidden_size: HIDDEN_SIZE,
+                            eps: EPS,
+                        },
                     )?;
                 }
-
                 Ok(())
             },
         )?;
 
         // Approximate logical traffic:
-        //
         // x read      = 2 bytes
         // weight read = 2 bytes
         // out write   = 2 bytes
-        //
         // per element = 6 bytes
-        //
-        // Note: x is actually read twice by this implementation
-        // (reduction + output pass), so physical kernel traffic
+        // x is read twice by this implementation, so physical traffic
         // is closer to 8 bytes/element before caching effects.
-
         let logical_bytes = rows as f64 * HIDDEN_SIZE as f64 * 6.0;
-
         let physical_bytes = rows as f64 * HIDDEN_SIZE as f64 * 8.0;
-
         let seconds = stats.mean_us * 1e-6;
-
         let logical_gbps = logical_bytes / seconds / 1e9;
-
         let physical_gbps = physical_bytes / seconds / 1e9;
-
         let rows_per_second = rows as f64 / seconds;
 
         println!(
-            "rows={rows:>5} | \
-             mean={:>8.3} us | \
-             p50={:>8.3} us | \
-             p95={:>8.3} us | \
-             min={:>8.3} us | \
-             logical={:>8.2} GB/s | \
-             physical={:>8.2} GB/s | \
-             {:>12.0} rows/s",
+            "rows={rows:>5} | mean={:>8.3} us | p50={:>8.3} us | p95={:>8.3} us | min={:>8.3} us | logical={:>8.2} GB/s | physical={:>8.2} GB/s | {:>12.0} rows/s",
             stats.mean_us,
             stats.p50_us,
             stats.p95_us,

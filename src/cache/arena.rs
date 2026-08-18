@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use half::bf16;
 
 use crate::{
-    cuda::CudaRuntime,
+    cuda::{CudaRuntime, KvCacheWriteLaunch},
     tensor::{Shape, Tensor},
 };
 
@@ -70,14 +70,16 @@ impl PagedKvArena {
         unsafe {
             runtime.kernels().kv_cache().launch_write_lfm2_bf16(
                 runtime.stream(),
-                self.page_size.value(),
-                key.storage(),
-                value.storage(),
-                self.key.storage_mut(),
-                self.value.storage_mut(),
-                physical_slots.storage(),
-                num_tokens,
-                self.num_pages,
+                KvCacheWriteLaunch {
+                    page_size: self.page_size.value(),
+                    key: key.storage(),
+                    value: value.storage(),
+                    key_cache: self.key.storage_mut(),
+                    value_cache: self.value.storage_mut(),
+                    slot_mapping: physical_slots.storage(),
+                    num_tokens,
+                    num_pages: self.num_pages,
+                },
             )?;
         }
         Ok(())

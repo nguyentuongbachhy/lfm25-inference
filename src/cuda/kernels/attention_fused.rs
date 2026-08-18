@@ -10,6 +10,36 @@ use super::kernel_set::KernelSet;
 
 const BLOCK_SIZE: u32 = 256;
 
+pub(crate) struct FusedAttentionCommon<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query_raw: &'a CudaSlice<bf16>,
+    pub(crate) key_raw: &'a CudaSlice<bf16>,
+    pub(crate) value_raw: &'a CudaSlice<bf16>,
+    pub(crate) query_norm: &'a CudaSlice<bf16>,
+    pub(crate) key_norm: &'a CudaSlice<bf16>,
+    pub(crate) inv_freq: &'a CudaSlice<f32>,
+    pub(crate) key_cache: &'a mut CudaSlice<bf16>,
+    pub(crate) value_cache: &'a mut CudaSlice<bf16>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) slot_mapping: &'a CudaSlice<i64>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+    pub(crate) eps: f32,
+}
+
+pub(crate) struct FusedDecodeLaunch<'a> {
+    pub(crate) common: FusedAttentionCommon<'a>,
+    pub(crate) block_table: &'a CudaSlice<u32>,
+}
+
+pub(crate) struct FusedRaggedDecodeLaunch<'a> {
+    pub(crate) common: FusedAttentionCommon<'a>,
+    pub(crate) block_tables: &'a CudaSlice<u32>,
+    pub(crate) request_slots: &'a CudaSlice<u32>,
+    pub(crate) block_table_stride: usize,
+}
+
 pub(crate) struct FusedAttentionKernels {
     ps16: KernelLaunch,
     ps32: KernelLaunch,
@@ -74,28 +104,22 @@ impl FusedAttentionKernels {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_decode(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query_raw: &CudaSlice<bf16>,
-        key_raw: &CudaSlice<bf16>,
-        value_raw: &CudaSlice<bf16>,
-        query_norm: &CudaSlice<bf16>,
-        key_norm: &CudaSlice<bf16>,
-        inv_freq: &CudaSlice<f32>,
-        key_cache: &mut CudaSlice<bf16>,
-        value_cache: &mut CudaSlice<bf16>,
-        block_table: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        slot_mapping: &CudaSlice<i64>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        eps: f32,
+        launch: FusedDecodeLaunch<'_>,
     ) -> Result<()> {
-        self.validate_common(
+        Self::validate_common(&launch.common)?;
+        ensure!(
+            !launch.block_table.is_empty(),
+            "fused attention block table is empty"
+        );
+
+        let FusedDecodeLaunch {
+            common,
+            block_table,
+        } = launch;
+        let FusedAttentionCommon {
             page_size,
             query_raw,
             key_raw,
@@ -110,9 +134,8 @@ impl FusedAttentionKernels {
             output,
             num_tokens,
             num_pages,
-        )?;
-        ensure!(!block_table.is_empty(), "fused attention block table is empty");
-
+            eps,
+        } = common;
         let kernel = match page_size {
             16 => &self.ps16,
             32 => &self.ps32,
@@ -146,30 +169,39 @@ impl FusedAttentionKernels {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_ragged_decode(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query_raw: &CudaSlice<bf16>,
-        key_raw: &CudaSlice<bf16>,
-        value_raw: &CudaSlice<bf16>,
-        query_norm: &CudaSlice<bf16>,
-        key_norm: &CudaSlice<bf16>,
-        inv_freq: &CudaSlice<f32>,
-        key_cache: &mut CudaSlice<bf16>,
-        value_cache: &mut CudaSlice<bf16>,
-        block_tables: &CudaSlice<u32>,
-        request_slots: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        slot_mapping: &CudaSlice<i64>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        block_table_stride: usize,
-        eps: f32,
+        launch: FusedRaggedDecodeLaunch<'_>,
     ) -> Result<()> {
-        self.validate_common(
+        Self::validate_common(&launch.common)?;
+        ensure!(
+            launch.block_table_stride > 0,
+            "ragged fused block table stride is zero"
+        );
+        ensure!(
+            launch.block_tables.len() >= launch.block_table_stride,
+            "ragged fused block table storage too small"
+        );
+        ensure!(
+            launch
+                .block_tables
+                .len()
+                .is_multiple_of(launch.block_table_stride),
+            "ragged fused block tables are not row aligned"
+        );
+        ensure!(
+            launch.request_slots.len() >= launch.common.num_tokens,
+            "ragged fused request slots too small"
+        );
+
+        let FusedRaggedDecodeLaunch {
+            common,
+            block_tables,
+            request_slots,
+            block_table_stride,
+        } = launch;
+        let FusedAttentionCommon {
             page_size,
             query_raw,
             key_raw,
@@ -184,21 +216,8 @@ impl FusedAttentionKernels {
             output,
             num_tokens,
             num_pages,
-        )?;
-        ensure!(block_table_stride > 0, "ragged fused block table stride is zero");
-        ensure!(
-            block_tables.len() >= block_table_stride,
-            "ragged fused block table storage too small"
-        );
-        ensure!(
-            block_tables.len() % block_table_stride == 0,
-            "ragged fused block tables are not row aligned"
-        );
-        ensure!(
-            request_slots.len() >= num_tokens,
-            "ragged fused request slots too small"
-        );
-
+            eps,
+        } = common;
         let kernel = match page_size {
             16 => &self.ragged_ps16,
             32 => &self.ragged_ps32,
@@ -234,49 +253,53 @@ impl FusedAttentionKernels {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn validate_common(
-        &self,
-        page_size: usize,
-        query_raw: &CudaSlice<bf16>,
-        key_raw: &CudaSlice<bf16>,
-        value_raw: &CudaSlice<bf16>,
-        query_norm: &CudaSlice<bf16>,
-        key_norm: &CudaSlice<bf16>,
-        inv_freq: &CudaSlice<f32>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        position_ids: &CudaSlice<u32>,
-        slot_mapping: &CudaSlice<i64>,
-        output: &CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-    ) -> Result<()> {
-        ensure!(num_tokens > 0, "fused attention requires tokens");
-        ensure!(num_pages > 0, "fused attention requires cache pages");
-        ensure!(matches!(page_size, 16 | 32), "unsupported fused page size");
-        let q_required = num_tokens
+    fn validate_common(input: &FusedAttentionCommon<'_>) -> Result<()> {
+        ensure!(input.num_tokens > 0, "fused attention requires tokens");
+        ensure!(input.num_pages > 0, "fused attention requires cache pages");
+        ensure!(
+            matches!(input.page_size, 16 | 32),
+            "unsupported fused page size"
+        );
+        let q_required = input
+            .num_tokens
             .checked_mul(32 * 64)
             .context("fused Q storage overflow")?;
-        let kv_required = num_tokens
+        let kv_required = input
+            .num_tokens
             .checked_mul(8 * 64)
             .context("fused KV storage overflow")?;
-        let cache_required = num_pages
+        let cache_required = input
+            .num_pages
             .checked_mul(8)
-            .and_then(|value| value.checked_mul(page_size))
+            .and_then(|value| value.checked_mul(input.page_size))
             .and_then(|value| value.checked_mul(64))
             .context("fused cache storage overflow")?;
-        ensure!(query_raw.len() >= q_required, "fused query storage too small");
-        ensure!(key_raw.len() >= kv_required, "fused key storage too small");
-        ensure!(value_raw.len() >= kv_required, "fused value storage too small");
-        ensure!(query_norm.len() >= 64, "fused query norm weight too small");
-        ensure!(key_norm.len() >= 64, "fused key norm weight too small");
-        ensure!(inv_freq.len() >= 32, "fused RoPE frequency storage too small");
-        ensure!(key_cache.len() >= cache_required, "fused K cache too small");
-        ensure!(value_cache.len() >= cache_required, "fused V cache too small");
-        ensure!(position_ids.len() >= num_tokens, "fused positions too small");
-        ensure!(slot_mapping.len() >= num_tokens, "fused slot mapping too small");
-        ensure!(output.len() >= q_required, "fused output storage too small");
+        ensure!(
+            input.query_raw.len() >= q_required,
+            "fused query storage too small"
+        );
+        ensure!(
+            input.key_raw.len() >= kv_required,
+            "fused key storage too small"
+        );
+        ensure!(
+            input.value_raw.len() >= kv_required,
+            "fused value storage too small"
+        );
+        ensure!(input.query_norm.len() >= 64, "fused query norm weight too small");
+        ensure!(input.key_norm.len() >= 64, "fused key norm weight too small");
+        ensure!(input.inv_freq.len() >= 32, "fused RoPE frequency storage too small");
+        ensure!(input.key_cache.len() >= cache_required, "fused K cache too small");
+        ensure!(input.value_cache.len() >= cache_required, "fused V cache too small");
+        ensure!(
+            input.position_ids.len() >= input.num_tokens,
+            "fused positions too small"
+        );
+        ensure!(
+            input.slot_mapping.len() >= input.num_tokens,
+            "fused slot mapping too small"
+        );
+        ensure!(input.output.len() >= q_required, "fused output storage too small");
         Ok(())
     }
 }

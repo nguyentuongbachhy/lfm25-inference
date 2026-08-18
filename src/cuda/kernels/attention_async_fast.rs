@@ -6,9 +6,23 @@ use half::bf16;
 
 use crate::cuda::{launch::KernelLaunch, module::load_function};
 
-use super::kernel_set::KernelSet;
+use super::{attention::PagedAttentionLaunch, kernel_set::KernelSet};
 
 const BLOCK_SIZE: u32 = 256;
+
+pub(crate) struct FastRaggedAttentionLaunch<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query: &'a CudaSlice<bf16>,
+    pub(crate) key_cache: &'a CudaSlice<bf16>,
+    pub(crate) value_cache: &'a CudaSlice<bf16>,
+    pub(crate) block_tables: &'a CudaSlice<u32>,
+    pub(crate) request_slots: &'a CudaSlice<u32>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+    pub(crate) block_table_stride: usize,
+}
 
 pub(crate) struct AsyncAttentionFastKernels {
     ps16: KernelLaunch,
@@ -42,7 +56,6 @@ impl KernelSet for AsyncAttentionFastKernels {
             Self::MODULE_NAME,
             "paged_ragged_gqa_lfm2_bf16_async_fast_ps32",
         )?;
-
         for (name, function) in [
             ("ps16", &ps16),
             ("ps32", &ps32),
@@ -54,7 +67,6 @@ impl KernelSet for AsyncAttentionFastKernels {
                 "fast-exp async attention {name} cannot launch required 256-thread block"
             );
         }
-
         Ok(Self {
             ps16: KernelLaunch::new_with_multiple(ps16, BLOCK_SIZE, 32)?,
             ps32: KernelLaunch::new_with_multiple(ps32, BLOCK_SIZE, 32)?,
@@ -74,24 +86,28 @@ impl AsyncAttentionFastKernels {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_lfm2_bf16(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query: &CudaSlice<bf16>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        block_table: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
+        launch: PagedAttentionLaunch<'_>,
     ) -> Result<()> {
+        let PagedAttentionLaunch {
+            page_size,
+            query,
+            key_cache,
+            value_cache,
+            block_table,
+            position_ids,
+            output,
+            num_tokens,
+            num_pages,
+        } = launch;
         ensure!(num_tokens > 0, "fast-exp attention requires tokens");
         ensure!(num_pages > 0, "fast-exp attention requires cache pages");
-        ensure!(!block_table.is_empty(), "fast-exp attention block table is empty");
-
+        ensure!(
+            !block_table.is_empty(),
+            "fast-exp attention block table is empty"
+        );
         let q_required = num_tokens
             .checked_mul(32 * 64)
             .context("fast-exp attention query size overflow")?;
@@ -103,9 +119,14 @@ impl AsyncAttentionFastKernels {
         ensure!(query.len() >= q_required, "fast-exp query storage too small");
         ensure!(output.len() >= q_required, "fast-exp output storage too small");
         ensure!(key_cache.len() >= cache_required, "fast-exp K cache too small");
-        ensure!(value_cache.len() >= cache_required, "fast-exp V cache too small");
-        ensure!(position_ids.len() >= num_tokens, "fast-exp positions too small");
-
+        ensure!(
+            value_cache.len() >= cache_required,
+            "fast-exp V cache too small"
+        );
+        ensure!(
+            position_ids.len() >= num_tokens,
+            "fast-exp positions too small"
+        );
         let kernel = match page_size {
             16 => &self.ps16,
             32 => &self.ps32,
@@ -126,34 +147,52 @@ impl AsyncAttentionFastKernels {
             .arg(&num_tokens)
             .arg(&num_pages)
             .arg(&block_table_length);
-        unsafe { args.launch(config)?; }
+        unsafe {
+            args.launch(config)?;
+        }
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_ragged_lfm2_bf16(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query: &CudaSlice<bf16>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        block_tables: &CudaSlice<u32>,
-        request_slots: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        block_table_stride: usize,
+        launch: FastRaggedAttentionLaunch<'_>,
     ) -> Result<()> {
+        let FastRaggedAttentionLaunch {
+            page_size,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            request_slots,
+            position_ids,
+            output,
+            num_tokens,
+            num_pages,
+            block_table_stride,
+        } = launch;
         ensure!(num_tokens > 0, "fast-exp ragged attention requires tokens");
         ensure!(num_pages > 0, "fast-exp ragged attention requires cache pages");
-        ensure!(block_table_stride > 0, "fast-exp ragged block table stride must be positive");
-        ensure!(block_tables.len() >= block_table_stride, "fast-exp ragged block tables too small");
-        ensure!(block_tables.len() % block_table_stride == 0, "fast-exp ragged block tables not row aligned");
-        ensure!(request_slots.len() >= num_tokens, "fast-exp ragged request slots too small");
-        ensure!(position_ids.len() >= num_tokens, "fast-exp ragged positions too small");
-
+        ensure!(
+            block_table_stride > 0,
+            "fast-exp ragged block table stride must be positive"
+        );
+        ensure!(
+            block_tables.len() >= block_table_stride,
+            "fast-exp ragged block tables too small"
+        );
+        ensure!(
+            block_tables.len().is_multiple_of(block_table_stride),
+            "fast-exp ragged block tables not row aligned"
+        );
+        ensure!(
+            request_slots.len() >= num_tokens,
+            "fast-exp ragged request slots too small"
+        );
+        ensure!(
+            position_ids.len() >= num_tokens,
+            "fast-exp ragged positions too small"
+        );
         let q_required = num_tokens
             .checked_mul(32 * 64)
             .context("fast-exp ragged query size overflow")?;
@@ -162,11 +201,22 @@ impl AsyncAttentionFastKernels {
             .and_then(|value| value.checked_mul(page_size))
             .and_then(|value| value.checked_mul(64))
             .context("fast-exp ragged cache size overflow")?;
-        ensure!(query.len() >= q_required, "fast-exp ragged query storage too small");
-        ensure!(output.len() >= q_required, "fast-exp ragged output storage too small");
-        ensure!(key_cache.len() >= cache_required, "fast-exp ragged K cache too small");
-        ensure!(value_cache.len() >= cache_required, "fast-exp ragged V cache too small");
-
+        ensure!(
+            query.len() >= q_required,
+            "fast-exp ragged query storage too small"
+        );
+        ensure!(
+            output.len() >= q_required,
+            "fast-exp ragged output storage too small"
+        );
+        ensure!(
+            key_cache.len() >= cache_required,
+            "fast-exp ragged K cache too small"
+        );
+        ensure!(
+            value_cache.len() >= cache_required,
+            "fast-exp ragged V cache too small"
+        );
         let kernel = match page_size {
             16 => &self.ragged_ps16,
             32 => &self.ragged_ps32,
@@ -189,7 +239,9 @@ impl AsyncAttentionFastKernels {
             .arg(&num_pages)
             .arg(&block_table_stride)
             .arg(&block_table_rows);
-        unsafe { args.launch(config)?; }
+        unsafe {
+            args.launch(config)?;
+        }
         Ok(())
     }
 }

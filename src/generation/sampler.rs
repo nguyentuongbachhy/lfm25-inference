@@ -5,6 +5,8 @@ use half::bf16;
 
 use crate::{cuda::CudaRuntime, ops, tensor::Tensor};
 
+pub const DEFAULT_SAMPLING_SEED: u64 = 0x4c46_4d32;
+
 #[derive(Debug, Clone, Copy)]
 pub struct SamplingConfig {
     pub temperature: f32,
@@ -19,7 +21,7 @@ impl Default for SamplingConfig {
             temperature: 0.0,
             top_k: 50,
             repetition_penalty: 1.0,
-            seed: 0x4c_46_4d_32,
+            seed: DEFAULT_SAMPLING_SEED,
         }
     }
 }

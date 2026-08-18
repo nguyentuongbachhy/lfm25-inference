@@ -10,9 +10,57 @@ use super::kernel_set::KernelSet;
 
 const MAX_BLOCK_SIZE: u32 = 256;
 
+pub(crate) struct PagedAttentionLaunch<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query: &'a CudaSlice<bf16>,
+    pub(crate) key_cache: &'a CudaSlice<bf16>,
+    pub(crate) value_cache: &'a CudaSlice<bf16>,
+    pub(crate) block_table: &'a CudaSlice<u32>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+}
+
+#[cfg(test)]
+pub(crate) struct RaggedAttentionLaunch<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query: &'a CudaSlice<bf16>,
+    pub(crate) key_cache: &'a CudaSlice<bf16>,
+    pub(crate) value_cache: &'a CudaSlice<bf16>,
+    pub(crate) block_tables: &'a CudaSlice<u32>,
+    pub(crate) request_slots: &'a CudaSlice<u32>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+    pub(crate) block_table_length: usize,
+    pub(crate) block_table_stride: usize,
+}
+
+pub(crate) struct HybridAttentionLaunch<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query: &'a CudaSlice<bf16>,
+    pub(crate) current_key: &'a CudaSlice<bf16>,
+    pub(crate) current_value: &'a CudaSlice<bf16>,
+    pub(crate) key_cache: &'a CudaSlice<bf16>,
+    pub(crate) value_cache: &'a CudaSlice<bf16>,
+    pub(crate) block_tables: &'a CudaSlice<u32>,
+    pub(crate) request_slots: &'a CudaSlice<u32>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) segment_offsets: &'a CudaSlice<u32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+    pub(crate) block_table_stride: usize,
+    pub(crate) num_segments: usize,
+}
+
 pub(crate) struct AttentionKernels {
     prefill: KernelLaunch,
+    #[cfg(test)]
     ps16: KernelLaunch,
+    #[cfg(test)]
     ps32: KernelLaunch,
     #[cfg(test)]
     ragged_ps16: KernelLaunch,
@@ -28,7 +76,9 @@ impl KernelSet for AttentionKernels {
 
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
         let prefill = load_function(&module, Self::MODULE_NAME, "prefill_gqa_lfm2_bf16")?;
+        #[cfg(test)]
         let ps16 = load_function(&module, Self::MODULE_NAME, "paged_gqa_lfm2_bf16_ps16")?;
+        #[cfg(test)]
         let ps32 = load_function(&module, Self::MODULE_NAME, "paged_gqa_lfm2_bf16_ps32")?;
         #[cfg(test)]
         let ragged_ps16 = load_function(
@@ -55,7 +105,9 @@ impl KernelSet for AttentionKernels {
 
         Ok(Self {
             prefill: KernelLaunch::new_with_multiple(prefill, MAX_BLOCK_SIZE, 32)?,
+            #[cfg(test)]
             ps16: KernelLaunch::new_with_multiple(ps16, MAX_BLOCK_SIZE, 32)?,
+            #[cfg(test)]
             ps32: KernelLaunch::new_with_multiple(ps32, MAX_BLOCK_SIZE, 32)?,
             #[cfg(test)]
             ragged_ps16: KernelLaunch::new_with_multiple(ragged_ps16, MAX_BLOCK_SIZE, 32)?,
@@ -76,42 +128,35 @@ impl KernelSet for AttentionKernels {
 }
 
 impl AttentionKernels {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_hybrid_ragged_lfm2_bf16(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query: &CudaSlice<bf16>,
-        current_key: &CudaSlice<bf16>,
-        current_value: &CudaSlice<bf16>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        block_tables: &CudaSlice<u32>,
-        request_slots: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        segment_offsets: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        block_table_stride: usize,
-        num_segments: usize,
+        launch: HybridAttentionLaunch<'_>,
     ) -> Result<()> {
+        let HybridAttentionLaunch {
+            page_size,
+            query,
+            current_key,
+            current_value,
+            key_cache,
+            value_cache,
+            block_tables,
+            request_slots,
+            position_ids,
+            segment_offsets,
+            output,
+            num_tokens,
+            num_pages,
+            block_table_stride,
+            num_segments,
+        } = launch;
         ensure!(num_tokens > 0, "hybrid ragged attention requires tokens");
-        ensure!(
-            num_segments > 0,
-            "hybrid ragged attention requires segments"
-        );
-        ensure!(
-            num_pages > 0,
-            "hybrid ragged attention requires cache pages"
-        );
+        ensure!(num_segments > 0, "hybrid ragged attention requires segments");
+        ensure!(num_pages > 0, "hybrid ragged attention requires cache pages");
         ensure!(block_table_stride > 0, "hybrid block table is empty");
         ensure!(request_slots.len() >= num_tokens, "request slots too small");
         ensure!(position_ids.len() >= num_tokens, "positions too small");
-        ensure!(
-            segment_offsets.len() >= num_segments + 1,
-            "segment offsets too small"
-        );
+        ensure!(segment_offsets.len() > num_segments, "segment offsets too small");
         let q_required = num_tokens
             .checked_mul(32 * 64)
             .context("hybrid query size overflow")?;
@@ -164,29 +209,28 @@ impl AttentionKernels {
     }
 
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn launch_ragged_lfm2_bf16(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query: &CudaSlice<bf16>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        block_tables: &CudaSlice<u32>,
-        request_slots: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        block_table_length: usize,
-        block_table_stride: usize,
+        launch: RaggedAttentionLaunch<'_>,
     ) -> Result<()> {
+        let RaggedAttentionLaunch {
+            page_size,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            request_slots,
+            position_ids,
+            output,
+            num_tokens,
+            num_pages,
+            block_table_length,
+            block_table_stride,
+        } = launch;
         ensure!(num_tokens > 0, "ragged attention requires tokens");
         ensure!(num_pages > 0, "ragged attention requires cache pages");
-        ensure!(
-            block_table_length > 0,
-            "ragged block table must not be empty"
-        );
+        ensure!(block_table_length > 0, "ragged block table must not be empty");
         ensure!(
             block_table_stride >= block_table_length,
             "invalid block table stride"
@@ -264,19 +308,10 @@ impl AttentionKernels {
         let kv_required = num_tokens
             .checked_mul(8 * 64)
             .context("prefill KV size overflow")?;
-        ensure!(
-            query.len() >= query_required,
-            "prefill query storage too small"
-        );
+        ensure!(query.len() >= query_required, "prefill query storage too small");
         ensure!(key.len() >= kv_required, "prefill key storage too small");
-        ensure!(
-            value.len() >= kv_required,
-            "prefill value storage too small"
-        );
-        ensure!(
-            output.len() >= query_required,
-            "prefill output storage too small"
-        );
+        ensure!(value.len() >= kv_required, "prefill value storage too small");
+        ensure!(output.len() >= query_required, "prefill output storage too small");
         let query_tiles = num_tokens.div_ceil(2);
         let blocks = query_tiles
             .checked_mul(8)
@@ -294,19 +329,23 @@ impl AttentionKernels {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) unsafe fn launch_lfm2_bf16(
         &self,
         stream: &CudaStream,
-        page_size: usize,
-        query: &CudaSlice<bf16>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        block_table: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
+        launch: PagedAttentionLaunch<'_>,
     ) -> Result<()> {
+        let PagedAttentionLaunch {
+            page_size,
+            query,
+            key_cache,
+            value_cache,
+            block_table,
+            position_ids,
+            output,
+            num_tokens,
+            num_pages,
+        } = launch;
         ensure!(num_tokens > 0, "attention requires at least one token");
         ensure!(num_pages > 0, "attention requires at least one cache page");
         ensure!(
@@ -321,19 +360,9 @@ impl AttentionKernels {
             .and_then(|value| value.checked_mul(page_size))
             .and_then(|value| value.checked_mul(64))
             .context("attention cache size overflow")?;
-
-        ensure!(
-            query.len() >= q_required,
-            "attention query storage too small"
-        );
-        ensure!(
-            output.len() >= q_required,
-            "attention output storage too small"
-        );
-        ensure!(
-            key_cache.len() >= cache_required,
-            "attention K cache storage too small"
-        );
+        ensure!(query.len() >= q_required, "attention query storage too small");
+        ensure!(output.len() >= q_required, "attention output storage too small");
+        ensure!(key_cache.len() >= cache_required, "attention K cache storage too small");
         ensure!(
             value_cache.len() >= cache_required,
             "attention V cache storage too small"
@@ -354,7 +383,6 @@ impl AttentionKernels {
         let config = kernel.policy().exact_blocks(blocks)?;
         let mut args = stream.launch_builder(kernel.function());
         let block_table_length = block_table.len();
-
         args.arg(query)
             .arg(key_cache)
             .arg(value_cache)
@@ -364,7 +392,6 @@ impl AttentionKernels {
             .arg(&num_tokens)
             .arg(&num_pages)
             .arg(&block_table_length);
-
         unsafe {
             args.launch(config)?;
         }

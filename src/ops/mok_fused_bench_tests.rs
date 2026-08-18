@@ -11,7 +11,8 @@ use crate::{
 };
 
 use super::{
-    fused_paged_attention_decode_lfm2_bf16, paged_attention_lfm2_bf16,
+    FusedAttentionInput, FusedPagedAttentionInput, QkPostprocessInput,
+    fused_paged_attention_decode_lfm2_bf16, paged_attention_lfm2_bf16_sync,
     qk_norm_rope_kv_write_decode_bf16,
 };
 
@@ -64,18 +65,20 @@ fn bench_mok_one_kernel_decode_attention_paired_ab() -> Result<()> {
 
             qk_norm_rope_kv_write_decode_bf16(
                 &runtime,
-                &mut reference_query,
-                &key_raw,
-                &value_raw,
-                &query_norm,
-                &key_norm,
-                &inv_freq,
-                &position,
-                &slot,
+                QkPostprocessInput {
+                    query: &mut reference_query,
+                    key: &key_raw,
+                    value: &value_raw,
+                    query_norm: &query_norm,
+                    key_norm: &key_norm,
+                    inv_freq: &inv_freq,
+                    position_ids: &position,
+                    slot_mapping: &slot,
+                    eps: EPS,
+                },
                 &mut reference_cache,
-                EPS,
             )?;
-            drop(paged_attention_lfm2_bf16(
+            drop(paged_attention_lfm2_bf16_sync(
                 &runtime,
                 &reference_query,
                 &reference_cache,
@@ -83,16 +86,20 @@ fn bench_mok_one_kernel_decode_attention_paired_ab() -> Result<()> {
             )?);
             drop(fused_paged_attention_decode_lfm2_bf16(
                 &runtime,
-                &query_raw,
-                &key_raw,
-                &value_raw,
-                &query_norm,
-                &key_norm,
-                &inv_freq,
-                &position,
-                &slot,
-                &mut candidate_cache,
-                EPS,
+                FusedPagedAttentionInput {
+                    attention: FusedAttentionInput {
+                        query_raw: &query_raw,
+                        key_raw: &key_raw,
+                        value_raw: &value_raw,
+                        query_norm: &query_norm,
+                        key_norm: &key_norm,
+                        inv_freq: &inv_freq,
+                        position_ids: &position,
+                        slot_mapping: &slot,
+                        eps: EPS,
+                    },
+                    cache: &mut candidate_cache,
+                },
             )?);
             runtime.synchronize()?;
 
@@ -103,18 +110,20 @@ fn bench_mok_one_kernel_decode_attention_paired_ab() -> Result<()> {
                 || {
                     qk_norm_rope_kv_write_decode_bf16(
                         &runtime,
-                        &mut reference_query,
-                        &key_raw,
-                        &value_raw,
-                        &query_norm,
-                        &key_norm,
-                        &inv_freq,
-                        &position,
-                        &slot,
+                        QkPostprocessInput {
+                            query: &mut reference_query,
+                            key: &key_raw,
+                            value: &value_raw,
+                            query_norm: &query_norm,
+                            key_norm: &key_norm,
+                            inv_freq: &inv_freq,
+                            position_ids: &position,
+                            slot_mapping: &slot,
+                            eps: EPS,
+                        },
                         &mut reference_cache,
-                        EPS,
                     )?;
-                    drop(paged_attention_lfm2_bf16(
+                    drop(paged_attention_lfm2_bf16_sync(
                         &runtime,
                         &reference_query,
                         &reference_cache,
@@ -125,16 +134,20 @@ fn bench_mok_one_kernel_decode_attention_paired_ab() -> Result<()> {
                 || {
                     drop(fused_paged_attention_decode_lfm2_bf16(
                         &runtime,
-                        &query_raw,
-                        &key_raw,
-                        &value_raw,
-                        &query_norm,
-                        &key_norm,
-                        &inv_freq,
-                        &position,
-                        &slot,
-                        &mut candidate_cache,
-                        EPS,
+                        FusedPagedAttentionInput {
+                            attention: FusedAttentionInput {
+                                query_raw: &query_raw,
+                                key_raw: &key_raw,
+                                value_raw: &value_raw,
+                                query_norm: &query_norm,
+                                key_norm: &key_norm,
+                                inv_freq: &inv_freq,
+                                position_ids: &position,
+                                slot_mapping: &slot,
+                                eps: EPS,
+                            },
+                            cache: &mut candidate_cache,
+                        },
                     )?);
                     Ok(())
                 },

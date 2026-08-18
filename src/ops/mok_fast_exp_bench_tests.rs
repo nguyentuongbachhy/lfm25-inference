@@ -4,7 +4,7 @@ use half::bf16;
 use crate::{
     cache::{KvPageSize, PagedKvCache},
     cuda::{
-        CudaRuntime,
+        CudaRuntime, PagedAttentionLaunch,
         benchmark::{BenchConfig, benchmark_gpu_paired},
     },
     tensor::Shape,
@@ -37,17 +37,19 @@ fn bench_mok_async_w8_fast_exp_paired_ab() -> Result<()> {
                 config,
                 || {
                     unsafe {
-                        runtime.kernels().attention_async().launch_lfm2_bf16(
+                        runtime.kernels().attention().launch_lfm2_bf16(
                             runtime.stream(),
-                            page_size.value(),
-                            query.storage(),
-                            cache.key().storage(),
-                            cache.value().storage(),
-                            cache.block_table().storage(),
-                            position.storage(),
-                            reference_output.storage_mut(),
-                            1,
-                            cache.num_pages(),
+                            PagedAttentionLaunch {
+                                page_size: page_size.value(),
+                                query: query.storage(),
+                                key_cache: cache.key().storage(),
+                                value_cache: cache.value().storage(),
+                                block_table: cache.block_table().storage(),
+                                position_ids: position.storage(),
+                                output: reference_output.storage_mut(),
+                                num_tokens: 1,
+                                num_pages: cache.num_pages(),
+                            },
                         )?;
                     }
                     Ok(())
@@ -56,15 +58,17 @@ fn bench_mok_async_w8_fast_exp_paired_ab() -> Result<()> {
                     unsafe {
                         runtime.kernels().attention_async_fast().launch_lfm2_bf16(
                             runtime.stream(),
-                            page_size.value(),
-                            query.storage(),
-                            cache.key().storage(),
-                            cache.value().storage(),
-                            cache.block_table().storage(),
-                            position.storage(),
-                            candidate_output.storage_mut(),
-                            1,
-                            cache.num_pages(),
+                            PagedAttentionLaunch {
+                                page_size: page_size.value(),
+                                query: query.storage(),
+                                key_cache: cache.key().storage(),
+                                value_cache: cache.value().storage(),
+                                block_table: cache.block_table().storage(),
+                                position_ids: position.storage(),
+                                output: candidate_output.storage_mut(),
+                                num_tokens: 1,
+                                num_pages: cache.num_pages(),
+                            },
                         )?;
                     }
                     Ok(())

@@ -5,11 +5,21 @@ use crate::{
     cuda::{
         CudaRuntime,
         benchmark::{BenchConfig, BenchStats, benchmark_gpu},
-        blaslt::fp8::Fp8ScaleMode,
+        blaslt::{Fp8LinearConfig, fp8::Fp8ScaleMode},
         testing::readback,
     },
     tensor::Shape,
 };
+
+fn fp8_config(m: usize, n: usize, k: usize, scale_mode: Fp8ScaleMode) -> Fp8LinearConfig {
+    Fp8LinearConfig {
+        m,
+        n,
+        k,
+        scale_mode,
+        output_scale: 1.0,
+    }
+}
 
 #[test]
 fn linear_fp8_e4m3_correctness() -> Result<()> {
@@ -18,7 +28,6 @@ fn linear_fp8_e4m3_correctness() -> Result<()> {
     const N: usize = 16;
     const K: usize = 32;
 
-    // E4M3: 0x38 = 1.0 and 0xb8 = -1.0.
     let x_host: Vec<u8> = (0..M * K)
         .map(|index| if index % 2 == 0 { 0x38 } else { 0xb8 })
         .collect();
@@ -30,28 +39,20 @@ fn linear_fp8_e4m3_correctness() -> Result<()> {
 
     for scale_mode in [Fp8ScaleMode::Tensorwide, Fp8ScaleMode::Block32] {
         let mut out = runtime.zeros::<bf16>(Shape::new([M, N]))?;
-
         unsafe {
             runtime.blaslt().linear_fp8(
                 x.storage(),
                 weight.storage(),
                 out.storage_mut(),
-                M,
-                N,
-                K,
-                scale_mode,
+                fp8_config(M, N, K, scale_mode),
             )?;
         }
-
         let actual = readback(&runtime, &out)?;
-
         for value in actual {
             assert_eq!(value.to_f32(), K as f32);
         }
     }
-
     assert_eq!(runtime.blaslt().cached_fp8_plan_count(), 2);
-
     Ok(())
 }
 
@@ -66,7 +67,6 @@ fn quantize_bf16_to_e4m3_correctness() -> Result<()> {
     ];
     let input = runtime.upload(&input_host, Shape::new([1, 4]))?;
     let mut output = runtime.zeros::<u8>(Shape::new([1, 4]))?;
-
     unsafe {
         runtime.kernels().fp8_quantize().launch_bf16_e4m3(
             runtime.stream(),
@@ -76,10 +76,8 @@ fn quantize_bf16_to_e4m3_correctness() -> Result<()> {
             1.0,
         )?;
     }
-
     let actual = readback(&runtime, &output)?;
     assert_eq!(actual, [0x38, 0xb8, 0x30, 0xb0]);
-
     Ok(())
 }
 
@@ -98,7 +96,6 @@ fn tensorwide_fp8_numerical_error_is_bounded() -> Result<()> {
         value = value.wrapping_mul(0x846c_a68b);
         value ^= value >> 16;
         let unit = (value & 0xffff) as f32 / 65_535.0;
-
         bf16::from_f32((unit - 0.5) * 1.5)
     }
 
@@ -142,10 +139,7 @@ fn tensorwide_fp8_numerical_error_is_bounded() -> Result<()> {
             x_fp8.storage(),
             weight_fp8.storage(),
             fp8_out.storage_mut(),
-            M,
-            N,
-            K,
-            Fp8ScaleMode::Tensorwide,
+            fp8_config(M, N, K, Fp8ScaleMode::Tensorwide),
         )?;
     }
 
@@ -155,7 +149,6 @@ fn tensorwide_fp8_numerical_error_is_bounded() -> Result<()> {
     let mut squared_reference = 0.0f64;
     let mut dot = 0.0f64;
     let mut squared_actual = 0.0f64;
-
     for (expected, observed) in reference.iter().zip(&actual) {
         let expected = f64::from(expected.to_f32());
         let observed = f64::from(observed.to_f32());
@@ -165,13 +158,11 @@ fn tensorwide_fp8_numerical_error_is_bounded() -> Result<()> {
         squared_actual += observed * observed;
         dot += expected * observed;
     }
-
     let nrmse = (squared_error / squared_reference).sqrt();
     let cosine = dot / (squared_reference * squared_actual).sqrt();
     println!("tensorwide_fp8_nrmse={nrmse:.6}, cosine={cosine:.6}");
     assert!(nrmse < 0.08, "FP8 NRMSE {nrmse} exceeds 0.08");
     assert!(cosine > 0.995, "FP8 cosine {cosine} is below 0.995");
-
     Ok(())
 }
 
@@ -183,31 +174,11 @@ struct GemmShape {
 }
 
 const LFM_GEMMS: [GemmShape; 5] = [
-    GemmShape {
-        name: "mlp_gate_up",
-        n: 16_384,
-        k: 2_048,
-    },
-    GemmShape {
-        name: "mlp_down",
-        n: 2_048,
-        k: 8_192,
-    },
-    GemmShape {
-        name: "lm_head",
-        n: 65_536,
-        k: 2_048,
-    },
-    GemmShape {
-        name: "attention_qkv",
-        n: 3_072,
-        k: 2_048,
-    },
-    GemmShape {
-        name: "attention_o",
-        n: 2_048,
-        k: 2_048,
-    },
+    GemmShape { name: "mlp_gate_up", n: 16_384, k: 2_048 },
+    GemmShape { name: "mlp_down", n: 2_048, k: 8_192 },
+    GemmShape { name: "lm_head", n: 65_536, k: 2_048 },
+    GemmShape { name: "attention_qkv", n: 3_072, k: 2_048 },
+    GemmShape { name: "attention_o", n: 2_048, k: 2_048 },
 ];
 
 const M_SWEEP: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
@@ -217,7 +188,6 @@ fn weight_ring_count(elements: usize, element_size: usize) -> Result<usize> {
     let bytes = elements
         .checked_mul(element_size)
         .ok_or_else(|| anyhow::anyhow!("weight byte count overflow"))?;
-
     Ok(WEIGHT_RING_TARGET_BYTES.div_ceil(bytes).max(1))
 }
 
@@ -242,7 +212,6 @@ fn report(
         .and_then(|value| value.checked_mul(shape.k))
         .and_then(|value| value.checked_mul(2))
         .ok_or_else(|| anyhow::anyhow!("GEMM FLOP count overflow"))?;
-
     println!(
         "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.2},{:.3}",
         shape.name,
@@ -255,7 +224,6 @@ fn report(
         stats.effective_gbps(bytes),
         stats.effective_tflops(flops),
     );
-
     Ok(())
 }
 
@@ -269,7 +237,6 @@ fn report_quantization(
     let bytes = elements
         .checked_mul(3)
         .ok_or_else(|| anyhow::anyhow!("quantization byte count overflow"))?;
-
     println!(
         "{},{},{},{:.3},{:.3},{:.3},{:.3},{:.2},0.000",
         shape.name,
@@ -281,7 +248,6 @@ fn report_quantization(
         stats.min_us,
         stats.effective_gbps(bytes),
     );
-
     Ok(())
 }
 
@@ -303,7 +269,6 @@ fn bench_lfm_narrow_precision_gemms() -> Result<()> {
             .checked_mul(shape.k)
             .ok_or_else(|| anyhow::anyhow!("weight element count overflow"))?;
         let mut weight_bf16_host = Vec::with_capacity(element_count);
-
         for index in 0..element_count {
             let (_, bf16) = e4m3_value(index);
             weight_bf16_host.push(bf16);
@@ -313,14 +278,12 @@ fn bench_lfm_narrow_precision_gemms() -> Result<()> {
         let fp8_ring_count = weight_ring_count(element_count, 1)?;
         let mut weight_bf16 = Vec::with_capacity(bf16_ring_count);
         let mut weight_fp8 = Vec::with_capacity(fp8_ring_count);
-
         for _ in 0..bf16_ring_count {
             weight_bf16.push(runtime.upload(&weight_bf16_host, Shape::new([shape.n, shape.k]))?);
         }
         for _ in 0..fp8_ring_count {
             weight_fp8.push(runtime.zeros::<u8>(Shape::new([shape.n, shape.k]))?);
         }
-
         drop(weight_bf16_host);
 
         println!(
@@ -365,7 +328,6 @@ fn bench_lfm_narrow_precision_gemms() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("input element count overflow"))?;
             let mut x_fp8_host = Vec::with_capacity(input_elements);
             let mut x_bf16_host = Vec::with_capacity(input_elements);
-
             for index in 0..input_elements {
                 let (fp8, bf16) = e4m3_value(index.wrapping_mul(3));
                 x_fp8_host.push(fp8);
@@ -409,10 +371,7 @@ fn bench_lfm_narrow_precision_gemms() -> Result<()> {
                         x_fp8.storage(),
                         weight_fp8[weight_index].storage(),
                         out.storage_mut(),
-                        m,
-                        shape.n,
-                        shape.k,
-                        Fp8ScaleMode::Tensorwide,
+                        fp8_config(m, shape.n, shape.k, Fp8ScaleMode::Tensorwide),
                     )
                 })?;
             let mut mxfp8_weight_index = 0usize;
@@ -424,10 +383,7 @@ fn bench_lfm_narrow_precision_gemms() -> Result<()> {
                         x_fp8.storage(),
                         weight_fp8[weight_index].storage(),
                         out.storage_mut(),
-                        m,
-                        shape.n,
-                        shape.k,
-                        Fp8ScaleMode::Block32,
+                        fp8_config(m, shape.n, shape.k, Fp8ScaleMode::Block32),
                     )
                 })?;
             let quantize_stats =
@@ -456,10 +412,7 @@ fn bench_lfm_narrow_precision_gemms() -> Result<()> {
                         x_quantized.storage(),
                         weight_fp8[weight_index].storage(),
                         out.storage_mut(),
-                        m,
-                        shape.n,
-                        shape.k,
-                        Fp8ScaleMode::Tensorwide,
+                        fp8_config(m, shape.n, shape.k, Fp8ScaleMode::Tensorwide),
                     )
                 })?;
 

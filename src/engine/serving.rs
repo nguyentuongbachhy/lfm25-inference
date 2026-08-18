@@ -10,10 +10,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     generation::SamplingConfig,
+    model::RaggedBatchInput,
     ops,
     scheduler::{
-        HardwareCostModel, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork, Scheduler,
-        SchedulerConfig,
+        HardwareCostModel, RequestInit, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork,
+        Scheduler, SchedulerConfig,
     },
 };
 
@@ -414,12 +415,14 @@ fn run_owner(
         let logits = engine.model.forward_ragged_batch(
             &engine.runtime,
             &mut cache,
-            &token_ids,
-            &positions,
-            &request_slots,
-            &segment_offsets,
-            &segment_slots,
-            &output_rows,
+            RaggedBatchInput {
+                token_ids: &token_ids,
+                positions: &positions,
+                request_slots: &request_slots,
+                segment_offsets: &segment_offsets,
+                segment_slots: &segment_slots,
+                output_rows: &output_rows,
+            },
         )?;
         let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
         let gpu_finished = engine.runtime.record_timing_event()?;
@@ -631,12 +634,14 @@ fn warm_serving_path(
     let logits = engine.model.forward_ragged_batch(
         &engine.runtime,
         cache,
-        &token_ids,
-        &positions,
-        &request_slots,
-        &segment_offsets,
-        &segment_slots,
-        &output_rows,
+        RaggedBatchInput {
+            token_ids: &token_ids,
+            positions: &positions,
+            request_slots: &request_slots,
+            segment_offsets: &segment_offsets,
+            segment_slots: &segment_slots,
+            output_rows: &output_rows,
+        },
     )?;
     let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
     engine.runtime.synchronize()?;
@@ -776,7 +781,7 @@ fn admit_request(
         return Ok(());
     }
     let reserved_pages = total.div_ceil(engine.config.kv_page_size.value());
-    slots.get_mut(slot)?.initialize(
+    slots.get_mut(slot)?.initialize(RequestInit::new(
         request.request_id,
         &request.token_ids,
         total,
@@ -784,7 +789,7 @@ fn admit_request(
         config.scheduler.ttft_slo_us,
         config.scheduler.tpot_slo_us,
         reserved_pages,
-    )?;
+    ))?;
     let state = &mut responses[slot.0 as usize];
     state.response = Some(request.response);
     state.arrived = request.arrived;
