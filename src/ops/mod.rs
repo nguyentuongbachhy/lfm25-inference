@@ -25,9 +25,7 @@ mod silu_mul;
 pub use attention::prefill_attention_lfm2_bf16;
 pub(crate) use attention::{HybridRaggedAttentionInput, hybrid_ragged_attention_lfm2_bf16};
 #[cfg(test)]
-pub(crate) use attention::{
-    paged_attention_lfm2_bf16_sync, paged_ragged_attention_lfm2_bf16,
-};
+pub(crate) use attention::paged_attention_lfm2_bf16_sync;
 pub(crate) use attention_async_fast::{
     FastRaggedAttentionInput, paged_attention_fast_lfm2_bf16,
     paged_ragged_attention_fast_lfm2_bf16,
