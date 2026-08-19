@@ -2,6 +2,9 @@ use anyhow::{Result, ensure};
 
 use super::{HardwareCostModel, RequestPhase, RequestSlotId, RequestSlots};
 
+const DECODE_TAIL_CONTEXT_THRESHOLD: usize = 1536;
+const DECODE_TAIL_QUEUE_THRESHOLD: usize = 24;
+
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerConfig {
     pub step_budget_ms: f64,
@@ -128,6 +131,7 @@ impl Scheduler {
                 .push((urgency, RequestSlotId(index as u32)));
         }
         self.prefill_order.sort_unstable_by_key(|entry| entry.0);
+        let queued_prefills = self.prefill_order.len();
 
         for &(_, slot) in &self.prefill_order {
             if self.plan.prefill_tokens >= self.config.maximum_prefill_tokens {
@@ -136,27 +140,53 @@ impl Scheduler {
             let Ok(request) = requests.get(slot) else {
                 continue;
             };
-            let remaining = request
-                .prompt_len
-                .saturating_sub(request.prefilled)
-                .min(
+            let raw_remaining = request.prompt_len.saturating_sub(request.prefilled);
+            if raw_remaining == 0 {
+                continue;
+            }
+
+            // A large burst of page-aligned prefix hits can leave one final KV
+            // page per request. Packing all of those tails as a single ragged
+            // prefill makes attention see hundreds of query tokens at a long
+            // context and badly underestimates the real cost. Draining one
+            // token/request keeps every segment length at one, which lets the
+            // model route the batch through the optimized paged-decode/MoK
+            // path while preserving the exact sequential Conv/KV semantics.
+            let decode_tail = queued_prefills >= DECODE_TAIL_QUEUE_THRESHOLD
+                && request.prefilled >= DECODE_TAIL_CONTEXT_THRESHOLD
+                && raw_remaining <= self.cost.page_size;
+
+            let remaining = if decode_tail {
+                1
+            } else {
+                raw_remaining.min(
                     self.config
                         .maximum_prefill_tokens
                         .saturating_sub(self.plan.prefill_tokens),
-                );
+                )
+            };
             if remaining == 0 {
                 continue;
             }
 
             let mut chunk = 0usize;
-            for candidate in [512usize, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
-                if candidate > remaining {
-                    continue;
+            if decode_tail {
+                let total_prefill = self.plan.prefill_tokens.saturating_add(1);
+                if total_prefill <= self.config.maximum_prefill_tokens
+                    && self.cost.predict_prefill_ms(total_prefill) <= remaining_budget
+                {
+                    chunk = 1;
                 }
-                let total_prefill = self.plan.prefill_tokens.saturating_add(candidate);
-                if self.cost.predict_prefill_ms(total_prefill) <= remaining_budget {
-                    chunk = candidate;
-                    break;
+            } else {
+                for candidate in [512usize, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
+                    if candidate > remaining {
+                        continue;
+                    }
+                    let total_prefill = self.plan.prefill_tokens.saturating_add(candidate);
+                    if self.cost.predict_prefill_ms(total_prefill) <= remaining_budget {
+                        chunk = candidate;
+                        break;
+                    }
                 }
             }
             if chunk == 0 {
@@ -267,6 +297,79 @@ mod tests {
         assert_eq!(prefills, 3);
         assert_eq!(plan.prefill_tokens, 96);
         assert!(plan.predicted_ms <= SchedulerConfig::default().step_budget_ms);
+        Ok(())
+    }
+
+    #[test]
+    fn large_long_context_tail_burst_is_drained_one_token_per_request() -> Result<()> {
+        let request_count = DECODE_TAIL_QUEUE_THRESHOLD;
+        let mut slots = RequestSlots::new(request_count, 4096)?;
+        for request_id in 0..request_count {
+            let slot = slots.acquire().expect("tail slot");
+            slots.get_mut(slot)?.initialize(RequestInit::new(
+                request_id as u64,
+                &[2; 2048],
+                2176,
+                0,
+                400_000,
+                50_000,
+                136,
+            ))?;
+            slots.get_mut(slot)?.prefilled = 2032;
+        }
+        let mut scheduler = Scheduler::new(
+            request_count,
+            SchedulerConfig::default(),
+            cost_model()?,
+        )?;
+        let plan = scheduler.schedule(&slots, 10_000);
+        let tail_prefills = plan
+            .work()
+            .iter()
+            .filter_map(|work| match work {
+                ScheduledWork::Prefill { tokens, .. } => Some(*tokens),
+                ScheduledWork::Decode { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tail_prefills.len(), request_count);
+        assert!(tail_prefills.iter().all(|tokens| *tokens == 1));
+        assert_eq!(plan.prefill_tokens, request_count);
+        Ok(())
+    }
+
+    #[test]
+    fn small_long_context_tail_batch_keeps_chunked_prefill() -> Result<()> {
+        let request_count = 8usize;
+        let mut slots = RequestSlots::new(request_count, 4096)?;
+        for request_id in 0..request_count {
+            let slot = slots.acquire().expect("tail slot");
+            slots.get_mut(slot)?.initialize(RequestInit::new(
+                request_id as u64,
+                &[2; 2048],
+                2176,
+                0,
+                400_000,
+                50_000,
+                136,
+            ))?;
+            slots.get_mut(slot)?.prefilled = 2032;
+        }
+        let mut scheduler = Scheduler::new(
+            request_count,
+            SchedulerConfig::default(),
+            cost_model()?,
+        )?;
+        let plan = scheduler.schedule(&slots, 10_000);
+        let tail_prefills = plan
+            .work()
+            .iter()
+            .filter_map(|work| match work {
+                ScheduledWork::Prefill { tokens, .. } => Some(*tokens),
+                ScheduledWork::Decode { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tail_prefills.len(), request_count);
+        assert!(tail_prefills.iter().all(|tokens| *tokens == 16));
         Ok(())
     }
 }
