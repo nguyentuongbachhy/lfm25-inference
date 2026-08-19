@@ -58,6 +58,9 @@ pub(super) fn run_owner_radix(
     let mut sampled_host = engine
         .runtime
         .pinned_u32(config.maximum_request_slots + 1)?;
+    let mut sampled_device = engine.runtime.alloc_uninit::<u32>(crate::tensor::Shape::new([
+        config.maximum_request_slots + 1,
+    ]))?;
 
     warm_serving_path(&engine, &config, &mut cache)?;
 
@@ -219,14 +222,16 @@ pub(super) fn run_owner_radix(
                 output_rows: &output_rows,
             },
         )?;
-        let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
+        ops::argmax_rows_bf16_into(&engine.runtime, &logits, &mut sampled_device)?;
         let gpu_finished = engine.runtime.record_timing_event()?;
         let submit_cpu_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
         let gpu_ms = engine.runtime.elapsed_ms(&gpu_started, &gpu_finished)?;
         let download_started = Instant::now();
-        engine
-            .runtime
-            .download_u32_into(&sampled, &mut sampled_host)?;
+        engine.runtime.download_u32_prefix_into(
+            &sampled_device,
+            work.len(),
+            &mut sampled_host,
+        )?;
         let sampled = sampled_host
             .as_slice()
             .context("failed to synchronize pinned token output")?;
