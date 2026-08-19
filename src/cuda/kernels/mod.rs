@@ -6,6 +6,7 @@ mod fp8_quantize;
 mod gather;
 mod kernel_set;
 mod kv_cache;
+mod metadata;
 mod qk_postprocess;
 mod rms_norm;
 mod rope;
@@ -36,6 +37,7 @@ use gather::GatherKernels;
 use kernel_set::KernelSet;
 pub(crate) use kv_cache::KvCacheWriteLaunch;
 use kv_cache::KvCacheKernels;
+use metadata::MetadataKernels;
 pub(crate) use qk_postprocess::QkPostprocessLaunch;
 use qk_postprocess::QkPostprocessKernels;
 pub(crate) use rms_norm::{ResidualRmsNormLaunch, RmsNormLaunch};
@@ -63,6 +65,7 @@ pub(crate) struct Kernels {
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
     gather: GatherKernels,
+    metadata: MetadataKernels,
 }
 
 impl Kernels {
@@ -81,6 +84,7 @@ impl Kernels {
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
             gather: GatherKernels::load(context)?,
+            metadata: MetadataKernels::load(context)?,
         })
     }
 
@@ -134,6 +138,10 @@ impl Kernels {
 
     pub(crate) fn gather(&self) -> &GatherKernels {
         &self.gather
+    }
+
+    pub(crate) fn metadata(&self) -> &MetadataKernels {
+        &self.metadata
     }
 }
 
