@@ -23,9 +23,21 @@ pub fn argmax_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor
 pub fn argmax_rows_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
     ensure!(input.rank() == 2, "batched argmax expects rank-2 input");
     let rows = input.dims()[0];
+    let mut output = runtime.alloc_u32(Shape::new([rows]))?;
+    argmax_rows_bf16_into(runtime, input, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn argmax_rows_bf16_into(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    output: &mut Tensor<u32>,
+) -> Result<()> {
+    ensure!(input.rank() == 2, "batched argmax expects rank-2 input");
+    let rows = input.dims()[0];
     let columns = input.dims()[1];
     ensure!(rows > 0 && columns > 0, "batched argmax input is empty");
-    let mut output = runtime.alloc_u32(Shape::new([rows]))?;
+    output.set_logical_shape(Shape::new([rows]))?;
     unsafe {
         runtime.kernels().sampling().launch_argmax_rows_bf16(
             runtime.stream(),
@@ -35,7 +47,7 @@ pub fn argmax_rows_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<T
             columns,
         )?;
     }
-    Ok(output)
+    Ok(())
 }
 
 #[cfg(test)]
