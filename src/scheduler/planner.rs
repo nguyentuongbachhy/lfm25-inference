@@ -56,6 +56,7 @@ pub struct Scheduler {
     config: SchedulerConfig,
     cost: HardwareCostModel,
     plan: BatchPlan,
+    prefill_order: Vec<(u64, RequestSlotId)>,
 }
 
 impl Scheduler {
@@ -69,6 +70,7 @@ impl Scheduler {
             config,
             cost,
             plan: BatchPlan::with_capacity(capacity.saturating_add(1)),
+            prefill_order: Vec::with_capacity(capacity),
         })
     }
 
@@ -77,6 +79,7 @@ impl Scheduler {
         self.plan.predicted_ms = 0.0;
         self.plan.decode_count = 0;
         self.plan.prefill_tokens = 0;
+        self.prefill_order.clear();
 
         let mut maximum_context = 1usize;
         for (index, request) in requests.entries().iter().enumerate() {
@@ -95,7 +98,7 @@ impl Scheduler {
             ScheduledWork::Prefill { .. } => u64::MAX,
         });
         self.plan.decode_count = self.plan.work.len();
-        self.plan.predicted_ms = if self.plan.decode_count == 0 {
+        let decode_ms = if self.plan.decode_count == 0 {
             0.0
         } else {
             self.cost.predict_decode_ms(
@@ -104,10 +107,13 @@ impl Scheduler {
                 self.config.fp8_decode,
             )
         };
+        self.plan.predicted_ms = decode_ms;
 
-        let remaining_budget = (self.config.step_budget_ms - self.plan.predicted_ms).max(0.0);
-        let mut best_prefill = None;
-        let mut best_urgency = u64::MAX;
+        let remaining_budget = (self.config.step_budget_ms - decode_ms).max(0.0);
+        if remaining_budget <= 0.0 || self.config.maximum_prefill_tokens == 0 {
+            return &self.plan;
+        }
+
         for (index, request) in requests.entries().iter().enumerate() {
             if request.phase != RequestPhase::QueuedPrefill
                 || request.prefilled >= request.prompt_len
@@ -118,25 +124,55 @@ impl Scheduler {
                 .first_token_deadline_us
                 .saturating_sub(now_us)
                 .saturating_sub(now_us.saturating_sub(request.arrival_us) / 4);
-            if urgency < best_urgency {
-                best_urgency = urgency;
-                best_prefill = Some((RequestSlotId(index as u32), request));
-            }
+            self.prefill_order
+                .push((urgency, RequestSlotId(index as u32)));
         }
-        if let Some((slot, request)) = best_prefill {
+        self.prefill_order.sort_unstable_by_key(|entry| entry.0);
+
+        for &(_, slot) in &self.prefill_order {
+            if self.plan.prefill_tokens >= self.config.maximum_prefill_tokens {
+                break;
+            }
+            let Ok(request) = requests.get(slot) else {
+                continue;
+            };
             let remaining = request
                 .prompt_len
                 .saturating_sub(request.prefilled)
-                .min(self.config.maximum_prefill_tokens);
-            let chunk = self.cost.largest_prefill_chunk(remaining, remaining_budget);
-            if chunk > 0 {
-                self.plan.work.push(ScheduledWork::Prefill {
-                    slot,
-                    tokens: chunk,
-                });
-                self.plan.prefill_tokens = chunk;
-                self.plan.predicted_ms += self.cost.predict_prefill_ms(chunk);
+                .min(
+                    self.config
+                        .maximum_prefill_tokens
+                        .saturating_sub(self.plan.prefill_tokens),
+                );
+            if remaining == 0 {
+                continue;
             }
+
+            let mut chunk = 0usize;
+            for candidate in [512usize, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
+                if candidate > remaining {
+                    continue;
+                }
+                let total_prefill = self.plan.prefill_tokens.saturating_add(candidate);
+                if self.cost.predict_prefill_ms(total_prefill) <= remaining_budget {
+                    chunk = candidate;
+                    break;
+                }
+            }
+            if chunk == 0 {
+                break;
+            }
+
+            self.plan.work.push(ScheduledWork::Prefill {
+                slot,
+                tokens: chunk,
+            });
+            self.plan.prefill_tokens = self.plan.prefill_tokens.saturating_add(chunk);
+        }
+
+        if self.plan.prefill_tokens > 0 {
+            self.plan.predicted_ms =
+                decode_ms + self.cost.predict_prefill_ms(self.plan.prefill_tokens);
         }
         &self.plan
     }
@@ -197,10 +233,40 @@ mod tests {
         ))?;
         let mut scheduler = Scheduler::new(3, SchedulerConfig::default(), cost_model()?)?;
         let capacity = scheduler.plan.work.capacity();
+        let prefill_capacity = scheduler.prefill_order.capacity();
         let plan = scheduler.schedule(&slots, 10_000);
         assert!(matches!(plan.work()[0], ScheduledWork::Decode { .. }));
         assert!(plan.prefill_tokens > 0);
         assert_eq!(scheduler.plan.work.capacity(), capacity);
+        assert_eq!(scheduler.prefill_order.capacity(), prefill_capacity);
+        Ok(())
+    }
+
+    #[test]
+    fn packs_multiple_short_prefills_into_one_step() -> Result<()> {
+        let mut slots = RequestSlots::new(4, 1024)?;
+        for request_id in 1..=3u64 {
+            let slot = slots.acquire().expect("prefill slot");
+            slots.get_mut(slot)?.initialize(RequestInit::new(
+                request_id,
+                &[2; 32],
+                128,
+                0,
+                400_000,
+                50_000,
+                8,
+            ))?;
+        }
+        let mut scheduler = Scheduler::new(4, SchedulerConfig::default(), cost_model()?)?;
+        let plan = scheduler.schedule(&slots, 10_000);
+        let prefills = plan
+            .work()
+            .iter()
+            .filter(|work| matches!(work, ScheduledWork::Prefill { .. }))
+            .count();
+        assert_eq!(prefills, 3);
+        assert_eq!(plan.prefill_tokens, 96);
+        assert!(plan.predicted_ms <= SchedulerConfig::default().step_budget_ms);
         Ok(())
     }
 }
