@@ -441,7 +441,7 @@ fn refresh_unscheduled_prefixes(
             if reusable_limit <= request.prefilled {
                 continue;
             }
-            let hit = radix.longest_checkpoint(request.tokens(), reusable_limit, matched_pages);
+            let hit = radix.probe_checkpoint(request.tokens(), reusable_limit, matched_pages);
             (request.phase, request.prefilled, reusable_limit, hit)
         };
         if phase != RequestPhase::QueuedPrefill || reusable_limit <= current_prefix {
