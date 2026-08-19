@@ -71,9 +71,18 @@ impl KvCacheKernels {
             .context("KV cache size overflow")?;
         ensure!(key.len() >= required, "K storage too small");
         ensure!(value.len() >= required, "V storage too small");
-        ensure!(key_cache.len() >= cache_required, "K cache storage too small");
-        ensure!(value_cache.len() >= cache_required, "V cache storage too small");
-        ensure!(slot_mapping.len() >= num_tokens, "slot mapping storage too small");
+        ensure!(
+            key_cache.len() >= cache_required,
+            "K cache storage too small"
+        );
+        ensure!(
+            value_cache.len() >= cache_required,
+            "V cache storage too small"
+        );
+        ensure!(
+            slot_mapping.len() >= num_tokens,
+            "slot mapping storage too small"
+        );
 
         let kernel = match page_size {
             16 => &self.lfm2_ps16,

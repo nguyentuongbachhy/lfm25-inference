@@ -20,8 +20,7 @@ pub(crate) fn should_use_mok_one_kernel(
                 || (context_tokens <= 64 && batch_size <= 8)
         }
         32 => {
-            (context_tokens <= 32 && batch_size <= 16)
-                || (context_tokens <= 64 && batch_size <= 8)
+            (context_tokens <= 32 && batch_size <= 16) || (context_tokens <= 64 && batch_size <= 8)
         }
         _ => false,
     }

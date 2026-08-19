@@ -43,8 +43,14 @@ impl MetadataKernels {
     ) -> Result<()> {
         ensure!(num_tokens > 0, "metadata scatter requires tokens");
         ensure!(num_segments > 0, "metadata scatter requires segments");
-        ensure!(token_ids.len() >= num_tokens, "token metadata capacity is too small");
-        ensure!(positions.len() >= num_tokens, "position metadata capacity is too small");
+        ensure!(
+            token_ids.len() >= num_tokens,
+            "token metadata capacity is too small"
+        );
+        ensure!(
+            positions.len() >= num_tokens,
+            "position metadata capacity is too small"
+        );
         ensure!(
             request_slots.len() >= num_tokens,
             "request-slot metadata capacity is too small"

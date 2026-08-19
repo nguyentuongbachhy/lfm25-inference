@@ -116,9 +116,18 @@ impl AsyncAttentionFastKernels {
             .and_then(|value| value.checked_mul(page_size))
             .and_then(|value| value.checked_mul(64))
             .context("fast-exp attention cache size overflow")?;
-        ensure!(query.len() >= q_required, "fast-exp query storage too small");
-        ensure!(output.len() >= q_required, "fast-exp output storage too small");
-        ensure!(key_cache.len() >= cache_required, "fast-exp K cache too small");
+        ensure!(
+            query.len() >= q_required,
+            "fast-exp query storage too small"
+        );
+        ensure!(
+            output.len() >= q_required,
+            "fast-exp output storage too small"
+        );
+        ensure!(
+            key_cache.len() >= cache_required,
+            "fast-exp K cache too small"
+        );
         ensure!(
             value_cache.len() >= cache_required,
             "fast-exp V cache too small"
@@ -172,7 +181,10 @@ impl AsyncAttentionFastKernels {
             block_table_stride,
         } = launch;
         ensure!(num_tokens > 0, "fast-exp ragged attention requires tokens");
-        ensure!(num_pages > 0, "fast-exp ragged attention requires cache pages");
+        ensure!(
+            num_pages > 0,
+            "fast-exp ragged attention requires cache pages"
+        );
         ensure!(
             block_table_stride > 0,
             "fast-exp ragged block table stride must be positive"

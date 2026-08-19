@@ -91,9 +91,11 @@ impl CostCurve {
         let batch = batch.max(1);
         let context = context.max(1);
 
-        if let Some(point) = self.points.iter().find(|point| {
-            point.tokens == 1 && point.batch == batch && point.context == context
-        }) {
+        if let Some(point) = self
+            .points
+            .iter()
+            .find(|point| point.tokens == 1 && point.batch == batch && point.context == context)
+        {
             return point.milliseconds;
         }
 
@@ -103,23 +105,18 @@ impl CostCurve {
             if point.tokens != 1 {
                 continue;
             }
-            if point.context <= context
-                && lower_context.is_none_or(|value| point.context > value)
-            {
+            if point.context <= context && lower_context.is_none_or(|value| point.context > value) {
                 lower_context = Some(point.context);
             }
-            if point.context >= context
-                && upper_context.is_none_or(|value| point.context < value)
-            {
+            if point.context >= context && upper_context.is_none_or(|value| point.context < value) {
                 upper_context = Some(point.context);
             }
         }
 
         match (lower_context, upper_context) {
-            (Some(lower), Some(upper)) if lower == upper => {
-                self.interpolate_decode_batch(batch, lower)
-                    .unwrap_or_else(|| self.predict(batch, 1, context))
-            }
+            (Some(lower), Some(upper)) if lower == upper => self
+                .interpolate_decode_batch(batch, lower)
+                .unwrap_or_else(|| self.predict(batch, 1, context)),
             (Some(lower), Some(upper)) => {
                 let lower_ms = self
                     .interpolate_decode_batch(batch, lower)
@@ -155,14 +152,10 @@ impl CostCurve {
             if point.batch == batch {
                 return Some(point.milliseconds);
             }
-            if point.batch < batch
-                && lower.is_none_or(|best: CostPoint| point.batch > best.batch)
-            {
+            if point.batch < batch && lower.is_none_or(|best: CostPoint| point.batch > best.batch) {
                 lower = Some(*point);
             }
-            if point.batch > batch
-                && upper.is_none_or(|best: CostPoint| point.batch < best.batch)
-            {
+            if point.batch > batch && upper.is_none_or(|best: CostPoint| point.batch < best.batch) {
                 upper = Some(*point);
             }
         }
@@ -174,9 +167,9 @@ impl CostCurve {
                 let weight = offset as f64 / span as f64;
                 Some(lower.milliseconds + (upper.milliseconds - lower.milliseconds) * weight)
             }
-            (Some(lower), None) => Some(
-                lower.milliseconds * (batch as f64 / lower.batch as f64).max(1.0),
-            ),
+            (Some(lower), None) => {
+                Some(lower.milliseconds * (batch as f64 / lower.batch as f64).max(1.0))
+            }
             (None, Some(upper)) => Some(upper.milliseconds),
             (None, None) => None,
         }

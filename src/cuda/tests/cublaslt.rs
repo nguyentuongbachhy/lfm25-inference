@@ -31,13 +31,8 @@ fn linear_bf16_layout_correctness() -> Result<()> {
     const K: usize = 3;
     const N: usize = 4;
     let x_host = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map(bf16::from_f32);
-    let weight_host = [
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0,
-        1.0, 1.0, 1.0,
-    ]
-    .map(bf16::from_f32);
+    let weight_host =
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0].map(bf16::from_f32);
     let expected = linear_reference(&x_host, &weight_host, M, N, K);
     let x = runtime.upload(&x_host, Shape::new([M, K]))?;
     let weight = runtime.upload(&weight_host, Shape::new([N, K]))?;

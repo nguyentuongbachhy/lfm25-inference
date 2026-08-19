@@ -87,7 +87,10 @@ pub(crate) fn paged_ragged_attention_lfm2_bf16(
         request_slots.numel() == num_tokens,
         "request slot count mismatch"
     );
-    ensure!(position_ids.numel() == num_tokens, "position count mismatch");
+    ensure!(
+        position_ids.numel() == num_tokens,
+        "position count mismatch"
+    );
     let maximum_position = block_table_stride
         .checked_mul(arena.page_size().value())
         .context("ragged attention capacity overflow")?;
@@ -136,8 +139,7 @@ pub(crate) fn hybrid_ragged_attention_lfm2_bf16(
     );
     let num_tokens = query.dims()[0];
     ensure!(
-        current_key.dims() == [num_tokens, 8, 64]
-            && current_value.shape() == current_key.shape(),
+        current_key.dims() == [num_tokens, 8, 64] && current_value.shape() == current_key.shape(),
         "hybrid contiguous K/V shape mismatch"
     );
     ensure!(block_tables.rank() == 2, "block tables must have rank 2");
@@ -151,26 +153,29 @@ pub(crate) fn hybrid_ragged_attention_lfm2_bf16(
     let num_segments = segment_offsets.numel() - 1;
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
     unsafe {
-        runtime.kernels().attention().launch_hybrid_ragged_lfm2_bf16(
-            runtime.stream(),
-            HybridAttentionLaunch {
-                page_size: arena.page_size().value(),
-                query: query.storage(),
-                current_key: current_key.storage(),
-                current_value: current_value.storage(),
-                key_cache: arena.key().storage(),
-                value_cache: arena.value().storage(),
-                block_tables: block_tables.storage(),
-                request_slots: request_slots.storage(),
-                position_ids: position_ids.storage(),
-                segment_offsets: segment_offsets.storage(),
-                output: output.storage_mut(),
-                num_tokens,
-                num_pages: arena.num_pages(),
-                block_table_stride,
-                num_segments,
-            },
-        )?;
+        runtime
+            .kernels()
+            .attention()
+            .launch_hybrid_ragged_lfm2_bf16(
+                runtime.stream(),
+                HybridAttentionLaunch {
+                    page_size: arena.page_size().value(),
+                    query: query.storage(),
+                    current_key: current_key.storage(),
+                    current_value: current_value.storage(),
+                    key_cache: arena.key().storage(),
+                    value_cache: arena.value().storage(),
+                    block_tables: block_tables.storage(),
+                    request_slots: request_slots.storage(),
+                    position_ids: position_ids.storage(),
+                    segment_offsets: segment_offsets.storage(),
+                    output: output.storage_mut(),
+                    num_tokens,
+                    num_pages: arena.num_pages(),
+                    block_table_stride,
+                    num_segments,
+                },
+            )?;
     }
     Ok(output)
 }

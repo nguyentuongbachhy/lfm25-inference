@@ -174,11 +174,31 @@ struct GemmShape {
 }
 
 const LFM_GEMMS: [GemmShape; 5] = [
-    GemmShape { name: "mlp_gate_up", n: 16_384, k: 2_048 },
-    GemmShape { name: "mlp_down", n: 2_048, k: 8_192 },
-    GemmShape { name: "lm_head", n: 65_536, k: 2_048 },
-    GemmShape { name: "attention_qkv", n: 3_072, k: 2_048 },
-    GemmShape { name: "attention_o", n: 2_048, k: 2_048 },
+    GemmShape {
+        name: "mlp_gate_up",
+        n: 16_384,
+        k: 2_048,
+    },
+    GemmShape {
+        name: "mlp_down",
+        n: 2_048,
+        k: 8_192,
+    },
+    GemmShape {
+        name: "lm_head",
+        n: 65_536,
+        k: 2_048,
+    },
+    GemmShape {
+        name: "attention_qkv",
+        n: 3_072,
+        k: 2_048,
+    },
+    GemmShape {
+        name: "attention_o",
+        n: 2_048,
+        k: 2_048,
+    },
 ];
 
 const M_SWEEP: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];

@@ -106,10 +106,22 @@ impl QkPostprocessKernels {
         ensure!(query_norm.len() >= 64, "query norm weight too small");
         ensure!(key_norm.len() >= 64, "key norm weight too small");
         ensure!(inv_freq.len() >= 32, "RoPE frequency storage too small");
-        ensure!(position_ids.len() >= num_tokens, "position storage too small");
-        ensure!(slot_mapping.len() >= num_tokens, "slot mapping storage too small");
-        ensure!(key_cache.len() >= cache_required, "K cache storage too small");
-        ensure!(value_cache.len() >= cache_required, "V cache storage too small");
+        ensure!(
+            position_ids.len() >= num_tokens,
+            "position storage too small"
+        );
+        ensure!(
+            slot_mapping.len() >= num_tokens,
+            "slot mapping storage too small"
+        );
+        ensure!(
+            key_cache.len() >= cache_required,
+            "K cache storage too small"
+        );
+        ensure!(
+            value_cache.len() >= cache_required,
+            "V cache storage too small"
+        );
 
         let kernel = match page_size {
             16 => &self.ps16,

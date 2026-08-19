@@ -236,8 +236,7 @@ mod tests {
         let out = linear_bf16(&runtime, &x, &weight)?;
         assert_eq!(out.dims(), &[2, 2, 3]);
         let expected =
-            [1.0, 2.0, 3.0, 3.0, 4.0, 7.0, 5.0, 6.0, 11.0, 7.0, 8.0, 15.0]
-                .map(bf16::from_f32);
+            [1.0, 2.0, 3.0, 3.0, 4.0, 7.0, 5.0, 6.0, 11.0, 7.0, 8.0, 15.0].map(bf16::from_f32);
         assert_close_bf16(&readback(&runtime, &out)?, &expected, 0.01, 0.01);
         Ok(())
     }

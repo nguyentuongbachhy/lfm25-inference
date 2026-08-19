@@ -50,7 +50,11 @@ impl BlasLt {
             .context()
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
             .context("failed to query GPU compute capability")?;
-        let workspace_size = if major >= 9 { 32 * 1024 * 1024 } else { 4 * 1024 * 1024 };
+        let workspace_size = if major >= 9 {
+            32 * 1024 * 1024
+        } else {
+            4 * 1024 * 1024
+        };
         let workspace = unsafe { stream.alloc::<u8>(workspace_size) }
             .context("failed to allocate cuBLASLt workspace")?;
         let handle = result::create_handle().context("failed to create cuBLASLt handle")?;
@@ -66,26 +70,38 @@ impl BlasLt {
 
     fn ensure_fp8_plan(&self, key: Fp8MatmulKey) -> Result<()> {
         {
-            let plans = self.fp8_plans.read().map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
+            let plans = self
+                .fp8_plans
+                .read()
+                .map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
             if plans.contains_key(&key) {
                 return Ok(());
             }
         }
         let created = Fp8MatmulPlan::new(self.handle, &self.stream, key, self.workspace_size)?;
-        let mut plans = self.fp8_plans.write().map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
+        let mut plans = self
+            .fp8_plans
+            .write()
+            .map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
         plans.entry(key).or_insert(created);
         Ok(())
     }
 
     fn ensure_plan(&self, key: MatmulKey) -> Result<()> {
         {
-            let plans = self.plans.read().map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
+            let plans = self
+                .plans
+                .read()
+                .map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
             if plans.contains_key(&key) {
                 return Ok(());
             }
         }
         let created = MatmulPlan::new(self.handle, key, self.workspace_size)?;
-        let mut plans = self.plans.write().map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
+        let mut plans = self
+            .plans
+            .write()
+            .map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
         plans.entry(key).or_insert(created);
         Ok(())
     }
@@ -110,15 +126,35 @@ impl BlasLt {
         let x_required = m.checked_mul(k).context("linear input size overflow")?;
         let weight_required = n.checked_mul(k).context("linear weight size overflow")?;
         let out_required = m.checked_mul(n).context("linear output size overflow")?;
-        ensure!(x.len() >= x_required, "linear input storage too small: required={x_required}, actual={}", x.len());
-        ensure!(weight.len() >= weight_required, "linear weight storage too small: required={weight_required}, actual={}", weight.len());
-        ensure!(out.len() >= out_required, "linear output storage too small: required={out_required}, actual={}", out.len());
+        ensure!(
+            x.len() >= x_required,
+            "linear input storage too small: required={x_required}, actual={}",
+            x.len()
+        );
+        ensure!(
+            weight.len() >= weight_required,
+            "linear weight storage too small: required={weight_required}, actual={}",
+            weight.len()
+        );
+        ensure!(
+            out.len() >= out_required,
+            "linear output storage too small: required={out_required}, actual={}",
+            out.len()
+        );
 
         self.ensure_plan(key)?;
-        let plans = self.plans.read().map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
-        let plan = plans.get(&key).ok_or_else(|| anyhow!("cuBLASLt plan missing after preparation"))?;
+        let plans = self
+            .plans
+            .read()
+            .map_err(|_| anyhow!("cuBLASLt plan cache poisoned"))?;
+        let plan = plans
+            .get(&key)
+            .ok_or_else(|| anyhow!("cuBLASLt plan missing after preparation"))?;
 
-        self.stream.context().bind_to_thread().context("failed to bind CUDA context for cuBLASLt matmul")?;
+        self.stream
+            .context()
+            .bind_to_thread()
+            .context("failed to bind CUDA context for cuBLASLt matmul")?;
         let (x_ptr, _x_record) = x.device_ptr(&self.stream);
         let (weight_ptr, _weight_record) = weight.device_ptr(&self.stream);
         let (out_ptr, _out_record) = out.device_ptr_mut(&self.stream);
@@ -183,21 +219,54 @@ impl BlasLt {
     where
         X: DevicePtr<u8>,
     {
-        let Fp8LinearConfig { m, n, k, scale_mode, output_scale } = config;
+        let Fp8LinearConfig {
+            m,
+            n,
+            k,
+            scale_mode,
+            output_scale,
+        } = config;
         let key = Fp8MatmulKey::new(m, n, k, scale_mode)?;
-        ensure!(output_scale.is_finite() && output_scale > 0.0, "FP8 output scale must be finite and positive");
+        ensure!(
+            output_scale.is_finite() && output_scale > 0.0,
+            "FP8 output scale must be finite and positive"
+        );
         let x_required = m.checked_mul(k).context("FP8 linear input size overflow")?;
-        let weight_required = n.checked_mul(k).context("FP8 linear weight size overflow")?;
-        let out_required = m.checked_mul(n).context("FP8 linear output size overflow")?;
-        ensure!(x.len() >= x_required, "FP8 linear input storage too small: required={x_required}, actual={}", x.len());
-        ensure!(weight.len() >= weight_required, "FP8 linear weight storage too small: required={weight_required}, actual={}", weight.len());
-        ensure!(out.len() >= out_required, "FP8 linear output storage too small: required={out_required}, actual={}", out.len());
+        let weight_required = n
+            .checked_mul(k)
+            .context("FP8 linear weight size overflow")?;
+        let out_required = m
+            .checked_mul(n)
+            .context("FP8 linear output size overflow")?;
+        ensure!(
+            x.len() >= x_required,
+            "FP8 linear input storage too small: required={x_required}, actual={}",
+            x.len()
+        );
+        ensure!(
+            weight.len() >= weight_required,
+            "FP8 linear weight storage too small: required={weight_required}, actual={}",
+            weight.len()
+        );
+        ensure!(
+            out.len() >= out_required,
+            "FP8 linear output storage too small: required={out_required}, actual={}",
+            out.len()
+        );
 
         self.ensure_fp8_plan(key)?;
-        let plans = self.fp8_plans.read().map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
-        let plan = plans.get(&key).ok_or_else(|| anyhow!("cuBLASLt FP8 plan missing after preparation"))?;
+        let plans = self
+            .fp8_plans
+            .read()
+            .map_err(|_| anyhow!("cuBLASLt FP8 plan cache poisoned"))?;
+        let plan = plans
+            .get(&key)
+            .ok_or_else(|| anyhow!("cuBLASLt FP8 plan missing after preparation"))?;
 
-        self.stream.context().bind_to_thread().context("failed to bind CUDA context for cuBLASLt FP8 matmul")?;
+        self.stream
+            .context()
+            .bind_to_thread()
+            .context("failed to bind CUDA context for cuBLASLt FP8 matmul")?;
         let (x_ptr, _x_record) = x.device_ptr(&self.stream);
         let (weight_ptr, _weight_record) = weight.device_ptr(&self.stream);
         let (out_ptr, _out_record) = out.device_ptr_mut(&self.stream);
@@ -257,7 +326,9 @@ impl Drop for BlasLt {
         }
         let handle = mem::replace(&mut self.handle, std::ptr::null_mut());
         if !handle.is_null() {
-            unsafe { let _ = result::destroy_handle(handle); }
+            unsafe {
+                let _ = result::destroy_handle(handle);
+            }
         }
     }
 }

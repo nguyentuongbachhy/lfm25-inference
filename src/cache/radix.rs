@@ -72,7 +72,10 @@ pub struct PageRadixCache {
 
 impl PageRadixCache {
     pub fn new(page_size: KvPageSize, max_cached_pages: usize) -> Result<Self> {
-        ensure!(max_cached_pages > 0, "radix cache requires a positive page budget");
+        ensure!(
+            max_cached_pages > 0,
+            "radix cache requires a positive page budget"
+        );
         Ok(Self {
             page_size: page_size.value(),
             nodes: vec![RadixNode::root()],
@@ -215,7 +218,10 @@ impl PageRadixCache {
         checkpoint_slot: u32,
     ) -> Result<Vec<u32>> {
         ensure!(prefix_tokens > 0, "cached prefix cannot be empty");
-        ensure!(prefix_tokens <= tokens.len(), "cached prefix exceeds token input");
+        ensure!(
+            prefix_tokens <= tokens.len(),
+            "cached prefix exceeds token input"
+        );
         ensure!(
             prefix_tokens.is_multiple_of(self.page_size),
             "cached prefix must be page aligned"
@@ -293,10 +299,7 @@ mod tests {
         let mut cache = PageRadixCache::new(KvPageSize::P16, 16)?;
         let input = tokens(4);
         assert!(cache.can_publish(&input, 32));
-        assert_eq!(
-            cache.insert_checkpoint(&input, 32, &[4, 5], 7)?,
-            vec![4, 5]
-        );
+        assert_eq!(cache.insert_checkpoint(&input, 32, &[4, 5], 7)?, vec![4, 5]);
         assert!(cache.can_publish(&input, 64));
         assert_eq!(
             cache.insert_checkpoint(&input, 64, &[99, 98, 6, 7], 8)?,

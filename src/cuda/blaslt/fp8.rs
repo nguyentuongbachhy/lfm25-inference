@@ -30,7 +30,12 @@ impl Fp8MatmulKey {
             "MXFP8 matmul K must be divisible by 32, got {k}"
         );
 
-        Ok(Self { m, n, k, scale_mode })
+        Ok(Self {
+            m,
+            n,
+            k,
+            scale_mode,
+        })
     }
 }
 
@@ -73,12 +78,16 @@ impl MatrixLayout {
         Ok(layout)
     }
 
-    fn raw(&self) -> sys::cublasLtMatrixLayout_t { self.raw }
+    fn raw(&self) -> sys::cublasLtMatrixLayout_t {
+        self.raw
+    }
 }
 
 impl Drop for MatrixLayout {
     fn drop(&mut self) {
-        unsafe { let _ = result::destroy_matrix_layout(self.raw); }
+        unsafe {
+            let _ = result::destroy_matrix_layout(self.raw);
+        }
     }
 }
 
@@ -114,7 +123,8 @@ impl MatmulDesc {
             .context("failed to set cuBLASLt FP8 transB")?;
 
             if scale_mode == Fp8ScaleMode::Block32 {
-                let mode = sys::cublasLtMatmulMatrixScale_t::CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+                let mode =
+                    sys::cublasLtMatmulMatrixScale_t::CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
                 result::set_matmul_desc_attribute(
                     desc.raw,
                     sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
@@ -154,12 +164,16 @@ impl MatmulDesc {
         Ok(())
     }
 
-    fn raw(&self) -> sys::cublasLtMatmulDesc_t { self.raw }
+    fn raw(&self) -> sys::cublasLtMatmulDesc_t {
+        self.raw
+    }
 }
 
 impl Drop for MatmulDesc {
     fn drop(&mut self) {
-        unsafe { let _ = result::destroy_matmul_desc(self.raw); }
+        unsafe {
+            let _ = result::destroy_matmul_desc(self.raw);
+        }
     }
 }
 
@@ -169,7 +183,8 @@ struct MatmulPreference {
 
 impl MatmulPreference {
     fn new(workspace_size: usize) -> Result<Self> {
-        let raw = result::create_matmul_pref().context("failed to create cuBLASLt FP8 preference")?;
+        let raw =
+            result::create_matmul_pref().context("failed to create cuBLASLt FP8 preference")?;
         let pref = Self { raw };
         unsafe {
             result::set_matmul_pref_attribute(
@@ -186,13 +201,21 @@ impl MatmulPreference {
 
 impl Drop for MatmulPreference {
     fn drop(&mut self) {
-        unsafe { let _ = result::destroy_matmul_pref(self.raw); }
+        unsafe {
+            let _ = result::destroy_matmul_pref(self.raw);
+        }
     }
 }
 
 enum ScaleStorage {
-    Tensorwide { a: CudaSlice<f32>, b: CudaSlice<f32> },
-    Block32 { a: CudaSlice<u8>, b: CudaSlice<u8> },
+    Tensorwide {
+        a: CudaSlice<f32>,
+        b: CudaSlice<f32>,
+    },
+    Block32 {
+        a: CudaSlice<u8>,
+        b: CudaSlice<u8>,
+    },
 }
 
 impl ScaleStorage {
@@ -226,8 +249,14 @@ impl ScaleStorage {
 }
 
 fn block32_scale_storage_len(outer: usize, inner: usize) -> Result<usize> {
-    let outer_tiles = outer.checked_add(127).context("MXFP8 outer padding overflow")? / 128;
-    let inner_tiles = inner.checked_add(127).context("MXFP8 inner padding overflow")? / 128;
+    let outer_tiles = outer
+        .checked_add(127)
+        .context("MXFP8 outer padding overflow")?
+        / 128;
+    let inner_tiles = inner
+        .checked_add(127)
+        .context("MXFP8 inner padding overflow")?
+        / 128;
     outer_tiles
         .checked_mul(inner_tiles)
         .and_then(|tiles| tiles.checked_mul(512))
@@ -235,9 +264,18 @@ fn block32_scale_storage_len(outer: usize, inner: usize) -> Result<usize> {
 }
 
 fn block32_unit_scales(outer: usize, inner: usize) -> Result<Vec<u8>> {
-    let outer_tiles = outer.checked_add(127).context("MXFP8 outer padding overflow")? / 128;
-    let inner_blocks = inner.checked_add(31).context("MXFP8 inner block count overflow")? / 32;
-    let inner_tiles = inner_blocks.checked_add(3).context("MXFP8 inner tile count overflow")? / 4;
+    let outer_tiles = outer
+        .checked_add(127)
+        .context("MXFP8 outer padding overflow")?
+        / 128;
+    let inner_blocks = inner
+        .checked_add(31)
+        .context("MXFP8 inner block count overflow")?
+        / 32;
+    let inner_tiles = inner_blocks
+        .checked_add(3)
+        .context("MXFP8 inner tile count overflow")?
+        / 4;
     let mut scales = vec![0_u8; block32_scale_storage_len(outer, inner)?];
 
     for outer_index in 0..outer {
@@ -314,11 +352,21 @@ impl Fp8MatmulPlan {
         })
     }
 
-    pub(crate) fn desc(&self) -> sys::cublasLtMatmulDesc_t { self.desc.raw() }
-    pub(crate) fn a_layout(&self) -> sys::cublasLtMatrixLayout_t { self.a_layout.raw() }
-    pub(crate) fn b_layout(&self) -> sys::cublasLtMatrixLayout_t { self.b_layout.raw() }
-    pub(crate) fn c_layout(&self) -> sys::cublasLtMatrixLayout_t { self.c_layout.raw() }
-    pub(crate) fn algo(&self) -> &sys::cublasLtMatmulAlgo_t { &self.algo }
+    pub(crate) fn desc(&self) -> sys::cublasLtMatmulDesc_t {
+        self.desc.raw()
+    }
+    pub(crate) fn a_layout(&self) -> sys::cublasLtMatrixLayout_t {
+        self.a_layout.raw()
+    }
+    pub(crate) fn b_layout(&self) -> sys::cublasLtMatrixLayout_t {
+        self.b_layout.raw()
+    }
+    pub(crate) fn c_layout(&self) -> sys::cublasLtMatrixLayout_t {
+        self.c_layout.raw()
+    }
+    pub(crate) fn algo(&self) -> &sys::cublasLtMatmulAlgo_t {
+        &self.algo
+    }
 }
 
 #[cfg(test)]

@@ -60,10 +60,7 @@ fn append_u32_bytes(destination: &mut Vec<u8>, values: &[u32]) {
     // SAFETY: u32 has no padding. This is a byte-for-byte staging copy into a
     // preallocated host slab consumed by the same native CUDA ABI.
     let bytes = unsafe {
-        std::slice::from_raw_parts(
-            values.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(values),
-        )
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
     };
     destination.extend_from_slice(bytes);
 }
@@ -76,10 +73,7 @@ fn append_i64_bytes(destination: &mut Vec<u8>, values: &[i64]) {
     // SAFETY: i64 has no padding and the slab is padded to an 8-byte boundary
     // before this section so the CUDA kernel may reinterpret it directly.
     let bytes = unsafe {
-        std::slice::from_raw_parts(
-            values.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(values),
-        )
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
     };
     destination.extend_from_slice(bytes);
 }
@@ -161,7 +155,10 @@ impl GpuBatch {
             output_rows.len() == segment_slots.len(),
             "output row count mismatch"
         );
-        ensure!(self.pending_tokens > 0, "GPU batch step metadata is missing");
+        ensure!(
+            self.pending_tokens > 0,
+            "GPU batch step metadata is missing"
+        );
 
         let tokens = self.pending_tokens;
         let segments = segment_slots.len();
@@ -209,13 +206,9 @@ impl GpuBatch {
             .set_logical_shape(Shape::new([segment_offsets.len()]))?;
         self.segment_slots
             .set_logical_shape(Shape::new([segments]))?;
-        self.output_rows
-            .set_logical_shape(Shape::new([segments]))?;
+        self.output_rows.set_logical_shape(Shape::new([segments]))?;
 
-        self.transfers.h2d_bytes = self
-            .transfers
-            .h2d_bytes
-            .saturating_add(packed_bytes as u64);
+        self.transfers.h2d_bytes = self.transfers.h2d_bytes.saturating_add(packed_bytes as u64);
         self.transfers.h2d_calls = self.transfers.h2d_calls.saturating_add(1);
         self.pending_tokens = 0;
         Ok(())
@@ -240,7 +233,10 @@ impl GpuBatch {
             physical_slots.len() == tokens,
             "physical slot count mismatch"
         );
-        ensure!(self.pending_tokens == 0, "previous GPU batch metadata was not committed");
+        ensure!(
+            self.pending_tokens == 0,
+            "previous GPU batch metadata was not committed"
+        );
 
         let max_position = positions
             .iter()

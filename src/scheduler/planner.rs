@@ -175,7 +175,9 @@ impl Scheduler {
                     break;
                 }
 
-                self.plan.work.push(ScheduledWork::Prefill { slot, tokens: 1 });
+                self.plan
+                    .work
+                    .push(ScheduledWork::Prefill { slot, tokens: 1 });
                 self.plan.prefill_tokens = self.plan.prefill_tokens.saturating_add(1);
                 singleton_count = singleton_count.saturating_add(1);
                 singleton_context = projected_context;
@@ -191,14 +193,11 @@ impl Scheduler {
             let Ok(request) = requests.get(slot) else {
                 continue;
             };
-            let remaining = request
-                .prompt_len
-                .saturating_sub(request.prefilled)
-                .min(
-                    self.config
-                        .maximum_prefill_tokens
-                        .saturating_sub(self.plan.prefill_tokens),
-                );
+            let remaining = request.prompt_len.saturating_sub(request.prefilled).min(
+                self.config
+                    .maximum_prefill_tokens
+                    .saturating_sub(self.plan.prefill_tokens),
+            );
             if remaining == 0 {
                 continue;
             }
@@ -276,20 +275,20 @@ mod tests {
     fn decode_is_scheduled_before_aged_prefill_without_reallocation() -> Result<()> {
         let mut slots = RequestSlots::new(3, 1024)?;
         let decode = slots.acquire().expect("decode slot");
-        slots
-            .get_mut(decode)?
-            .initialize(RequestInit::new(1, &[1], 512, 0, 400_000, 50_000, 32))?;
-        slots.get_mut(decode)?.phase = RequestPhase::Decoding;
-        let prefill = slots.acquire().expect("prefill slot");
-        slots.get_mut(prefill)?.initialize(RequestInit::new(
-            2,
-            &[2; 256],
+        slots.get_mut(decode)?.initialize(RequestInit::new(
+            1,
+            &[1],
             512,
             0,
             400_000,
             50_000,
             32,
         ))?;
+        slots.get_mut(decode)?.phase = RequestPhase::Decoding;
+        let prefill = slots.acquire().expect("prefill slot");
+        slots
+            .get_mut(prefill)?
+            .initialize(RequestInit::new(2, &[2; 256], 512, 0, 400_000, 50_000, 32))?;
         let mut scheduler = Scheduler::new(3, SchedulerConfig::default(), cost_model()?)?;
         let capacity = scheduler.plan.work.capacity();
         let prefill_capacity = scheduler.prefill_order.capacity();
@@ -307,13 +306,7 @@ mod tests {
         for request_id in 1..=3u64 {
             let slot = slots.acquire().expect("prefill slot");
             slots.get_mut(slot)?.initialize(RequestInit::new(
-                request_id,
-                &[2; 32],
-                128,
-                0,
-                400_000,
-                50_000,
-                8,
+                request_id, &[2; 32], 128, 0, 400_000, 50_000, 8,
             ))?;
         }
         let mut scheduler = Scheduler::new(4, SchedulerConfig::default(), cost_model()?)?;
@@ -346,11 +339,8 @@ mod tests {
             ))?;
             slots.get_mut(slot)?.prefilled = 2032;
         }
-        let mut scheduler = Scheduler::new(
-            request_count,
-            SchedulerConfig::default(),
-            cost_model()?,
-        )?;
+        let mut scheduler =
+            Scheduler::new(request_count, SchedulerConfig::default(), cost_model()?)?;
         let plan = scheduler.schedule(&slots, 10_000);
         let tail_prefills = plan
             .work()
@@ -398,11 +388,8 @@ mod tests {
                 slots.get_mut(slot)?.prefilled = 112;
             }
         }
-        let mut scheduler = Scheduler::new(
-            request_count,
-            SchedulerConfig::default(),
-            cost_model()?,
-        )?;
+        let mut scheduler =
+            Scheduler::new(request_count, SchedulerConfig::default(), cost_model()?)?;
         let plan = scheduler.schedule(&slots, 10_000);
         let prefills = plan
             .work()
@@ -434,11 +421,8 @@ mod tests {
             ))?;
             slots.get_mut(slot)?.prefilled = 2032;
         }
-        let mut scheduler = Scheduler::new(
-            request_count,
-            SchedulerConfig::default(),
-            cost_model()?,
-        )?;
+        let mut scheduler =
+            Scheduler::new(request_count, SchedulerConfig::default(), cost_model()?)?;
         let plan = scheduler.schedule(&slots, 10_000);
         let tail_prefills = plan
             .work()

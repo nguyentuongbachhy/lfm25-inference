@@ -56,9 +56,18 @@ fn launch_qk_postprocess(
         key_norm.numel() == 64,
         "key norm weight must have 64 elements"
     );
-    ensure!(inv_freq.numel() == 32, "RoPE inv_freq must have 32 elements");
-    ensure!(position_ids.numel() == num_tokens, "position count mismatch");
-    ensure!(slot_mapping.numel() == num_tokens, "slot mapping count mismatch");
+    ensure!(
+        inv_freq.numel() == 32,
+        "RoPE inv_freq must have 32 elements"
+    );
+    ensure!(
+        position_ids.numel() == num_tokens,
+        "position count mismatch"
+    );
+    ensure!(
+        slot_mapping.numel() == num_tokens,
+        "slot mapping count mismatch"
+    );
 
     unsafe {
         runtime.kernels().qk_postprocess().launch_decode(
@@ -92,14 +101,7 @@ pub(crate) fn qk_norm_rope_kv_write_decode_bf16(
     let page_size = cache.page_size().value();
     let num_pages = cache.num_pages();
     let (key_cache, value_cache) = cache.kv_mut();
-    launch_qk_postprocess(
-        runtime,
-        input,
-        key_cache,
-        value_cache,
-        page_size,
-        num_pages,
-    )
+    launch_qk_postprocess(runtime, input, key_cache, value_cache, page_size, num_pages)
 }
 
 pub(crate) fn qk_norm_rope_kv_write_arena_decode_bf16(
@@ -110,14 +112,7 @@ pub(crate) fn qk_norm_rope_kv_write_arena_decode_bf16(
     let page_size = arena.page_size().value();
     let num_pages = arena.num_pages();
     let (key_cache, value_cache) = arena.kv_mut();
-    launch_qk_postprocess(
-        runtime,
-        input,
-        key_cache,
-        value_cache,
-        page_size,
-        num_pages,
-    )
+    launch_qk_postprocess(runtime, input, key_cache, value_cache, page_size, num_pages)
 }
 
 #[cfg(test)]
@@ -180,7 +175,13 @@ mod tests {
     ) -> Result<Tensor<bf16>> {
         let mut query = rms_norm_bf16(runtime, input.query_raw, input.query_norm, EPS)?;
         let mut key = rms_norm_bf16(runtime, input.key_raw, input.key_norm, EPS)?;
-        rope_qk_bf16_inplace(runtime, &mut query, &mut key, input.inv_freq, input.positions)?;
+        rope_qk_bf16_inplace(
+            runtime,
+            &mut query,
+            &mut key,
+            input.inv_freq,
+            input.positions,
+        )?;
         cache.write_lfm2(runtime, &key, input.value, input.slots)?;
         Ok(query)
     }

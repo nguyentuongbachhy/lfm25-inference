@@ -151,12 +151,21 @@ impl AttentionKernels {
             num_segments,
         } = launch;
         ensure!(num_tokens > 0, "hybrid ragged attention requires tokens");
-        ensure!(num_segments > 0, "hybrid ragged attention requires segments");
-        ensure!(num_pages > 0, "hybrid ragged attention requires cache pages");
+        ensure!(
+            num_segments > 0,
+            "hybrid ragged attention requires segments"
+        );
+        ensure!(
+            num_pages > 0,
+            "hybrid ragged attention requires cache pages"
+        );
         ensure!(block_table_stride > 0, "hybrid block table is empty");
         ensure!(request_slots.len() >= num_tokens, "request slots too small");
         ensure!(position_ids.len() >= num_tokens, "positions too small");
-        ensure!(segment_offsets.len() > num_segments, "segment offsets too small");
+        ensure!(
+            segment_offsets.len() > num_segments,
+            "segment offsets too small"
+        );
         let q_required = num_tokens
             .checked_mul(32 * 64)
             .context("hybrid query size overflow")?;
@@ -230,7 +239,10 @@ impl AttentionKernels {
         } = launch;
         ensure!(num_tokens > 0, "ragged attention requires tokens");
         ensure!(num_pages > 0, "ragged attention requires cache pages");
-        ensure!(block_table_length > 0, "ragged block table must not be empty");
+        ensure!(
+            block_table_length > 0,
+            "ragged block table must not be empty"
+        );
         ensure!(
             block_table_stride >= block_table_length,
             "invalid block table stride"
@@ -308,10 +320,19 @@ impl AttentionKernels {
         let kv_required = num_tokens
             .checked_mul(8 * 64)
             .context("prefill KV size overflow")?;
-        ensure!(query.len() >= query_required, "prefill query storage too small");
+        ensure!(
+            query.len() >= query_required,
+            "prefill query storage too small"
+        );
         ensure!(key.len() >= kv_required, "prefill key storage too small");
-        ensure!(value.len() >= kv_required, "prefill value storage too small");
-        ensure!(output.len() >= query_required, "prefill output storage too small");
+        ensure!(
+            value.len() >= kv_required,
+            "prefill value storage too small"
+        );
+        ensure!(
+            output.len() >= query_required,
+            "prefill output storage too small"
+        );
         let query_tiles = num_tokens.div_ceil(2);
         let blocks = query_tiles
             .checked_mul(8)
@@ -360,9 +381,18 @@ impl AttentionKernels {
             .and_then(|value| value.checked_mul(page_size))
             .and_then(|value| value.checked_mul(64))
             .context("attention cache size overflow")?;
-        ensure!(query.len() >= q_required, "attention query storage too small");
-        ensure!(output.len() >= q_required, "attention output storage too small");
-        ensure!(key_cache.len() >= cache_required, "attention K cache storage too small");
+        ensure!(
+            query.len() >= q_required,
+            "attention query storage too small"
+        );
+        ensure!(
+            output.len() >= q_required,
+            "attention output storage too small"
+        );
+        ensure!(
+            key_cache.len() >= cache_required,
+            "attention K cache storage too small"
+        );
         ensure!(
             value_cache.len() >= cache_required,
             "attention V cache storage too small"

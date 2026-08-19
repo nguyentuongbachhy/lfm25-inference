@@ -101,10 +101,7 @@ fn check_ragged_fast_exp_matches_reference(page_size: KvPageSize) -> Result<()> 
         &bf16_values(REQUESTS * context * 8 * 64, 7, 79, 39.0, 32.0),
         Shape::new([REQUESTS * context, 8, 64]),
     )?;
-    let physical_slots = runtime.upload(
-        &physical_slots_host,
-        Shape::new([REQUESTS * context]),
-    )?;
+    let physical_slots = runtime.upload(&physical_slots_host, Shape::new([REQUESTS * context]))?;
     let mut arena = PagedKvArena::new(&runtime, total_pages, page_size)?;
     arena.write_lfm2(&runtime, &key, &value, &physical_slots)?;
 

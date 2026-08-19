@@ -26,20 +26,25 @@ impl ConvCheckpointPool {
         hidden_size: usize,
         state_width: usize,
     ) -> Result<Self> {
-        ensure!(convolution_layers > 0, "checkpoint pool needs convolution layers");
+        ensure!(
+            convolution_layers > 0,
+            "checkpoint pool needs convolution layers"
+        );
         ensure!(capacity > 0, "checkpoint pool capacity must be positive");
-        ensure!(hidden_size > 0 && state_width > 0, "invalid convolution state shape");
-        ensure!(capacity <= u32::MAX as usize, "checkpoint capacity exceeds u32");
+        ensure!(
+            hidden_size > 0 && state_width > 0,
+            "invalid convolution state shape"
+        );
+        ensure!(
+            capacity <= u32::MAX as usize,
+            "checkpoint capacity exceeds u32"
+        );
         let elements_per_state = hidden_size
             .checked_mul(state_width)
             .context("convolution checkpoint state size overflow")?;
         let mut layers = Vec::with_capacity(convolution_layers);
         for _ in 0..convolution_layers {
-            layers.push(runtime.zeros::<bf16>(Shape::new([
-                capacity,
-                hidden_size,
-                state_width,
-            ]))?);
+            layers.push(runtime.zeros::<bf16>(Shape::new([capacity, hidden_size, state_width]))?);
         }
         let free_slots = (0..capacity).rev().map(|slot| slot as u32).collect();
         Ok(Self {

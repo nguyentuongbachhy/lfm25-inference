@@ -288,12 +288,7 @@ fn bench_rope_qk_bf16() -> Result<()> {
         let tokens_per_second = num_tokens as f64 / seconds;
         println!(
             "tokens={num_tokens:>5} | mean={:>8.3} us | p50={:>8.3} us | p95={:>8.3} us | min={:>8.3} us | qk_io={:>8.2} GB/s | {:>12.0} tok/s",
-            stats.mean_us,
-            stats.p50_us,
-            stats.p95_us,
-            stats.min_us,
-            bandwidth,
-            tokens_per_second,
+            stats.mean_us, stats.p50_us, stats.p95_us, stats.min_us, bandwidth, tokens_per_second,
         );
     }
     Ok(())

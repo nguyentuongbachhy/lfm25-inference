@@ -11,9 +11,8 @@ use crate::{
 };
 
 use super::attention::{
-    HybridRaggedAttentionInput, hybrid_ragged_attention_lfm2_bf16,
-    paged_attention_lfm2_bf16_sync, paged_ragged_attention_lfm2_bf16,
-    prefill_attention_lfm2_bf16,
+    HybridRaggedAttentionInput, hybrid_ragged_attention_lfm2_bf16, paged_attention_lfm2_bf16_sync,
+    paged_ragged_attention_lfm2_bf16, prefill_attention_lfm2_bf16,
 };
 
 #[test]

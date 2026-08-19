@@ -17,7 +17,10 @@ impl BatchModelCache {
             self.reservations[request_slot] == 0,
             "request slot is already reserved"
         );
-        ensure!(pages > 0, "request must reserve at least one private KV page");
+        ensure!(
+            pages > 0,
+            "request must reserve at least one private KV page"
+        );
         let pages = self
             .allocator
             .try_reserve_pages(pages)
@@ -75,12 +78,8 @@ impl BatchModelCache {
         // From this point onward the normal `release()` path can roll back all
         // request references if a metadata or recurrent-state copy fails.
         self.allocated_tokens[request_slot] = prefix_tokens;
-        self.gpu_batch.update_block_table_range(
-            runtime,
-            request_slot,
-            0,
-            physical_pages,
-        )?;
+        self.gpu_batch
+            .update_block_table_range(runtime, request_slot, 0, physical_pages)?;
 
         let mut convolution_index = 0usize;
         for layer in &mut self.layers {

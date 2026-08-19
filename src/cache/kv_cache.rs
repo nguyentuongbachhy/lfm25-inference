@@ -47,8 +47,14 @@ impl PagedKvCache {
         num_physical_pages: usize,
         block_table_host: &[u32],
     ) -> Result<Self> {
-        ensure!(num_physical_pages > 0, "KV cache requires at least one physical page");
-        ensure!(!block_table_host.is_empty(), "KV cache block table must not be empty");
+        ensure!(
+            num_physical_pages > 0,
+            "KV cache requires at least one physical page"
+        );
+        ensure!(
+            !block_table_host.is_empty(),
+            "KV cache block table must not be empty"
+        );
         for &physical_page in block_table_host {
             let physical_page_index =
                 usize::try_from(physical_page).context("physical page index does not fit usize")?;
@@ -177,8 +183,14 @@ mod tests {
                 for dim in 0..64 {
                     let source = (token * 8 + head) * 64 + dim;
                     let destination = ((page * 8 + head) * size + offset) * 64 + dim;
-                    assert_eq!(actual_key[destination].to_bits(), key_host[source].to_bits());
-                    assert_eq!(actual_value[destination].to_bits(), value_host[source].to_bits());
+                    assert_eq!(
+                        actual_key[destination].to_bits(),
+                        key_host[source].to_bits()
+                    );
+                    assert_eq!(
+                        actual_value[destination].to_bits(),
+                        value_host[source].to_bits()
+                    );
                 }
             }
         }

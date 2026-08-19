@@ -11,14 +11,12 @@ use crate::{
     cache::PageRadixCache,
     model::{ConvCheckpointPool, RaggedBatchInput},
     ops,
-    scheduler::{
-        RequestInit, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork, Scheduler,
-    },
+    scheduler::{RequestInit, RequestPhase, RequestSlotId, RequestSlots, ScheduledWork, Scheduler},
 };
 
 use super::{
-    ContinuousEngineConfig, Engine, PreparedRequest, ResponseState, ServingError, ServingOwnerReport,
-    finish_request, monotonic_us, warm_serving_path,
+    ContinuousEngineConfig, Engine, PreparedRequest, ResponseState, ServingError,
+    ServingOwnerReport, finish_request, monotonic_us, warm_serving_path,
 };
 
 const RADIX_KV_BUDGET_DIVISOR: usize = 4;
@@ -365,7 +363,9 @@ pub(super) fn run_owner_radix(
         prefix.nodes,
         prefix.cached_pages,
         prefix.checkpoints,
-        checkpoints.capacity().saturating_sub(checkpoints.available()),
+        checkpoints
+            .capacity()
+            .saturating_sub(checkpoints.available()),
         checkpoints.capacity(),
     );
 

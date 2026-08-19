@@ -8,4 +8,4 @@ pub use allocator::{KvPageAllocator, KvPoolSnapshot};
 pub use arena::PagedKvArena;
 pub use block_table::FixedBlockTables;
 pub use kv_cache::{KvPageSize, PagedKvCache};
-pub use radix::{PageRadixCache, PrefixCacheSnapshot, PrefixMatch};
+pub use radix::PageRadixCache;

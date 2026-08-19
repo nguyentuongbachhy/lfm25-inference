@@ -286,11 +286,26 @@ impl FusedAttentionKernels {
             input.value_raw.len() >= kv_required,
             "fused value storage too small"
         );
-        ensure!(input.query_norm.len() >= 64, "fused query norm weight too small");
-        ensure!(input.key_norm.len() >= 64, "fused key norm weight too small");
-        ensure!(input.inv_freq.len() >= 32, "fused RoPE frequency storage too small");
-        ensure!(input.key_cache.len() >= cache_required, "fused K cache too small");
-        ensure!(input.value_cache.len() >= cache_required, "fused V cache too small");
+        ensure!(
+            input.query_norm.len() >= 64,
+            "fused query norm weight too small"
+        );
+        ensure!(
+            input.key_norm.len() >= 64,
+            "fused key norm weight too small"
+        );
+        ensure!(
+            input.inv_freq.len() >= 32,
+            "fused RoPE frequency storage too small"
+        );
+        ensure!(
+            input.key_cache.len() >= cache_required,
+            "fused K cache too small"
+        );
+        ensure!(
+            input.value_cache.len() >= cache_required,
+            "fused V cache too small"
+        );
         ensure!(
             input.position_ids.len() >= input.num_tokens,
             "fused positions too small"
@@ -299,7 +314,10 @@ impl FusedAttentionKernels {
             input.slot_mapping.len() >= input.num_tokens,
             "fused slot mapping too small"
         );
-        ensure!(input.output.len() >= q_required, "fused output storage too small");
+        ensure!(
+            input.output.len() >= q_required,
+            "fused output storage too small"
+        );
         Ok(())
     }
 }

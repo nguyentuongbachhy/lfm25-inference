@@ -23,8 +23,14 @@ pub fn embedding_bf16(
 
     let vocab_size = weight.dims()[0];
     let hidden_size = weight.dims()[1];
-    ensure!(vocab_size > 0, "embedding vocab size must be greater than zero");
-    ensure!(hidden_size > 0, "embedding hidden size must be greater than zero");
+    ensure!(
+        vocab_size > 0,
+        "embedding vocab size must be greater than zero"
+    );
+    ensure!(
+        hidden_size > 0,
+        "embedding hidden size must be greater than zero"
+    );
 
     let num_tokens = token_ids.numel();
     let mut output_dims = token_ids.dims().to_vec();

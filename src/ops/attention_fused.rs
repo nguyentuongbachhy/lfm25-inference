@@ -3,9 +3,7 @@ use half::bf16;
 
 use crate::{
     cache::{PagedKvArena, PagedKvCache},
-    cuda::{
-        CudaRuntime, FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch,
-    },
+    cuda::{CudaRuntime, FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch},
     tensor::{Shape, Tensor},
 };
 
@@ -38,10 +36,7 @@ pub(crate) fn fused_paged_attention_decode_lfm2_bf16(
     runtime: &CudaRuntime,
     input: FusedPagedAttentionInput<'_>,
 ) -> Result<Tensor<bf16>> {
-    let FusedPagedAttentionInput {
-        attention,
-        cache,
-    } = input;
+    let FusedPagedAttentionInput { attention, cache } = input;
     let num_tokens = validate_inputs(&attention)?;
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
     let page_size = cache.page_size().value();
@@ -88,7 +83,10 @@ pub(crate) fn fused_ragged_paged_attention_decode_lfm2_bf16(
         request_slots,
     } = input;
     let num_tokens = validate_inputs(&attention)?;
-    ensure!(block_tables.rank() == 2, "fused ragged block tables must have rank 2");
+    ensure!(
+        block_tables.rank() == 2,
+        "fused ragged block tables must have rank 2"
+    );
     ensure!(
         block_tables.dims()[1] == block_table_stride,
         "fused ragged block table stride/shape mismatch"
@@ -139,7 +137,10 @@ fn validate_inputs(input: &FusedAttentionInput<'_>) -> Result<usize> {
         input.query_raw.dims()
     );
     let num_tokens = input.query_raw.dims()[0];
-    ensure!(num_tokens > 0, "fused attention requires at least one token");
+    ensure!(
+        num_tokens > 0,
+        "fused attention requires at least one token"
+    );
     ensure!(
         input.key_raw.dims() == [num_tokens, 8, 64],
         "fused LFM2 key must have shape [{num_tokens},8,64], got {:?}",

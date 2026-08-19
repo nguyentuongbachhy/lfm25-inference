@@ -19,36 +19,36 @@ use std::sync::Arc;
 use anyhow::Result;
 use cudarc::driver::CudaContext;
 
-pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
+use attention::AttentionKernels;
 #[cfg(test)]
 pub(crate) use attention::RaggedAttentionLaunch;
-use attention::AttentionKernels;
-pub(crate) use attention_async_fast::FastRaggedAttentionLaunch;
+pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
 use attention_async_fast::AsyncAttentionFastKernels;
+pub(crate) use attention_async_fast::FastRaggedAttentionLaunch;
+use attention_fused::FusedAttentionKernels;
 pub(crate) use attention_fused::{
     FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch,
 };
-use attention_fused::FusedAttentionKernels;
-pub(crate) use embedding::EmbeddingLaunch;
 use embedding::EmbeddingKernels;
+pub(crate) use embedding::EmbeddingLaunch;
 use fp8_quantize::Fp8QuantizeKernels;
-pub(crate) use gather::GatherLaunch;
 use gather::GatherKernels;
+pub(crate) use gather::GatherLaunch;
 use kernel_set::KernelSet;
-pub(crate) use kv_cache::KvCacheWriteLaunch;
 use kv_cache::KvCacheKernels;
+pub(crate) use kv_cache::KvCacheWriteLaunch;
 use metadata::MetadataKernels;
-pub(crate) use qk_postprocess::QkPostprocessLaunch;
 use qk_postprocess::QkPostprocessKernels;
-pub(crate) use rms_norm::{ResidualRmsNormLaunch, RmsNormLaunch};
+pub(crate) use qk_postprocess::QkPostprocessLaunch;
 use rms_norm::RmsNormKernels;
-pub(crate) use rope::RopeLaunch;
+pub(crate) use rms_norm::{ResidualRmsNormLaunch, RmsNormLaunch};
 use rope::RopeKernels;
+pub(crate) use rope::RopeLaunch;
 use sampling::SamplingKernels;
 #[cfg(test)]
 pub(crate) use short_conv::RaggedShortConvLaunch;
-pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch};
 use short_conv::ShortConvKernels;
+pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch};
 use silu_mul::SiluMulKernels;
 
 pub(crate) struct Kernels {

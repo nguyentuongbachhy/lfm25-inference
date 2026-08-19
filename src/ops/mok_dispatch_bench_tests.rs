@@ -11,9 +11,9 @@ use crate::{
 };
 
 use super::{
-    FastRaggedAttentionInput, FusedAttentionInput, FusedRaggedAttentionInput,
-    QkPostprocessInput, fused_ragged_paged_attention_decode_lfm2_bf16,
-    paged_ragged_attention_fast_lfm2_bf16, qk_norm_rope_kv_write_arena_decode_bf16,
+    FastRaggedAttentionInput, FusedAttentionInput, FusedRaggedAttentionInput, QkPostprocessInput,
+    fused_ragged_paged_attention_decode_lfm2_bf16, paged_ragged_attention_fast_lfm2_bf16,
+    qk_norm_rope_kv_write_arena_decode_bf16,
 };
 
 const EPS: f32 = 1.0e-5;
@@ -63,10 +63,8 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                         block_tables_host.push(u32::try_from(base + logical_page)?);
                     }
                 }
-                let block_tables = runtime.upload(
-                    &block_tables_host,
-                    Shape::new([batch, pages_per_request]),
-                )?;
+                let block_tables =
+                    runtime.upload(&block_tables_host, Shape::new([batch, pages_per_request]))?;
                 let request_slots_host = (0..batch)
                     .map(u32::try_from)
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -85,7 +83,8 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                         history_slots_host.push(i64::try_from(physical_page * page + offset)?);
                     }
                 }
-                let history_slots = runtime.upload(&history_slots_host, Shape::new([history_tokens]))?;
+                let history_slots =
+                    runtime.upload(&history_slots_host, Shape::new([history_tokens]))?;
                 let history_key = runtime.upload(
                     &bf16_values(history_tokens * 8 * 64, 11, 83, 41.0, 64.0),
                     Shape::new([history_tokens, 8, 64]),
@@ -110,7 +109,8 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                 let query_raw = runtime.upload(&query_host, Shape::new([batch, 32, 64]))?;
                 let key_raw = runtime.upload(&key_host, Shape::new([batch, 8, 64]))?;
                 let value_raw = runtime.upload(&value_host, Shape::new([batch, 8, 64]))?;
-                let mut reference_query = runtime.upload(&query_host, Shape::new([batch, 32, 64]))?;
+                let mut reference_query =
+                    runtime.upload(&query_host, Shape::new([batch, 32, 64]))?;
 
                 let mut reference_arena = PagedKvArena::new(&runtime, total_pages, page_size)?;
                 let mut fused_arena = PagedKvArena::new(&runtime, total_pages, page_size)?;
@@ -120,12 +120,7 @@ fn bench_mok_short_dispatch_ragged_paired_ab() -> Result<()> {
                     &history_value,
                     &history_slots,
                 )?;
-                fused_arena.write_lfm2(
-                    &runtime,
-                    &history_key,
-                    &history_value,
-                    &history_slots,
-                )?;
+                fused_arena.write_lfm2(&runtime, &history_key, &history_value, &history_slots)?;
 
                 qk_norm_rope_kv_write_arena_decode_bf16(
                     &runtime,
