@@ -11,6 +11,7 @@ const MAX_BLOCK_SIZE: u32 = 256;
 
 pub(crate) struct MetadataKernels {
     scatter: KernelLaunch,
+    block_table_patches: KernelLaunch,
 }
 
 impl KernelSet for MetadataKernels {
@@ -18,9 +19,12 @@ impl KernelSet for MetadataKernels {
     const PTX: &'static str = include_str!(concat!(env!("OUT_DIR"), "/metadata.ptx"));
 
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
-        let function = load_function(&module, Self::MODULE_NAME, "scatter_batch_metadata")?;
+        let scatter = load_function(&module, Self::MODULE_NAME, "scatter_batch_metadata")?;
+        let block_table_patches =
+            load_function(&module, Self::MODULE_NAME, "scatter_block_table_patches")?;
         Ok(Self {
-            scatter: KernelLaunch::new(function, MAX_BLOCK_SIZE)?,
+            scatter: KernelLaunch::new(scatter, MAX_BLOCK_SIZE)?,
+            block_table_patches: KernelLaunch::new(block_table_patches, MAX_BLOCK_SIZE)?,
         })
     }
 }
@@ -75,6 +79,32 @@ impl MetadataKernels {
             .arg(output_rows)
             .arg(&num_tokens)
             .arg(&num_segments);
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_block_table_patches(
+        &self,
+        stream: &CudaStream,
+        packed_pairs: &CudaSlice<u32>,
+        block_tables: &mut CudaSlice<u32>,
+        patch_count: usize,
+    ) -> Result<()> {
+        ensure!(patch_count > 0, "block-table scatter requires patches");
+        ensure!(
+            packed_pairs.len() >= patch_count.saturating_mul(2),
+            "block-table patch staging capacity is too small"
+        );
+        let config = self
+            .block_table_patches
+            .policy()
+            .for_work_items(patch_count)?;
+        let mut args = stream.launch_builder(self.block_table_patches.function());
+        args.arg(packed_pairs)
+            .arg(block_tables)
+            .arg(&patch_count);
         unsafe {
             args.launch(config)?;
         }
