@@ -1,7 +1,7 @@
 pub mod shape;
 
 use std::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     mem::ManuallyDrop,
     sync::{
         Arc, Mutex, OnceLock,
@@ -14,6 +14,22 @@ use anyhow::{Context as _, Result, ensure};
 use cudarc::driver::CudaSlice;
 
 pub use shape::Shape;
+
+thread_local! {
+    static BUFFER_POOL_OWNER_INTENT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current GPU-owner thread as the exclusive hot-path user of pooled
+/// tensor storage. Individual pools transition lazily on their next access so
+/// CudaRuntime does not need to expose its private pool fields.
+pub(crate) fn enter_buffer_pool_owner_mode() {
+    BUFFER_POOL_OWNER_INTENT.with(|intent| intent.set(true));
+}
+
+#[inline(always)]
+fn buffer_pool_owner_intent() -> bool {
+    BUFFER_POOL_OWNER_INTENT.with(Cell::get)
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BufferPoolStats {
@@ -59,8 +75,8 @@ pub(crate) struct BufferPool<T> {
 }
 
 // Before owner mode all access is synchronized through shared_state. The
-// transition is one-way; after it, CudaRuntime is owned exclusively by the
-// dedicated GPU thread and owner_state has no concurrent readers or writers.
+// transition is one-way; after it, the pool belongs exclusively to the GPU
+// owner thread and owner_state has no concurrent readers or writers.
 unsafe impl<T: Send> Sync for BufferPool<T> {}
 
 impl<T> BufferPool<T> {
@@ -106,6 +122,14 @@ impl<T> BufferPool<T> {
     }
 
     #[inline(always)]
+    fn activate_owner_mode_if_requested(&self) {
+        if !self.owner_mode.load(Ordering::Relaxed) && buffer_pool_owner_intent() {
+            self.enter_owner_mode()
+                .expect("failed to transition tensor pool to serving owner mode");
+        }
+    }
+
+    #[inline(always)]
     fn owner_state_mut(&self) -> &mut BufferPoolState<T> {
         debug_assert!(self.owner_mode.load(Ordering::Relaxed));
         #[cfg(debug_assertions)]
@@ -148,6 +172,10 @@ impl<T> BufferPool<T> {
     }
 
     pub(crate) fn take(&self, elements: usize) -> Option<CudaSlice<T>> {
+        if self.owner_mode.load(Ordering::Acquire) {
+            return Self::take_from_state(self.owner_state_mut(), elements);
+        }
+        self.activate_owner_mode_if_requested();
         if self.owner_mode.load(Ordering::Acquire) {
             return Self::take_from_state(self.owner_state_mut(), elements);
         }
@@ -197,6 +225,15 @@ impl<T> BufferPool<T> {
             );
             return;
         }
+        self.activate_owner_mode_if_requested();
+        if self.owner_mode.load(Ordering::Acquire) {
+            Self::recycle_into_state(
+                self.owner_state_mut(),
+                storage,
+                self.max_available_elements,
+            );
+            return;
+        }
         let mut shared = match self.shared_state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
@@ -221,6 +258,10 @@ impl<T> BufferPool<T> {
     }
 
     pub(crate) fn stats(&self) -> BufferPoolStats {
+        if self.owner_mode.load(Ordering::Acquire) {
+            return Self::stats_from_state(self.owner_state_mut());
+        }
+        self.activate_owner_mode_if_requested();
         if self.owner_mode.load(Ordering::Acquire) {
             return Self::stats_from_state(self.owner_state_mut());
         }
