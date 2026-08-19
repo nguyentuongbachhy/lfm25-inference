@@ -127,6 +127,17 @@ pub(super) fn run_owner_radix(
             )?;
             continue;
         }
+
+        refresh_unscheduled_prefixes(
+            &engine,
+            &mut cache,
+            &mut slots,
+            &responses,
+            &mut radix,
+            &checkpoints,
+            &mut matched_pages,
+        )?;
+
         maximum_active_requests = maximum_active_requests.max(
             config
                 .maximum_request_slots
@@ -397,6 +408,66 @@ pub(super) fn run_owner_radix(
             .saturating_add(fp8.available_elements),
         cublaslt_workspace_bytes: engine.runtime.blaslt().workspace_size(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_unscheduled_prefixes(
+    engine: &Engine,
+    cache: &mut crate::model::BatchModelCache,
+    slots: &mut RequestSlots,
+    responses: &[ResponseState],
+    radix: &mut PageRadixCache,
+    checkpoints: &ConvCheckpointPool,
+    matched_pages: &mut Vec<u32>,
+) -> Result<()> {
+    let page_size = engine.config.kv_page_size.value();
+    let slot_count = slots.entries().len();
+    for index in 0..slot_count {
+        if responses[index].first_scheduled.is_some() {
+            continue;
+        }
+        let slot = RequestSlotId(u32::try_from(index)?);
+        let (phase, current_prefix, reusable_limit, hit) = {
+            let request = slots.get(slot)?;
+            if request.phase != RequestPhase::QueuedPrefill {
+                continue;
+            }
+            let reusable_limit = request
+                .prompt_len
+                .saturating_sub(1)
+                .checked_div(page_size)
+                .unwrap_or(0)
+                .saturating_mul(page_size);
+            if reusable_limit <= request.prefilled {
+                continue;
+            }
+            let hit = radix.longest_checkpoint(request.tokens(), reusable_limit, matched_pages);
+            (request.phase, request.prefilled, reusable_limit, hit)
+        };
+        if phase != RequestPhase::QueuedPrefill || reusable_limit <= current_prefix {
+            continue;
+        }
+        let Some(hit) = hit else {
+            continue;
+        };
+        if hit.token_len <= current_prefix {
+            continue;
+        }
+
+        let released = cache.extend_attached_prefix(
+            &engine.runtime,
+            index,
+            current_prefix,
+            hit.token_len,
+            matched_pages,
+            checkpoints,
+            hit.checkpoint_slot,
+        )?;
+        let request = slots.get_mut(slot)?;
+        request.prefilled = hit.token_len;
+        request.reserved_pages = request.reserved_pages.saturating_sub(released);
+    }
+    Ok(())
 }
 
 fn split_prefill_at_reusable_boundary(
