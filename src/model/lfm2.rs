@@ -98,6 +98,102 @@ impl BatchModelCache {
         Ok(())
     }
 
+    /// Extends an already-attached immutable prefix for a request that has not
+    /// executed any suffix prefill yet. Only the newly discovered physical
+    /// pages gain request references; the recurrent convolution state is then
+    /// restored at the deeper checkpoint boundary. The private reservation is
+    /// reduced by the same number of pages, so prefix discovery also recovers
+    /// admission capacity instead of merely saving compute.
+    pub(crate) fn extend_attached_prefix(
+        &mut self,
+        runtime: &CudaRuntime,
+        request_slot: usize,
+        current_prefix_tokens: usize,
+        new_prefix_tokens: usize,
+        physical_pages: &[u32],
+        checkpoints: &super::ConvCheckpointPool,
+        checkpoint_slot: u32,
+    ) -> Result<usize> {
+        ensure!(
+            request_slot < self.allocated_tokens.len(),
+            "request slot out of range"
+        );
+        ensure!(
+            current_prefix_tokens.is_multiple_of(self.page_size.value())
+                && new_prefix_tokens.is_multiple_of(self.page_size.value()),
+            "prefix refresh boundaries must be page aligned"
+        );
+        ensure!(
+            new_prefix_tokens > current_prefix_tokens,
+            "prefix refresh must extend the current prefix"
+        );
+        ensure!(
+            self.allocated_tokens[request_slot] == current_prefix_tokens,
+            "prefix refresh requires an untouched attached prefix"
+        );
+
+        let page_size = self.page_size.value();
+        let current_pages = current_prefix_tokens / page_size;
+        let new_pages = new_prefix_tokens / page_size;
+        ensure!(
+            physical_pages.len() == new_pages,
+            "refreshed prefix physical page count mismatch"
+        );
+        ensure!(
+            self.reservations[request_slot] >= new_pages - current_pages,
+            "refreshed prefix exceeds private reservation"
+        );
+
+        {
+            let table = self.block_tables.slot(request_slot)?;
+            ensure!(
+                table[..current_pages] == physical_pages[..current_pages],
+                "refreshed prefix does not extend the currently attached path"
+            );
+            ensure!(
+                table[current_pages..new_pages]
+                    .iter()
+                    .all(|page| *page == u32::MAX),
+                "refreshed prefix overlaps already allocated private pages"
+            );
+        }
+
+        let added_pages = &physical_pages[current_pages..new_pages];
+        self.allocator
+            .retain_pages(added_pages)
+            .map_err(anyhow::Error::new)?;
+        {
+            let table = self.block_tables.slot_mut(request_slot)?;
+            table[current_pages..new_pages].copy_from_slice(added_pages);
+        }
+        self.allocated_tokens[request_slot] = new_prefix_tokens;
+        self.gpu_batch.update_block_table_range(
+            runtime,
+            request_slot,
+            current_pages,
+            added_pages,
+        )?;
+
+        let mut convolution_index = 0usize;
+        for layer in &mut self.layers {
+            if let BatchLayerCache::Conv(states) = layer {
+                checkpoints.restore_layer(
+                    runtime,
+                    checkpoint_slot,
+                    convolution_index,
+                    states,
+                    request_slot,
+                )?;
+                convolution_index += 1;
+            }
+        }
+
+        let released = new_pages - current_pages;
+        self.allocator.release_reservation(released);
+        self.reservations[request_slot] -= released;
+        Ok(released)
+    }
+
     /// Publish a page-aligned, already-computed prefix. The radix node owns one
     /// reference to every newly introduced physical page, while the checkpoint
     /// pool stores the convolution states at exactly the same boundary.
