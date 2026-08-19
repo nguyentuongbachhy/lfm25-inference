@@ -1,12 +1,3 @@
-use anyhow::{Result, ensure};
-use half::bf16;
-
-use crate::{
-    cuda::CudaRuntime,
-    ops,
-    tensor::{Shape, Tensor},
-};
-
 /// Persistent fixed-address scratch for the BF16 single-token-per-segment
 /// serving topology. All transformer layers reuse the same buffers
 /// sequentially; no workspace is allocated per layer or per decode step.
@@ -274,12 +265,12 @@ impl Lfm2Model {
         runtime: &CudaRuntime,
         cache: &mut BatchModelCache,
         executor: &'a mut DecodeExecutor,
-        input: RaggedBatchInput<'_>,
+        input: &RaggedBatchInput<'_>,
     ) -> Result<Option<&'a Tensor<u32>>> {
-        if !executor.eligible(self, &input) {
+        if !executor.eligible(self, input) {
             return Ok(None);
         }
-        cache.prepare_ragged(runtime, &input)?;
+        cache.prepare_ragged(runtime, input)?;
         executor.forward_prepared(self, runtime, cache)?;
         Ok(Some(&executor.sampled))
     }
