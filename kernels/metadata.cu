@@ -67,3 +67,20 @@ void scatter_batch_metadata(
         segment_offsets[index] = packed_segment_offsets[index];
     }
 }
+
+extern "C" __global__
+__launch_bounds__(METADATA_BLOCK_SIZE)
+void scatter_block_table_patches(
+    const uint32_t* __restrict__ packed_pairs,
+    uint32_t* __restrict__ block_tables,
+    size_t patch_count
+) {
+    const auto* pairs = reinterpret_cast<const uint2*>(packed_pairs);
+    const size_t thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = gridDim.x * blockDim.x;
+
+    for (size_t index = thread; index < patch_count; index += stride) {
+        const uint2 patch = pairs[index];
+        block_tables[patch.x] = patch.y;
+    }
+}
