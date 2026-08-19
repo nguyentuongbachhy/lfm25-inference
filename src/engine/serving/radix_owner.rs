@@ -222,15 +222,18 @@ pub(super) fn run_owner_radix(
         let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
         let gpu_finished = engine.runtime.record_timing_event()?;
         let submit_cpu_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
+
+        enqueue_sampled_download(&engine, &sampled, &mut sampled_host)?;
+        let copy_finished = engine.runtime.record_timing_event()?;
+        // Synchronizing the copy-complete event waits for both model execution
+        // and the following D2H copy. The GPU-complete event is therefore ready
+        // when its interval is queried below, removing the host scheduling gap
+        // between the two operations without changing their measured boundaries.
+        let d2h_ms = engine.runtime.elapsed_ms(&gpu_finished, &copy_finished)?;
         let gpu_ms = engine.runtime.elapsed_ms(&gpu_started, &gpu_finished)?;
-        let download_started = Instant::now();
-        engine
-            .runtime
-            .download_u32_into(&sampled, &mut sampled_host)?;
         let sampled = sampled_host
             .as_slice()
             .context("failed to synchronize pinned token output")?;
-        let d2h_ms = download_started.elapsed().as_secs_f64() * 1000.0;
         let bf16_pool_finished = engine.runtime.bf16_pool_stats();
         let fp8_pool_finished = engine.runtime.fp8_pool_stats();
         let bf16_hits = bf16_pool_finished
@@ -408,6 +411,29 @@ pub(super) fn run_owner_radix(
             .saturating_add(fp8.available_elements),
         cublaslt_workspace_bytes: engine.runtime.blaslt().workspace_size(),
     })
+}
+
+fn enqueue_sampled_download(
+    engine: &Engine,
+    sampled: &crate::tensor::Tensor<u32>,
+    destination: &mut cudarc::driver::PinnedHostSlice<u32>,
+) -> Result<()> {
+    ensure!(
+        sampled.numel() <= destination.len(),
+        "pinned output ring is too small"
+    );
+    let logical = sampled
+        .storage()
+        .try_slice(0..sampled.numel())
+        .context("invalid logical u32 download range")?;
+    let destination = destination
+        .as_mut_slice()
+        .context("failed to access pinned token output")?;
+    engine
+        .runtime
+        .stream()
+        .memcpy_dtoh(&logical, &mut destination[..sampled.numel()])
+        .context("failed to enqueue sampled token download")
 }
 
 #[allow(clippy::too_many_arguments)]
