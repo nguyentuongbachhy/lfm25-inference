@@ -234,21 +234,6 @@ impl HardwareCostModel {
     pub fn predict_prefill_ms(&self, tokens: usize) -> f64 {
         self.prefill_bf16.predict(1, tokens, tokens)
     }
-
-    pub fn largest_prefill_chunk(&self, remaining: usize, budget_ms: f64) -> usize {
-        if remaining == 0 || budget_ms <= 0.0 {
-            return 0;
-        }
-        for candidate in [1024usize, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
-            if candidate > remaining {
-                continue;
-            }
-            if self.predict_prefill_ms(candidate) <= budget_ms {
-                return candidate;
-            }
-        }
-        0
-    }
 }
 
 #[cfg(test)]

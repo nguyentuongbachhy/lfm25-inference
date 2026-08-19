@@ -235,7 +235,7 @@ impl PageRadixCache {
         let mut node_id = 0usize;
         let mut newly_cached_pages = Vec::new();
 
-        for page_index in 0..page_count {
+        for (page_index, &physical_page) in physical_pages.iter().enumerate() {
             let start = page_index * self.page_size;
             let end = start + self.page_size;
             let block = &tokens[start..end];
@@ -245,13 +245,8 @@ impl PageRadixCache {
                 continue;
             }
 
-            let physical_page = physical_pages[page_index];
             let child = self.nodes.len();
-            self.nodes.push(RadixNode::page(
-                physical_page,
-                end,
-                access,
-            ));
+            self.nodes.push(RadixNode::page(physical_page, end, access));
             self.nodes[node_id]
                 .children
                 .insert(block.to_vec().into_boxed_slice(), child);

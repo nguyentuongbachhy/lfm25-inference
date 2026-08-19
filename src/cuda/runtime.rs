@@ -364,30 +364,6 @@ impl CudaRuntime {
             .context("failed to allocate pinned host output ring")
     }
 
-    pub(crate) fn download_u32_into(
-        &self,
-        tensor: &Tensor<u32>,
-        destination: &mut PinnedHostSlice<u32>,
-    ) -> Result<()> {
-        ensure!(
-            tensor.numel() <= destination.len(),
-            "pinned output ring is too small"
-        );
-        let logical = tensor
-            .storage()
-            .try_slice(0..tensor.numel())
-            .context("invalid logical u32 download range")?;
-        let destination = destination
-            .as_mut_slice()
-            .context("failed to access pinned token output")?;
-        self.stream
-            .memcpy_dtoh(&logical, &mut destination[..tensor.numel()])
-            .context("failed to download token IDs into pinned host memory")?;
-        self.stream
-            .synchronize()
-            .context("failed to synchronize pinned token download")
-    }
-
     pub(crate) fn synchronize(&self) -> Result<()> {
         self.stream
             .synchronize()

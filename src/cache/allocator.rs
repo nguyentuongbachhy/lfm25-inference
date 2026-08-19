@@ -117,23 +117,6 @@ impl KvPageAllocator {
         Ok(())
     }
 
-    pub fn unpin_cached_pages(&mut self, pages: &[u32]) -> Result<(), KvAllocationError> {
-        if pages.len() > self.cached_pages {
-            return Err(KvAllocationError::PhysicalPagesExhausted);
-        }
-        for &page in pages {
-            let reference = self.reference_mut(page)?;
-            if *reference == 0 {
-                return Err(KvAllocationError::PhysicalPagesExhausted);
-            }
-        }
-        for &page in pages {
-            self.release_page(page);
-        }
-        self.cached_pages -= pages.len();
-        Ok(())
-    }
-
     pub fn retain_pages(&mut self, pages: &[u32]) -> Result<(), KvAllocationError> {
         for &page in pages {
             let reference = self.reference_mut(page)?;
@@ -284,10 +267,6 @@ mod tests {
         let mut second = [page];
         allocator.release_sequence(16, &mut second);
         assert_eq!(allocator.snapshot().allocated_pages, 1);
-
-        allocator.unpin_cached_pages(&[page])?;
-        assert_eq!(allocator.snapshot().allocated_pages, 0);
-        assert_eq!(allocator.snapshot().free_pages, 4);
         Ok(())
     }
 

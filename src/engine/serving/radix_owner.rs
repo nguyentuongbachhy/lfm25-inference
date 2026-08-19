@@ -24,6 +24,12 @@ use super::{
 const RADIX_KV_BUDGET_DIVISOR: usize = 4;
 const CONV_CHECKPOINT_CAPACITY: usize = 64;
 
+struct PrefixReuse<'a> {
+    radix: &'a mut PageRadixCache,
+    checkpoints: &'a ConvCheckpointPool,
+    matched_pages: &'a mut Vec<u32>,
+}
+
 pub(super) fn run_owner_radix(
     engine: Engine,
     config: ContinuousEngineConfig,
@@ -104,9 +110,11 @@ pub(super) fn run_owner_radix(
                 &mut cache,
                 &mut slots,
                 &mut responses,
-                &mut radix,
-                &checkpoints,
-                &mut matched_pages,
+                PrefixReuse {
+                    radix: &mut radix,
+                    checkpoints: &checkpoints,
+                    matched_pages: &mut matched_pages,
+                },
                 request,
             )?;
         }
@@ -120,9 +128,11 @@ pub(super) fn run_owner_radix(
                 &mut cache,
                 &mut slots,
                 &mut responses,
-                &mut radix,
-                &checkpoints,
-                &mut matched_pages,
+                PrefixReuse {
+                    radix: &mut radix,
+                    checkpoints: &checkpoints,
+                    matched_pages: &mut matched_pages,
+                },
                 request,
             )?;
             continue;
@@ -436,7 +446,6 @@ fn enqueue_sampled_download(
         .context("failed to enqueue sampled token download")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn refresh_unscheduled_prefixes(
     engine: &Engine,
     cache: &mut crate::model::BatchModelCache,
@@ -448,8 +457,8 @@ fn refresh_unscheduled_prefixes(
 ) -> Result<()> {
     let page_size = engine.config.kv_page_size.value();
     let slot_count = slots.entries().len();
-    for index in 0..slot_count {
-        if responses[index].first_scheduled.is_some() {
+    for (index, response) in responses.iter().enumerate().take(slot_count) {
+        if response.first_scheduled.is_some() {
             continue;
         }
         let slot = RequestSlotId(u32::try_from(index)?);
@@ -483,8 +492,7 @@ fn refresh_unscheduled_prefixes(
         let released = cache.extend_attached_prefix(
             &engine.runtime,
             index,
-            current_prefix,
-            hit.token_len,
+            current_prefix..hit.token_len,
             matched_pages,
             checkpoints,
             hit.checkpoint_slot,
@@ -523,18 +531,21 @@ fn split_prefill_at_reusable_boundary(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn admit_request_radix(
     engine: &Engine,
     config: &ContinuousEngineConfig,
     cache: &mut crate::model::BatchModelCache,
     slots: &mut RequestSlots,
     responses: &mut [ResponseState],
-    radix: &mut PageRadixCache,
-    checkpoints: &ConvCheckpointPool,
-    matched_pages: &mut Vec<u32>,
+    prefix_reuse: PrefixReuse<'_>,
     request: PreparedRequest,
 ) -> Result<()> {
+    let PrefixReuse {
+        radix,
+        checkpoints,
+        matched_pages,
+    } = prefix_reuse;
+
     if request.sampling.temperature != 0.0 || request.sampling.repetition_penalty != 1.0 {
         let _ = request.response.send(Err(ServingError::bad_request(
             "continuous path currently requires greedy sampling",
@@ -571,11 +582,7 @@ fn admit_request_radix(
         .checked_div(page_size)
         .unwrap_or(0)
         .saturating_mul(page_size);
-    let prefix_hit = radix.longest_checkpoint(
-        &request.token_ids,
-        reusable_limit,
-        matched_pages,
-    );
+    let prefix_hit = radix.longest_checkpoint(&request.token_ids, reusable_limit, matched_pages);
     let prefix_tokens = prefix_hit.map_or(0, |hit| hit.token_len);
     let remaining_prompt = request.token_ids.len().saturating_sub(prefix_tokens);
 

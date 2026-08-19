@@ -108,12 +108,13 @@ impl BatchModelCache {
         &mut self,
         runtime: &CudaRuntime,
         request_slot: usize,
-        current_prefix_tokens: usize,
-        new_prefix_tokens: usize,
+        prefix_tokens: std::ops::Range<usize>,
         physical_pages: &[u32],
         checkpoints: &super::ConvCheckpointPool,
         checkpoint_slot: u32,
     ) -> Result<usize> {
+        let current_prefix_tokens = prefix_tokens.start;
+        let new_prefix_tokens = prefix_tokens.end;
         ensure!(
             request_slot < self.allocated_tokens.len(),
             "request slot out of range"
