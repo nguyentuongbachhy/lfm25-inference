@@ -20,7 +20,6 @@ impl FixedBlockTables {
         })
     }
 
-    #[cfg(test)]
     pub fn slot(&self, slot: usize) -> Result<&[u32]> {
         ensure!(slot < self.slots, "block table slot out of range");
         let start = slot * self.pages_per_slot;
