@@ -1,9 +1,36 @@
 use anyhow::{Result, ensure};
 use half::bf16;
 
-use crate::{cuda::CudaRuntime, tensor::Tensor};
+use crate::{
+    cuda::CudaRuntime,
+    tensor::{Shape, Tensor},
+};
 
 pub fn silu_mul_packed_bf16(runtime: &CudaRuntime, packed: &Tensor<bf16>) -> Result<Tensor<bf16>> {
+    ensure!(
+        packed.rank() >= 2,
+        "packed silu_mul expects rank >= 2, got {:?}",
+        packed.dims()
+    );
+    let packed_width = packed.dims()[packed.rank() - 1];
+    ensure!(
+        packed_width > 0 && packed_width.is_multiple_of(2),
+        "packed silu_mul last dimension must be positive and even"
+    );
+    let intermediate_size = packed_width / 2;
+    let mut output_dims = packed.dims().to_vec();
+    let last = output_dims.len() - 1;
+    output_dims[last] = intermediate_size;
+    let mut out = runtime.alloc_bf16(Shape::new(output_dims))?;
+    silu_mul_packed_bf16_into(runtime, packed, &mut out)?;
+    Ok(out)
+}
+
+pub(crate) fn silu_mul_packed_bf16_into(
+    runtime: &CudaRuntime,
+    packed: &Tensor<bf16>,
+    out: &mut Tensor<bf16>,
+) -> Result<()> {
     ensure!(
         packed.rank() >= 2,
         "packed silu_mul expects rank >= 2, got {:?}",
@@ -19,7 +46,7 @@ pub fn silu_mul_packed_bf16(runtime: &CudaRuntime, packed: &Tensor<bf16>) -> Res
     let mut output_dims = packed.dims().to_vec();
     let last = output_dims.len() - 1;
     output_dims[last] = intermediate_size;
-    let mut out = runtime.alloc_bf16(crate::tensor::Shape::new(output_dims))?;
+    out.set_logical_shape(Shape::new(output_dims))?;
     unsafe {
         runtime.kernels().silu_mul().launch_packed_bf16(
             runtime.stream(),
@@ -29,7 +56,7 @@ pub fn silu_mul_packed_bf16(runtime: &CudaRuntime, packed: &Tensor<bf16>) -> Res
             intermediate_size,
         )?;
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
