@@ -22,6 +22,14 @@ impl Engine {
                 .is_some_and(|required| required <= config.maximum_batch_tokens),
             "maximum batch tokens cannot cover decode slots plus prefill chunk"
         );
+        // Build the serving-only packed QKV weights before the owner computes
+        // its free-VRAM-derived KV page budget, so their resident bytes are
+        // naturally charged against available cache capacity.
+        self.model.prepare_packed_qkv_decode(
+            &self.runtime,
+            config.maximum_request_slots,
+            config.maximum_batch_tokens,
+        )?;
         radix_owner::run_owner_radix(self, config, receiver, ready)
     }
 }
