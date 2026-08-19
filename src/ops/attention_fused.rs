@@ -36,9 +36,20 @@ pub(crate) fn fused_paged_attention_decode_lfm2_bf16(
     runtime: &CudaRuntime,
     input: FusedPagedAttentionInput<'_>,
 ) -> Result<Tensor<bf16>> {
+    let num_tokens = input.attention.query_raw.dims()[0];
+    let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
+    fused_paged_attention_decode_lfm2_bf16_into(runtime, input, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn fused_paged_attention_decode_lfm2_bf16_into(
+    runtime: &CudaRuntime,
+    input: FusedPagedAttentionInput<'_>,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
     let FusedPagedAttentionInput { attention, cache } = input;
     let num_tokens = validate_inputs(&attention)?;
-    let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
+    output.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
     let page_size = cache.page_size().value();
     let num_pages = cache.num_pages();
     let (block_table, key_cache, value_cache) = cache.attention_parts_mut();
@@ -68,13 +79,24 @@ pub(crate) fn fused_paged_attention_decode_lfm2_bf16(
             },
         )?;
     }
-    Ok(output)
+    Ok(())
 }
 
 pub(crate) fn fused_ragged_paged_attention_decode_lfm2_bf16(
     runtime: &CudaRuntime,
     input: FusedRaggedAttentionInput<'_>,
 ) -> Result<Tensor<bf16>> {
+    let num_tokens = input.attention.query_raw.dims()[0];
+    let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
+    fused_ragged_paged_attention_decode_lfm2_bf16_into(runtime, input, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn fused_ragged_paged_attention_decode_lfm2_bf16_into(
+    runtime: &CudaRuntime,
+    input: FusedRaggedAttentionInput<'_>,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
     let FusedRaggedAttentionInput {
         attention,
         arena,
@@ -83,20 +105,14 @@ pub(crate) fn fused_ragged_paged_attention_decode_lfm2_bf16(
         request_slots,
     } = input;
     let num_tokens = validate_inputs(&attention)?;
-    ensure!(
-        block_tables.rank() == 2,
-        "fused ragged block tables must have rank 2"
-    );
+    ensure!(block_tables.rank() == 2, "fused ragged block tables must be rank 2");
     ensure!(
         block_tables.dims()[1] == block_table_stride,
         "fused ragged block table stride/shape mismatch"
     );
-    ensure!(
-        request_slots.numel() == num_tokens,
-        "fused ragged request slot count mismatch"
-    );
+    ensure!(request_slots.numel() == num_tokens, "fused ragged request slot count mismatch");
+    output.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
 
-    let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
     let page_size = arena.page_size().value();
     let num_pages = arena.num_pages();
     let (key_cache, value_cache) = arena.kv_mut();
@@ -127,7 +143,7 @@ pub(crate) fn fused_ragged_paged_attention_decode_lfm2_bf16(
             },
         )?;
     }
-    Ok(output)
+    Ok(())
 }
 
 fn validate_inputs(input: &FusedAttentionInput<'_>) -> Result<usize> {
@@ -137,19 +153,13 @@ fn validate_inputs(input: &FusedAttentionInput<'_>) -> Result<usize> {
         input.query_raw.dims()
     );
     let num_tokens = input.query_raw.dims()[0];
-    ensure!(
-        num_tokens > 0,
-        "fused attention requires at least one token"
-    );
+    ensure!(num_tokens > 0, "fused attention requires at least one token");
     ensure!(
         input.key_raw.dims() == [num_tokens, 8, 64],
         "fused LFM2 key must have shape [{num_tokens},8,64], got {:?}",
         input.key_raw.dims()
     );
-    ensure!(
-        input.value_raw.shape() == input.key_raw.shape(),
-        "fused LFM2 K/V shape mismatch"
-    );
+    ensure!(input.value_raw.shape() == input.key_raw.shape(), "fused LFM2 K/V shape mismatch");
     ensure!(
         input.query_norm.rank() == 1 && input.query_norm.numel() == 64,
         "fused query norm weight must have shape [64]"
@@ -162,14 +172,8 @@ fn validate_inputs(input: &FusedAttentionInput<'_>) -> Result<usize> {
         input.inv_freq.rank() == 1 && input.inv_freq.numel() == 32,
         "fused RoPE inv_freq must have shape [32]"
     );
-    ensure!(
-        input.position_ids.numel() == num_tokens,
-        "fused attention position count mismatch"
-    );
-    ensure!(
-        input.slot_mapping.numel() == num_tokens,
-        "fused attention slot mapping count mismatch"
-    );
+    ensure!(input.position_ids.numel() == num_tokens, "fused attention position count mismatch");
+    ensure!(input.slot_mapping.numel() == num_tokens, "fused attention slot mapping count mismatch");
     ensure!(
         input.eps.is_finite() && input.eps >= 0.0,
         "fused attention epsilon must be finite and non-negative"
