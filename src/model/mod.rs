@@ -2,6 +2,7 @@ mod calibration;
 mod evaluation;
 mod fp8_analysis;
 mod lfm2;
+mod prefix;
 mod profile;
 pub(crate) mod quantization;
 
@@ -13,6 +14,7 @@ pub use fp8_analysis::Fp8GemmErrorReport;
 pub(crate) use fp8_analysis::characterize_gemm_site;
 pub(crate) use lfm2::{BatchModelCache, RaggedBatchInput};
 pub use lfm2::Lfm2Model;
+pub(crate) use prefix::ConvCheckpointPool;
 pub use profile::{DecodeProfileMode, DecodeProfileReport};
 pub(crate) use profile::{ModelProfileRecorder, ProfileRegion, profiled};
 pub use quantization::Fp8PrecisionPolicy;
