@@ -267,3 +267,5 @@ impl BatchModelCache {
         Ok(true)
     }
 }
+
+include!("lfm2_packed.rs");
