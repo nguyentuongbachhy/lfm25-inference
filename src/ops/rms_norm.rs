@@ -12,6 +12,18 @@ pub fn rms_norm_bf16(
     weight: &Tensor<bf16>,
     eps: f32,
 ) -> Result<Tensor<bf16>> {
+    let mut out = runtime.alloc_bf16(x.shape().clone())?;
+    rms_norm_bf16_into(runtime, x, weight, eps, &mut out)?;
+    Ok(out)
+}
+
+pub(crate) fn rms_norm_bf16_into(
+    runtime: &CudaRuntime,
+    x: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    eps: f32,
+    out: &mut Tensor<bf16>,
+) -> Result<()> {
     ensure!(x.rank() >= 1, "RMSNorm input must have rank >= 1");
     ensure!(
         weight.rank() == 1,
@@ -32,7 +44,7 @@ pub fn rms_norm_bf16(
         weight.dims()
     );
     let rows = x.numel() / hidden_size;
-    let mut out = runtime.alloc_bf16(x.shape().clone())?;
+    out.set_logical_shape(x.shape().clone())?;
     unsafe {
         runtime.kernels().rms_norm().launch_bf16(
             runtime.stream(),
@@ -46,7 +58,7 @@ pub fn rms_norm_bf16(
             },
         )?;
     }
-    Ok(out)
+    Ok(())
 }
 
 pub fn residual_rms_norm_bf16(
@@ -56,6 +68,30 @@ pub fn residual_rms_norm_bf16(
     weight: &Tensor<bf16>,
     eps: f32,
 ) -> Result<(Tensor<bf16>, Tensor<bf16>)> {
+    let mut residual_out = runtime.alloc_bf16(residual.shape().clone())?;
+    let mut normalized_out = runtime.alloc_bf16(residual.shape().clone())?;
+    residual_rms_norm_bf16_into(
+        runtime,
+        residual,
+        update,
+        weight,
+        eps,
+        &mut residual_out,
+        &mut normalized_out,
+    )?;
+    Ok((residual_out, normalized_out))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn residual_rms_norm_bf16_into(
+    runtime: &CudaRuntime,
+    residual: &Tensor<bf16>,
+    update: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    eps: f32,
+    residual_out: &mut Tensor<bf16>,
+    normalized_out: &mut Tensor<bf16>,
+) -> Result<()> {
     ensure!(
         residual.shape() == update.shape(),
         "fused residual RMSNorm shape mismatch: residual={:?}, update={:?}",
@@ -77,8 +113,8 @@ pub fn residual_rms_norm_bf16(
         weight.dims()
     );
     let rows = residual.numel() / hidden_size;
-    let mut residual_out = runtime.alloc_bf16(residual.shape().clone())?;
-    let mut normalized_out = runtime.alloc_bf16(residual.shape().clone())?;
+    residual_out.set_logical_shape(residual.shape().clone())?;
+    normalized_out.set_logical_shape(residual.shape().clone())?;
     unsafe {
         runtime.kernels().rms_norm().launch_residual_bf16(
             runtime.stream(),
@@ -94,7 +130,7 @@ pub fn residual_rms_norm_bf16(
             },
         )?;
     }
-    Ok((residual_out, normalized_out))
+    Ok(())
 }
 
 #[cfg(test)]
