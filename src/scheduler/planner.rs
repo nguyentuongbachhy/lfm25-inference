@@ -131,7 +131,58 @@ impl Scheduler {
                 .push((urgency, RequestSlotId(index as u32)));
         }
         self.prefill_order.sort_unstable_by_key(|entry| entry.0);
-        let queued_prefills = self.prefill_order.len();
+
+        let page_size = self.cost.page_size;
+        let tail_pressure = self.prefill_order.len() >= DECODE_TAIL_QUEUE_THRESHOLD
+            && self.prefill_order.iter().any(|&(_, slot)| {
+                requests.get(slot).is_ok_and(|request| {
+                    let remaining = request.prompt_len.saturating_sub(request.prefilled);
+                    request.prefilled >= DECODE_TAIL_CONTEXT_THRESHOLD
+                        && remaining > 0
+                        && remaining <= page_size
+                })
+            });
+
+        if tail_pressure {
+            // Keep this step decode-only. Any regular (>1-token) prefill segment
+            // would make the whole ragged attention batch fall back to the
+            // generic prefill path, defeating the purpose of singleton tails.
+            let mut singleton_count = 0usize;
+            let mut singleton_context = maximum_context;
+            for &(_, slot) in &self.prefill_order {
+                let Ok(request) = requests.get(slot) else {
+                    continue;
+                };
+                let remaining = request.prompt_len.saturating_sub(request.prefilled);
+                if request.prefilled == 0 || remaining == 0 || remaining > page_size {
+                    continue;
+                }
+
+                let projected_count = self
+                    .plan
+                    .decode_count
+                    .saturating_add(singleton_count)
+                    .saturating_add(1);
+                let projected_context = singleton_context.max(request.prefilled.saturating_add(1));
+                let projected_ms = self.cost.predict_decode_ms(
+                    projected_count,
+                    projected_context,
+                    self.config.fp8_decode,
+                );
+                if projected_ms >= self.config.step_budget_ms
+                    || projected_ms * 1000.0 >= self.config.tpot_slo_us as f64
+                {
+                    break;
+                }
+
+                self.plan.work.push(ScheduledWork::Prefill { slot, tokens: 1 });
+                self.plan.prefill_tokens = self.plan.prefill_tokens.saturating_add(1);
+                singleton_count = singleton_count.saturating_add(1);
+                singleton_context = projected_context;
+                self.plan.predicted_ms = projected_ms;
+            }
+            return &self.plan;
+        }
 
         for &(_, slot) in &self.prefill_order {
             if self.plan.prefill_tokens >= self.config.maximum_prefill_tokens {
@@ -140,53 +191,27 @@ impl Scheduler {
             let Ok(request) = requests.get(slot) else {
                 continue;
             };
-            let raw_remaining = request.prompt_len.saturating_sub(request.prefilled);
-            if raw_remaining == 0 {
-                continue;
-            }
-
-            // A large burst of page-aligned prefix hits can leave one final KV
-            // page per request. Packing all of those tails as a single ragged
-            // prefill makes attention see hundreds of query tokens at a long
-            // context and badly underestimates the real cost. Draining one
-            // token/request keeps every segment length at one, which lets the
-            // model route the batch through the optimized paged-decode/MoK
-            // path while preserving the exact sequential Conv/KV semantics.
-            let decode_tail = queued_prefills >= DECODE_TAIL_QUEUE_THRESHOLD
-                && request.prefilled >= DECODE_TAIL_CONTEXT_THRESHOLD
-                && raw_remaining <= self.cost.page_size;
-
-            let remaining = if decode_tail {
-                1
-            } else {
-                raw_remaining.min(
+            let remaining = request
+                .prompt_len
+                .saturating_sub(request.prefilled)
+                .min(
                     self.config
                         .maximum_prefill_tokens
                         .saturating_sub(self.plan.prefill_tokens),
-                )
-            };
+                );
             if remaining == 0 {
                 continue;
             }
 
             let mut chunk = 0usize;
-            if decode_tail {
-                let total_prefill = self.plan.prefill_tokens.saturating_add(1);
-                if total_prefill <= self.config.maximum_prefill_tokens
-                    && self.cost.predict_prefill_ms(total_prefill) <= remaining_budget
-                {
-                    chunk = 1;
+            for candidate in [512usize, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
+                if candidate > remaining {
+                    continue;
                 }
-            } else {
-                for candidate in [512usize, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
-                    if candidate > remaining {
-                        continue;
-                    }
-                    let total_prefill = self.plan.prefill_tokens.saturating_add(candidate);
-                    if self.cost.predict_prefill_ms(total_prefill) <= remaining_budget {
-                        chunk = candidate;
-                        break;
-                    }
+                let total_prefill = self.plan.prefill_tokens.saturating_add(candidate);
+                if self.cost.predict_prefill_ms(total_prefill) <= remaining_budget {
+                    chunk = candidate;
+                    break;
                 }
             }
             if chunk == 0 {
@@ -215,22 +240,26 @@ mod tests {
     use super::*;
 
     fn cost_model() -> Result<HardwareCostModel> {
-        Ok(HardwareCostModel {
-            schema_version: 1,
-            gpu_name: "test".into(),
-            page_size: 16,
-            decode_bf16: CostCurve::new(vec![CostPoint {
-                batch: 1,
-                tokens: 1,
-                context: 128,
-                milliseconds: 8.0,
-            }])?,
-            decode_fp8: CostCurve::new(vec![CostPoint {
+        let decode_points = vec![
+            CostPoint {
                 batch: 1,
                 tokens: 1,
                 context: 128,
                 milliseconds: 6.0,
-            }])?,
+            },
+            CostPoint {
+                batch: 64,
+                tokens: 1,
+                context: 2048,
+                milliseconds: 20.0,
+            },
+        ];
+        Ok(HardwareCostModel {
+            schema_version: 1,
+            gpu_name: "test".into(),
+            page_size: 16,
+            decode_bf16: CostCurve::new(decode_points.clone())?,
+            decode_fp8: CostCurve::new(decode_points)?,
             prefill_bf16: CostCurve::new(vec![CostPoint {
                 batch: 1,
                 tokens: 128,
@@ -301,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn large_long_context_tail_burst_is_drained_one_token_per_request() -> Result<()> {
+    fn large_long_context_tail_burst_is_decode_only() -> Result<()> {
         let request_count = DECODE_TAIL_QUEUE_THRESHOLD;
         let mut slots = RequestSlots::new(request_count, 4096)?;
         for request_id in 0..request_count {
@@ -334,6 +363,57 @@ mod tests {
         assert_eq!(tail_prefills.len(), request_count);
         assert!(tail_prefills.iter().all(|tokens| *tokens == 1));
         assert_eq!(plan.prefill_tokens, request_count);
+        assert!(plan.predicted_ms < SchedulerConfig::default().step_budget_ms);
+        Ok(())
+    }
+
+    #[test]
+    fn long_tail_pressure_forces_short_cached_tails_to_singletons_too() -> Result<()> {
+        let request_count = DECODE_TAIL_QUEUE_THRESHOLD;
+        let long_count = 4usize;
+        let mut slots = RequestSlots::new(request_count, 4096)?;
+        for request_id in 0..request_count {
+            let slot = slots.acquire().expect("mixed tail slot");
+            if request_id < long_count {
+                slots.get_mut(slot)?.initialize(RequestInit::new(
+                    request_id as u64,
+                    &[2; 2048],
+                    2176,
+                    0,
+                    400_000,
+                    50_000,
+                    136,
+                ))?;
+                slots.get_mut(slot)?.prefilled = 2032;
+            } else {
+                slots.get_mut(slot)?.initialize(RequestInit::new(
+                    request_id as u64,
+                    &[2; 128],
+                    256,
+                    0,
+                    400_000,
+                    50_000,
+                    16,
+                ))?;
+                slots.get_mut(slot)?.prefilled = 112;
+            }
+        }
+        let mut scheduler = Scheduler::new(
+            request_count,
+            SchedulerConfig::default(),
+            cost_model()?,
+        )?;
+        let plan = scheduler.schedule(&slots, 10_000);
+        let prefills = plan
+            .work()
+            .iter()
+            .filter_map(|work| match work {
+                ScheduledWork::Prefill { tokens, .. } => Some(*tokens),
+                ScheduledWork::Decode { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(prefills.len(), request_count);
+        assert!(prefills.iter().all(|tokens| *tokens == 1));
         Ok(())
     }
 
