@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 
+const PACKED_QKV_MAX_DECODE_TOKENS: usize = 8;
+
 struct PackedQkvDecodeWeights {
     model_key: usize,
     layers: Vec<Option<Tensor<bf16>>>,
@@ -222,11 +224,14 @@ impl Lfm2Model {
                 num_tokens,
             );
 
-        // The packed projection is deliberately restricted to the production
-        // BF16 two-kernel decode region. Short-context one-kernel decode keeps
-        // its measured Q/K/V layout, while FP8 and non-decode work stay on the
-        // established path.
-        if decode_only && !one_kernel_decode && !use_fp8 {
+        // Packed QKV is launch-bound friendly at small decode batches. At
+        // larger batches the single [N,3072] GEMM loses enough kernel/GEMM
+        // efficiency that the established three-projection path is faster.
+        if decode_only
+            && num_tokens <= PACKED_QKV_MAX_DECODE_TOKENS
+            && !one_kernel_decode
+            && !use_fp8
+        {
             let packed_weight = packed_qkv.context("attention layer is missing packed QKV weight")?;
             let projected = ops::linear_bf16(runtime, &normalized, packed_weight)?;
             ensure!(
