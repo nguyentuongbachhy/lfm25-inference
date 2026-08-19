@@ -34,14 +34,9 @@ pub struct KvPoolSnapshot {
     pub peak_allocated_pages: usize,
 }
 
-/// Physical KV page allocator with two ownership classes:
-///
-/// - request references, which are acquired while a sequence is live; and
-/// - cache pins, which keep immutable prefix pages resident after the request
-///   that produced them has completed.
-///
-/// The runtime has one GPU owner thread, so page reference counts deliberately
-/// stay non-atomic. All mutations are serialized by that owner.
+/// Physical KV page allocator with request references plus long-lived radix
+/// cache pins. All mutations happen on the single GPU-owner thread, so the
+/// reference counts deliberately remain non-atomic.
 pub struct KvPageAllocator {
     page_size: KvPageSize,
     free_pages: Vec<u32>,
@@ -84,9 +79,8 @@ impl KvPageAllocator {
         self.try_reserve_pages(maximum_tokens.div_ceil(self.page_size.value()))
     }
 
-    /// Reserves only pages that may need to be allocated privately by a live
-    /// request. Shared prefix pages are represented by `cached_pages` and are
-    /// therefore not charged again to every request that attaches them.
+    /// Reserves only pages that may need private allocation. Shared immutable
+    /// prefix pages are charged once through `cached_pages`, not once/request.
     pub fn try_reserve_pages(&mut self, pages: usize) -> Result<usize, KvAllocationError> {
         let next = self
             .reserved_pages
@@ -106,16 +100,12 @@ impl KvPageAllocator {
         self.reserved_pages = self.reserved_pages.saturating_sub(pages);
     }
 
-    /// Adds a long-lived cache ownership reference to already allocated pages.
     pub fn pin_cached_pages(&mut self, pages: &[u32]) -> Result<(), KvAllocationError> {
         if self.cached_pages.saturating_add(pages.len()) > self.total_pages {
             return Err(KvAllocationError::PhysicalPagesExhausted);
         }
         for &page in pages {
-            let index = usize::try_from(page).map_err(|_| KvAllocationError::PhysicalPagesExhausted)?;
-            let Some(reference) = self.page_refs.get_mut(index) else {
-                return Err(KvAllocationError::PhysicalPagesExhausted);
-            };
+            let reference = self.reference_mut(page)?;
             if *reference == 0 {
                 return Err(KvAllocationError::PhysicalPagesExhausted);
             }
@@ -127,26 +117,26 @@ impl KvPageAllocator {
         Ok(())
     }
 
-    /// Drops long-lived cache ownership. A page returns to the free list only
-    /// after the final request/cache reference is released.
     pub fn unpin_cached_pages(&mut self, pages: &[u32]) -> Result<(), KvAllocationError> {
         if pages.len() > self.cached_pages {
             return Err(KvAllocationError::PhysicalPagesExhausted);
         }
         for &page in pages {
-            self.release_page(page)?;
+            let reference = self.reference_mut(page)?;
+            if *reference == 0 {
+                return Err(KvAllocationError::PhysicalPagesExhausted);
+            }
+        }
+        for &page in pages {
+            self.release_page(page);
         }
         self.cached_pages -= pages.len();
         Ok(())
     }
 
-    /// Acquires request references to prefix pages owned by the radix cache.
     pub fn retain_pages(&mut self, pages: &[u32]) -> Result<(), KvAllocationError> {
         for &page in pages {
-            let index = usize::try_from(page).map_err(|_| KvAllocationError::PhysicalPagesExhausted)?;
-            let Some(reference) = self.page_refs.get_mut(index) else {
-                return Err(KvAllocationError::PhysicalPagesExhausted);
-            };
+            let reference = self.reference_mut(page)?;
             if *reference == 0 {
                 return Err(KvAllocationError::PhysicalPagesExhausted);
             }
@@ -180,10 +170,7 @@ impl KvPageAllocator {
                 .free_pages
                 .pop()
                 .ok_or(KvAllocationError::PhysicalPagesExhausted)?;
-            let reference = self
-                .page_refs
-                .get_mut(page as usize)
-                .ok_or(KvAllocationError::PhysicalPagesExhausted)?;
+            let reference = self.reference_mut(page)?;
             if *reference != 0 {
                 return Err(KvAllocationError::PhysicalPagesExhausted);
             }
@@ -196,36 +183,41 @@ impl KvPageAllocator {
         Ok(needed)
     }
 
-    pub fn release_sequence(
-        &mut self,
-        tokens: usize,
-        block_table: &mut [u32],
-    ) -> Result<(), KvAllocationError> {
+    /// Keeps the historical infallible release API used by the model cache.
+    /// Invalid page ownership is an internal invariant violation; in release
+    /// builds we avoid panicking the serving process and simply leave the page
+    /// unavailable rather than risking a double-free into `free_pages`.
+    pub fn release_sequence(&mut self, tokens: usize, block_table: &mut [u32]) {
         let pages = tokens
             .div_ceil(self.page_size.value())
             .min(block_table.len());
         for entry in &mut block_table[..pages] {
             if *entry != u32::MAX {
-                self.release_page(*entry)?;
+                self.release_page(*entry);
                 *entry = u32::MAX;
             }
         }
-        Ok(())
     }
 
-    fn release_page(&mut self, page: u32) -> Result<(), KvAllocationError> {
-        let index = usize::try_from(page).map_err(|_| KvAllocationError::PhysicalPagesExhausted)?;
-        let Some(reference) = self.page_refs.get_mut(index) else {
-            return Err(KvAllocationError::PhysicalPagesExhausted);
+    fn reference_mut(&mut self, page: u32) -> Result<&mut u32, KvAllocationError> {
+        self.page_refs
+            .get_mut(page as usize)
+            .ok_or(KvAllocationError::PhysicalPagesExhausted)
+    }
+
+    fn release_page(&mut self, page: u32) {
+        let Some(reference) = self.page_refs.get_mut(page as usize) else {
+            debug_assert!(false, "KV page out of range during release");
+            return;
         };
         if *reference == 0 {
-            return Err(KvAllocationError::PhysicalPagesExhausted);
+            debug_assert!(false, "KV page double release");
+            return;
         }
         *reference -= 1;
         if *reference == 0 {
             self.free_pages.push(page);
         }
-        Ok(())
     }
 
     pub fn snapshot(&self) -> KvPoolSnapshot {
@@ -257,7 +249,7 @@ mod tests {
         assert_eq!(allocator.grow_sequence(0, 17, &mut table)?, 2);
         assert_eq!(allocator.snapshot().allocated_pages, 2);
         assert_eq!(allocator.grow_sequence(17, 48, &mut table)?, 1);
-        allocator.release_sequence(48, &mut table)?;
+        allocator.release_sequence(48, &mut table);
         allocator.release_reservation(reserved);
         assert_eq!(allocator.snapshot().free_pages, 8);
         assert!(table.iter().all(|page| *page == u32::MAX));
@@ -283,14 +275,14 @@ mod tests {
         allocator.grow_sequence(0, 16, &mut first)?;
         let page = first[0];
         allocator.pin_cached_pages(&[page])?;
-        allocator.release_sequence(16, &mut first)?;
+        allocator.release_sequence(16, &mut first);
         allocator.release_reservation(reserved);
         assert_eq!(allocator.snapshot().allocated_pages, 1);
         assert_eq!(allocator.snapshot().cached_pages, 1);
 
         allocator.retain_pages(&[page])?;
         let mut second = [page];
-        allocator.release_sequence(16, &mut second)?;
+        allocator.release_sequence(16, &mut second);
         assert_eq!(allocator.snapshot().allocated_pages, 1);
 
         allocator.unpin_cached_pages(&[page])?;
@@ -306,7 +298,7 @@ mod tests {
         let mut table = [u32::MAX; 1];
         allocator.grow_sequence(0, 16, &mut table)?;
         allocator.pin_cached_pages(&[table[0]])?;
-        allocator.release_sequence(16, &mut table)?;
+        allocator.release_sequence(16, &mut table);
         allocator.release_reservation(reserved);
 
         assert_eq!(allocator.try_reserve_pages(3)?, 3);
