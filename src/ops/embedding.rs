@@ -20,22 +20,39 @@ pub fn embedding_bf16(
         token_ids.numel() > 0,
         "embedding does not support empty token tensors"
     );
+    let hidden_size = weight.dims()[1];
+    let mut output_dims = token_ids.dims().to_vec();
+    output_dims.push(hidden_size);
+    let mut out = runtime.alloc_bf16(Shape::new(output_dims))?;
+    embedding_bf16_into(runtime, token_ids, weight, &mut out)?;
+    Ok(out)
+}
+
+pub(crate) fn embedding_bf16_into(
+    runtime: &CudaRuntime,
+    token_ids: &Tensor<u32>,
+    weight: &Tensor<bf16>,
+    out: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(
+        weight.rank() == 2,
+        "embedding weight must have rank 2, got shape {:?}",
+        weight.dims()
+    );
+    ensure!(
+        token_ids.numel() > 0,
+        "embedding does not support empty token tensors"
+    );
 
     let vocab_size = weight.dims()[0];
     let hidden_size = weight.dims()[1];
-    ensure!(
-        vocab_size > 0,
-        "embedding vocab size must be greater than zero"
-    );
-    ensure!(
-        hidden_size > 0,
-        "embedding hidden size must be greater than zero"
-    );
+    ensure!(vocab_size > 0, "embedding vocab size must be greater than zero");
+    ensure!(hidden_size > 0, "embedding hidden size must be greater than zero");
 
     let num_tokens = token_ids.numel();
     let mut output_dims = token_ids.dims().to_vec();
     output_dims.push(hidden_size);
-    let mut out = runtime.alloc_bf16(Shape::new(output_dims))?;
+    out.set_logical_shape(Shape::new(output_dims))?;
 
     unsafe {
         runtime.kernels().embedding().launch_bf16(
@@ -50,7 +67,7 @@ pub fn embedding_bf16(
             },
         )?;
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -72,18 +89,10 @@ mod tests {
     fn embedding_bf16_rank1() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
         let weight_host = [
-            bf16::from_f32(1.0),
-            bf16::from_f32(2.0),
-            bf16::from_f32(3.0),
-            bf16::from_f32(4.0),
-            bf16::from_f32(5.0),
-            bf16::from_f32(6.0),
-            bf16::from_f32(7.0),
-            bf16::from_f32(8.0),
-            bf16::from_f32(9.0),
-            bf16::from_f32(10.0),
-            bf16::from_f32(11.0),
-            bf16::from_f32(12.0),
+            bf16::from_f32(1.0), bf16::from_f32(2.0), bf16::from_f32(3.0),
+            bf16::from_f32(4.0), bf16::from_f32(5.0), bf16::from_f32(6.0),
+            bf16::from_f32(7.0), bf16::from_f32(8.0), bf16::from_f32(9.0),
+            bf16::from_f32(10.0), bf16::from_f32(11.0), bf16::from_f32(12.0),
         ];
         let weight = runtime.upload(&weight_host, Shape::new([4, 3]))?;
         let token_ids = runtime.upload(&[2u32, 0, 3, 1], Shape::new([4]))?;
