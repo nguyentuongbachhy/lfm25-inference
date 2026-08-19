@@ -230,6 +230,41 @@ impl CudaRuntime {
             .context("failed to zero GPU state range")
     }
 
+    pub(crate) fn copy_bf16_range(
+        &self,
+        source: &Tensor<bf16>,
+        source_start: usize,
+        destination: &mut Tensor<bf16>,
+        destination_start: usize,
+        elements: usize,
+    ) -> Result<()> {
+        let source_end = source_start
+            .checked_add(elements)
+            .context("source copy range overflow")?;
+        let destination_end = destination_start
+            .checked_add(elements)
+            .context("destination copy range overflow")?;
+        ensure!(
+            source_end <= source.storage_capacity(),
+            "source copy range exceeds tensor storage"
+        );
+        ensure!(
+            destination_end <= destination.storage_capacity(),
+            "destination copy range exceeds tensor storage"
+        );
+        let source = source
+            .storage()
+            .try_slice(source_start..source_end)
+            .context("invalid source copy range")?;
+        let mut destination = destination
+            .storage_mut()
+            .try_slice_mut(destination_start..destination_end)
+            .context("invalid destination copy range")?;
+        self.stream
+            .memcpy_dtod(&source, &mut destination)
+            .context("failed to copy recurrent state on GPU")
+    }
+
     pub(crate) fn pack_rows_bf16(
         &self,
         first: &Tensor<bf16>,
