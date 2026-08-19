@@ -14,6 +14,10 @@ pub fn short_conv_lfm2_bf16(
     weight: &Tensor<bf16>,
     state: &mut Tensor<bf16>,
 ) -> Result<Tensor<bf16>> {
+    ensure!(
+        projected.rank() == 2,
+        "short convolution projection must have rank 2"
+    );
     let num_tokens = projected.dims()[0];
     let hidden_size = projected.dims()[1] / 3;
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, hidden_size]))?;
@@ -28,8 +32,14 @@ pub(crate) fn short_conv_lfm2_bf16_into(
     state: &mut Tensor<bf16>,
     output: &mut Tensor<bf16>,
 ) -> Result<()> {
-    ensure!(projected.rank() == 2, "short convolution projection must have rank 2");
-    ensure!(weight.rank() == 3, "short convolution weight must have rank 3");
+    ensure!(
+        projected.rank() == 2,
+        "short convolution projection must have rank 2"
+    );
+    ensure!(
+        weight.rank() == 3,
+        "short convolution weight must have rank 3"
+    );
     let num_tokens = projected.dims()[0];
     let projected_width = projected.dims()[1];
     ensure!(
@@ -72,7 +82,10 @@ pub fn short_conv_ragged_lfm2_bf16(
     states: &mut Tensor<bf16>,
     request_slots: &Tensor<u32>,
 ) -> Result<Tensor<bf16>> {
-    ensure!(projected.rank() == 2, "ragged convolution projection must have rank 2");
+    ensure!(
+        projected.rank() == 2,
+        "ragged convolution projection must have rank 2"
+    );
     ensure!(states.rank() == 3, "ragged convolution states must have rank 3");
     let num_tokens = projected.dims()[0];
     let hidden_size = projected.dims()[1] / 3;
@@ -108,6 +121,10 @@ pub fn short_conv_segmented_lfm2_bf16(
     segment_offsets: &Tensor<u32>,
     segment_slots: &Tensor<u32>,
 ) -> Result<Tensor<bf16>> {
+    ensure!(
+        projected.rank() == 2 && states.rank() == 3,
+        "invalid segmented convolution rank"
+    );
     let num_tokens = projected.dims()[0];
     let hidden_size = projected.dims()[1] / 3;
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, hidden_size]))?;
@@ -229,12 +246,14 @@ mod tests {
         )?;
         let mut states = runtime.zeros::<bf16>(Shape::new([2, 2, 2]))?;
         let slots = runtime.upload(&[0u32, 1], Shape::new([2]))?;
-        let output = short_conv_ragged_lfm2_bf16(&runtime, &projected, &weights, &mut states, &slots)?;
+        let output =
+            short_conv_ragged_lfm2_bf16(&runtime, &projected, &weights, &mut states, &slots)?;
         let actual = readback(&runtime, &output)?;
         let expected = [8.0, 15.0, 182.0, 561.0].map(bf16::from_f32);
         assert_close_bf16(&actual, &expected, 0.0, 0.0);
         let state = readback(&runtime, &states)?;
-        let expected_state = [0.0, 8.0, 0.0, 15.0, 0.0, 91.0, 0.0, 187.0].map(bf16::from_f32);
+        let expected_state = [0.0, 8.0, 0.0, 15.0, 0.0, 91.0, 0.0, 187.0]
+            .map(bf16::from_f32);
         assert_close_bf16(&state, &expected_state, 0.0, 0.0);
         Ok(())
     }
