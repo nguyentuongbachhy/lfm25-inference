@@ -22,6 +22,7 @@ impl Engine {
                 .is_some_and(|required| required <= config.maximum_batch_tokens),
             "maximum batch tokens cannot cover decode slots plus prefill chunk"
         );
+        crate::tensor::enter_buffer_pool_owner_mode();
         radix_owner::run_owner_radix(self, config, receiver, ready)
     }
 }
