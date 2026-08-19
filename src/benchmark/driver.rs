@@ -60,7 +60,7 @@ pub fn run_serving_load_benchmark(
             let _ = result_sender.send(result);
         })
         .context("failed to spawn serving load driver")?;
-    let owner = engine.run_continuous_owner(config, receiver, ready_sender)?;
+    let owner = engine.run_continuous_owner_radix(config, receiver, ready_sender)?;
     let scenarios = result_receiver
         .recv()
         .context("load driver stopped without a report")??;
@@ -69,7 +69,7 @@ pub fn run_serving_load_benchmark(
         .map_err(|_| anyhow::anyhow!("serving load driver panicked"))?;
     Ok(ServingLoadBenchmarkReport {
         schema_version: 1,
-        design: "continuous_decode_first_edf_dynamic_chunked_prefill",
+        design: "hybrid_paged_radix_decode_first_edf_chunked_prefill",
         gpu_name,
         page_size,
         scenarios,
@@ -83,7 +83,15 @@ async fn run_scenarios(
 ) -> Result<Vec<ServingScenarioReport>> {
     let mut reports = Vec::new();
     let mut request_id = 1u64;
-    for workload in standard_workload_matrix() {
+    let workloads = standard_workload_matrix();
+    let total_scenarios = workloads.len() + 3;
+    let mut scenario = 0usize;
+    for workload in workloads {
+        scenario += 1;
+        eprintln!(
+            "[{scenario}/{total_scenarios}] radix load prompt={} completion={} concurrency={}",
+            workload.prompt_tokens, workload.completion_tokens, workload.concurrency
+        );
         let request_count = workload.concurrency.max(20);
         let prompts = vec![workload.prompt_tokens; request_count];
         reports.push(
@@ -91,6 +99,8 @@ async fn run_scenarios(
         );
     }
     for concurrency in [16usize, 64] {
+        scenario += 1;
+        eprintln!("[{scenario}/{total_scenarios}] radix load mixed concurrency={concurrency}");
         let request_count = concurrency.max(20);
         let prompts = (0..request_count)
             .map(|index| if index % 5 == 4 { 2048 } else { 32 })
@@ -110,6 +120,8 @@ async fn run_scenarios(
             .await?,
         );
     }
+    scenario += 1;
+    eprintln!("[{scenario}/{total_scenarios}] radix load mixed poisson=20rps");
     let poisson_prompts = (0..64)
         .map(|index| if index % 5 == 4 { 2048 } else { 32 })
         .collect::<Vec<_>>();
