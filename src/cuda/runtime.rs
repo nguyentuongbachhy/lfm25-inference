@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::Arc,
+};
 
 use anyhow::{Context as _, Result, ensure};
 use cudarc::driver::{
@@ -13,6 +17,12 @@ use crate::tensor::{BufferPool, BufferPoolStats, Shape, Tensor};
 
 const BF16_POOL_MAX_AVAILABLE_ELEMENTS: usize = 64 * 1024 * 1024;
 const FP8_POOL_MAX_AVAILABLE_ELEMENTS: usize = 32 * 1024 * 1024;
+const TIMING_EVENT_POOL_LIMIT: usize = 128;
+
+thread_local! {
+    static TIMING_EVENT_POOLS: RefCell<HashMap<usize, Vec<CudaEvent>>> =
+        RefCell::new(HashMap::new());
+}
 
 pub struct CudaRuntime {
     _context: Arc<CudaContext>,
@@ -25,7 +35,32 @@ pub struct CudaRuntime {
 }
 
 pub(crate) struct TimingEvent {
-    event: CudaEvent,
+    event: Option<CudaEvent>,
+    pool_key: usize,
+}
+
+impl TimingEvent {
+    #[inline]
+    fn event(&self) -> &CudaEvent {
+        self.event
+            .as_ref()
+            .expect("timing event storage is unavailable")
+    }
+}
+
+impl Drop for TimingEvent {
+    fn drop(&mut self) {
+        let Some(event) = self.event.take() else {
+            return;
+        };
+        TIMING_EVENT_POOLS.with(|pools| {
+            let mut pools = pools.borrow_mut();
+            let pool = pools.entry(self.pool_key).or_default();
+            if pool.len() < TIMING_EVENT_POOL_LIMIT {
+                pool.push(event);
+            }
+        });
+    }
 }
 
 impl CudaRuntime {
@@ -321,24 +356,37 @@ impl CudaRuntime {
     }
 
     pub(crate) fn record_timing_event(&self) -> Result<TimingEvent> {
-        let event = self
-            ._context
-            .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-            .context("failed to create CUDA timing event")?;
+        let pool_key = Arc::as_ptr(&self._context) as usize;
+        let event = TIMING_EVENT_POOLS.with(|pools| {
+            pools
+                .borrow_mut()
+                .get_mut(&pool_key)
+                .and_then(Vec::pop)
+        });
+        let event = match event {
+            Some(event) => event,
+            None => self
+                ._context
+                .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                .context("failed to create CUDA timing event")?,
+        };
         event
             .record(&self.stream)
             .context("failed to record CUDA timing event")?;
-        Ok(TimingEvent { event })
+        Ok(TimingEvent {
+            event: Some(event),
+            pool_key,
+        })
     }
 
     pub(crate) fn elapsed_ms(&self, start: &TimingEvent, end: &TimingEvent) -> Result<f64> {
-        end.event
+        end.event()
             .synchronize()
             .context("failed to synchronize CUDA timing event")?;
         Ok(f64::from(
             start
-                .event
-                .elapsed_ms(&end.event)
+                .event()
+                .elapsed_ms(end.event())
                 .context("failed to measure CUDA event interval")?,
         ))
     }
