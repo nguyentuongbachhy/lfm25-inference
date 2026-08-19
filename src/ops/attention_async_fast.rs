@@ -22,6 +22,10 @@ pub(crate) fn paged_attention_fast_lfm2_bf16(
     cache: &PagedKvCache,
     position_ids: &Tensor<u32>,
 ) -> Result<Tensor<bf16>> {
+    ensure!(
+        query.rank() == 3 && query.dims()[1..] == [32, 64],
+        "fast LFM2 query must have shape [N,32,64]"
+    );
     let num_tokens = query.dims()[0];
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
     paged_attention_fast_lfm2_bf16_into(runtime, query, cache, position_ids, &mut output)?;
@@ -68,6 +72,10 @@ pub(crate) fn paged_ragged_attention_fast_lfm2_bf16(
     runtime: &CudaRuntime,
     input: FastRaggedAttentionInput<'_>,
 ) -> Result<Tensor<bf16>> {
+    ensure!(
+        input.query.rank() == 3 && input.query.dims()[1..] == [32, 64],
+        "fast ragged LFM2 query must have shape [N,32,64]"
+    );
     let num_tokens = input.query.dims()[0];
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
     paged_ragged_attention_fast_lfm2_bf16_into(runtime, input, &mut output)?;
@@ -97,8 +105,14 @@ pub(crate) fn paged_ragged_attention_fast_lfm2_bf16_into(
         "fast block table stride/shape mismatch"
     );
     let num_tokens = query.dims()[0];
-    ensure!(request_slots.numel() == num_tokens, "fast ragged request slot count mismatch");
-    ensure!(position_ids.numel() == num_tokens, "fast ragged position count mismatch");
+    ensure!(
+        request_slots.numel() == num_tokens,
+        "fast ragged request slot count mismatch"
+    );
+    ensure!(
+        position_ids.numel() == num_tokens,
+        "fast ragged position count mismatch"
+    );
     output.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
 
     unsafe {
