@@ -3,6 +3,7 @@ mod kernels;
 mod launch;
 mod module;
 mod runtime;
+mod sampling_io;
 
 #[cfg(test)]
 mod tests;
