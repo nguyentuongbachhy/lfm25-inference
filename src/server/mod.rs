@@ -53,7 +53,7 @@ pub fn serve(engine: Engine, address: &str, cost_model: HardwareCostModel) -> Re
         })
         .context("failed to spawn async frontend")?;
     engine
-        .run_continuous_owner(config, receiver, ready_sender)
+        .run_continuous_owner_radix(config, receiver, ready_sender)
         .map(|_| ())
 }
 
