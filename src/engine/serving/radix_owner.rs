@@ -207,7 +207,7 @@ pub(super) fn run_owner_radix(
         let fp8_pool_started = engine.runtime.fp8_pool_stats();
         let gpu_started = engine.runtime.record_timing_event()?;
         let submit_started = Instant::now();
-        let logits = engine.model.forward_ragged_batch(
+        let logits = engine.model.forward_ragged_batch_packed_qkv(
             &engine.runtime,
             &mut cache,
             RaggedBatchInput {
