@@ -72,6 +72,9 @@ impl BatchModelCache {
             );
             table[..physical_pages.len()].copy_from_slice(physical_pages);
         }
+        // From this point onward the normal `release()` path can roll back all
+        // request references if a metadata or recurrent-state copy fails.
+        self.allocated_tokens[request_slot] = prefix_tokens;
         self.gpu_batch.update_block_table_range(
             runtime,
             request_slot,
@@ -92,7 +95,6 @@ impl BatchModelCache {
                 convolution_index += 1;
             }
         }
-        self.allocated_tokens[request_slot] = prefix_tokens;
         Ok(())
     }
 
