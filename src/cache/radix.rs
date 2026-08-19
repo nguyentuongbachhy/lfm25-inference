@@ -89,17 +89,42 @@ impl PageRadixCache {
     /// Finds the deepest prefix that has both immutable KV pages and a matching
     /// convolution-state checkpoint. `maximum_tokens` should leave at least one
     /// uncached prompt token so the normal forward path still produces logits.
+    /// This is the admission lookup and therefore updates hit/miss statistics.
     pub fn longest_checkpoint(
         &mut self,
         tokens: &[u32],
         maximum_tokens: usize,
         physical_pages: &mut Vec<u32>,
     ) -> Option<PrefixMatch> {
+        self.lookup_checkpoint(tokens, maximum_tokens, physical_pages, true)
+    }
+
+    /// Same lookup used for in-flight coalescing, but it does not alter
+    /// admission hit/miss counters. Access timestamps are still updated so a
+    /// future eviction policy observes real cache use.
+    pub fn probe_checkpoint(
+        &mut self,
+        tokens: &[u32],
+        maximum_tokens: usize,
+        physical_pages: &mut Vec<u32>,
+    ) -> Option<PrefixMatch> {
+        self.lookup_checkpoint(tokens, maximum_tokens, physical_pages, false)
+    }
+
+    fn lookup_checkpoint(
+        &mut self,
+        tokens: &[u32],
+        maximum_tokens: usize,
+        physical_pages: &mut Vec<u32>,
+        record_stats: bool,
+    ) -> Option<PrefixMatch> {
         physical_pages.clear();
         let usable_tokens = tokens.len().min(maximum_tokens);
         let page_count = usable_tokens / self.page_size;
         if page_count == 0 {
-            self.misses = self.misses.saturating_add(1);
+            if record_stats {
+                self.misses = self.misses.saturating_add(1);
+            }
             return None;
         }
 
@@ -134,14 +159,18 @@ impl PageRadixCache {
 
         if let Some(hit) = best {
             physical_pages.truncate(best_pages);
-            self.hits = self.hits.saturating_add(1);
-            self.matched_tokens = self
-                .matched_tokens
-                .saturating_add(u64::try_from(hit.token_len).unwrap_or(u64::MAX));
+            if record_stats {
+                self.hits = self.hits.saturating_add(1);
+                self.matched_tokens = self
+                    .matched_tokens
+                    .saturating_add(u64::try_from(hit.token_len).unwrap_or(u64::MAX));
+            }
             Some(hit)
         } else {
             physical_pages.clear();
-            self.misses = self.misses.saturating_add(1);
+            if record_stats {
+                self.misses = self.misses.saturating_add(1);
+            }
             None
         }
     }
@@ -293,6 +322,19 @@ mod tests {
         assert_eq!(hit.token_len, 64);
         assert_eq!(hit.checkpoint_slot, 8);
         assert_eq!(pages, [4, 5, 6, 7]);
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_probe_does_not_change_admission_statistics() -> Result<()> {
+        let mut cache = PageRadixCache::new(KvPageSize::P16, 16)?;
+        let input = tokens(2);
+        cache.insert_checkpoint(&input, 32, &[1, 2], 3)?;
+        let mut pages = Vec::new();
+        assert!(cache.probe_checkpoint(&input, 32, &mut pages).is_some());
+        assert_eq!(cache.snapshot().hits, 0);
+        assert_eq!(cache.snapshot().misses, 0);
+        assert_eq!(cache.snapshot().matched_tokens, 0);
         Ok(())
     }
 
