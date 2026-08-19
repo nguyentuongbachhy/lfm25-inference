@@ -64,6 +64,9 @@ pub(super) fn run_owner_radix(
         .pinned_u32(config.maximum_request_slots + 1)?;
 
     warm_serving_path(&engine, &config, &mut cache)?;
+    let mut decode_executor = engine
+        .model
+        .new_decode_executor(&engine.runtime, config.maximum_request_slots)?;
 
     let prefix_page_budget = (config.physical_kv_pages / RADIX_KV_BUDGET_DIVISOR).max(1);
     let mut radix = PageRadixCache::new(engine.config.kv_page_size, prefix_page_budget)?;
@@ -215,23 +218,34 @@ pub(super) fn run_owner_radix(
         let fp8_pool_started = engine.runtime.fp8_pool_stats();
         let gpu_started = engine.runtime.record_timing_event()?;
         let submit_started = Instant::now();
-        let logits = engine.model.forward_ragged_batch(
+        let input = RaggedBatchInput {
+            token_ids: &token_ids,
+            positions: &positions,
+            request_slots: &request_slots,
+            segment_offsets: &segment_offsets,
+            segment_slots: &segment_slots,
+            output_rows: &output_rows,
+        };
+        let fallback_sampled;
+        let sampled = match engine.model.try_forward_ragged_decode(
             &engine.runtime,
             &mut cache,
-            RaggedBatchInput {
-                token_ids: &token_ids,
-                positions: &positions,
-                request_slots: &request_slots,
-                segment_offsets: &segment_offsets,
-                segment_slots: &segment_slots,
-                output_rows: &output_rows,
-            },
-        )?;
-        let sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
+            &mut decode_executor,
+            &input,
+        )? {
+            Some(sampled) => sampled,
+            None => {
+                let logits = engine
+                    .model
+                    .forward_ragged_batch(&engine.runtime, &mut cache, input)?;
+                fallback_sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
+                &fallback_sampled
+            }
+        };
         let gpu_finished = engine.runtime.record_timing_event()?;
         let submit_cpu_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
 
-        enqueue_sampled_download(&engine, &sampled, &mut sampled_host)?;
+        enqueue_sampled_download(&engine, sampled, &mut sampled_host)?;
         let copy_finished = engine.runtime.record_timing_event()?;
         // Synchronizing the copy-complete event waits for both model execution
         // and the following D2H copy. The GPU-complete event is therefore ready
