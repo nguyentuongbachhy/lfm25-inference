@@ -88,6 +88,7 @@ fn append_i64_bytes(destination: &mut Vec<u8>, values: &[i64]) {
 pub struct GpuBatch {
     maximum_tokens: usize,
     block_table_stride: usize,
+    block_table_elements: usize,
     max_context_tokens: usize,
     token_ids: Tensor<u32>,
     positions: Tensor<u32>,
@@ -99,6 +100,9 @@ pub struct GpuBatch {
     block_tables: Tensor<u32>,
     metadata_staging: Tensor<u8>,
     metadata_host: Vec<u8>,
+    block_patch_staging: Tensor<u32>,
+    block_patch_host: Vec<u32>,
+    block_patch_lookup: Vec<usize>,
     pending_tokens: usize,
     transfers: TransferCounters,
 }
@@ -122,13 +126,21 @@ impl GpuBatch {
             block_table_stride > 0,
             "block table stride must be positive"
         );
-        request_slots
+        let block_table_elements = request_slots
             .checked_mul(block_table_stride)
             .context("block table capacity overflow")?;
+        ensure!(
+            u32::try_from(block_table_elements.saturating_sub(1)).is_ok(),
+            "block table flat indices exceed u32"
+        );
+        let block_patch_words = block_table_elements
+            .checked_mul(2)
+            .context("block-table patch staging overflow")?;
         let metadata_capacity = packed_metadata_bytes(maximum_tokens, request_slots)?;
         Ok(Self {
             maximum_tokens,
             block_table_stride,
+            block_table_elements,
             max_context_tokens: 0,
             token_ids: runtime.zeros::<u32>(Shape::new([maximum_tokens]))?,
             positions: runtime.zeros::<u32>(Shape::new([maximum_tokens]))?,
@@ -140,6 +152,9 @@ impl GpuBatch {
             block_tables: runtime.zeros::<u32>(Shape::new([request_slots, block_table_stride]))?,
             metadata_staging: runtime.zeros::<u8>(Shape::new([metadata_capacity]))?,
             metadata_host: Vec::with_capacity(metadata_capacity),
+            block_patch_staging: runtime.zeros::<u32>(Shape::new([block_patch_words]))?,
+            block_patch_host: Vec::with_capacity(block_patch_words),
+            block_patch_lookup: vec![usize::MAX; block_table_elements],
             pending_tokens: 0,
             transfers: TransferCounters::default(),
         })
@@ -221,9 +236,46 @@ impl GpuBatch {
         Ok(())
     }
 
+    fn flush_block_table_patches(&mut self, runtime: &CudaRuntime) -> Result<()> {
+        if self.block_patch_host.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            self.block_patch_host.len().is_multiple_of(2),
+            "block-table patch staging must contain index/value pairs"
+        );
+        let patch_count = self.block_patch_host.len() / 2;
+        ensure!(
+            self.block_patch_host.len() <= self.block_patch_staging.storage_capacity(),
+            "block-table patch batch exceeds device staging capacity"
+        );
+        runtime.upload_prefix(&self.block_patch_host, &mut self.block_patch_staging)?;
+        self.block_patch_staging
+            .set_logical_shape(Shape::new([self.block_patch_host.len()]))?;
+        unsafe {
+            runtime.kernels().metadata().launch_block_table_patches(
+                runtime.stream(),
+                self.block_patch_staging.storage(),
+                self.block_tables.storage_mut(),
+                patch_count,
+            )?;
+        }
+        self.transfers.h2d_bytes = self
+            .transfers
+            .h2d_bytes
+            .saturating_add(std::mem::size_of_val(self.block_patch_host.as_slice()) as u64);
+        self.transfers.h2d_calls = self.transfers.h2d_calls.saturating_add(1);
+
+        for patch in self.block_patch_host.chunks_exact(2) {
+            self.block_patch_lookup[patch[0] as usize] = usize::MAX;
+        }
+        self.block_patch_host.clear();
+        Ok(())
+    }
+
     pub fn update_step(
         &mut self,
-        _runtime: &CudaRuntime,
+        runtime: &CudaRuntime,
         token_ids: &[u32],
         positions: &[u32],
         request_slots: &[u32],
@@ -240,7 +292,14 @@ impl GpuBatch {
             physical_slots.len() == tokens,
             "physical slot count mismatch"
         );
-        ensure!(self.pending_tokens == 0, "previous GPU batch metadata was not committed");
+        ensure!(
+            self.pending_tokens == 0,
+            "previous GPU batch metadata was not committed"
+        );
+
+        // All page-table writes queued since the preceding model step are
+        // committed as one transfer before this step's kernels consume them.
+        self.flush_block_table_patches(runtime)?;
 
         let max_position = positions
             .iter()
@@ -265,7 +324,7 @@ impl GpuBatch {
 
     pub fn update_block_table_range(
         &mut self,
-        runtime: &CudaRuntime,
+        _runtime: &CudaRuntime,
         request_slot: usize,
         logical_page_start: usize,
         entries: &[u32],
@@ -280,12 +339,25 @@ impl GpuBatch {
         let start = row_start
             .checked_add(logical_page_start)
             .context("block table update offset overflow")?;
-        runtime.upload_range(entries, &mut self.block_tables, start)?;
-        self.transfers.h2d_bytes = self
-            .transfers
-            .h2d_bytes
-            .saturating_add(std::mem::size_of_val(entries) as u64);
-        self.transfers.h2d_calls = self.transfers.h2d_calls.saturating_add(1);
+
+        for (offset, &entry) in entries.iter().enumerate() {
+            let flat_index = start
+                .checked_add(offset)
+                .context("block table patch index overflow")?;
+            ensure!(
+                flat_index < self.block_table_elements,
+                "block table patch index exceeds capacity"
+            );
+            let queued = self.block_patch_lookup[flat_index];
+            if queued == usize::MAX {
+                let patch_index = self.block_patch_host.len() / 2;
+                self.block_patch_lookup[flat_index] = patch_index;
+                self.block_patch_host.push(u32::try_from(flat_index)?);
+                self.block_patch_host.push(entry);
+            } else {
+                self.block_patch_host[queued * 2 + 1] = entry;
+            }
+        }
         Ok(())
     }
 
