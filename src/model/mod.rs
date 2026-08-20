@@ -1,4 +1,5 @@
 mod calibration;
+mod decode_graph_log;
 mod evaluation;
 mod fp8_analysis;
 mod lfm2;
