@@ -390,22 +390,24 @@ impl AsyncAttentionFastKernels {
             .and_then(|value| value.checked_mul(num_splits))
             .context("split-K grid size overflow")?;
         let split_config = Self::launch_config(split_blocks)?;
-        let mut split_args = stream.launch_builder(split_kernel.function());
-        split_args
-            .arg(query)
-            .arg(key_cache)
-            .arg(value_cache)
-            .arg(block_tables)
-            .arg(request_slots)
-            .arg(position_ids)
-            .arg(partials)
-            .arg(&num_tokens)
-            .arg(&num_pages)
-            .arg(&block_table_stride)
-            .arg(&block_table_rows)
-            .arg(&num_splits_u32);
-        unsafe {
-            split_args.launch(split_config)?;
+        {
+            let mut split_args = stream.launch_builder(split_kernel.function());
+            split_args
+                .arg(query)
+                .arg(key_cache)
+                .arg(value_cache)
+                .arg(block_tables)
+                .arg(request_slots)
+                .arg(position_ids)
+                .arg(partials)
+                .arg(&num_tokens)
+                .arg(&num_pages)
+                .arg(&block_table_stride)
+                .arg(&block_table_rows)
+                .arg(&num_splits_u32);
+            unsafe {
+                split_args.launch(split_config)?;
+            }
         }
 
         let merge_blocks = num_tokens
@@ -414,7 +416,7 @@ impl AsyncAttentionFastKernels {
         let merge_config = Self::launch_config(merge_blocks)?;
         let mut merge_args = stream.launch_builder(self.splitk_merge.function());
         merge_args
-            .arg(partials)
+            .arg(&*partials)
             .arg(output)
             .arg(&num_tokens)
             .arg(&num_splits_u32);
