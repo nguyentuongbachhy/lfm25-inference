@@ -18,6 +18,49 @@ pub(crate) struct DecodeExecutor {
     sampled: Tensor<u32>,
 }
 
+fn linear_decode_prequantized_fp8_into(
+    runtime: &CudaRuntime,
+    input: &Tensor<u8>,
+    fp8: &Fp8LinearWeight,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(
+        input.rank() == 2,
+        "persistent prequantized FP8 linear requires rank-2 input, got {:?}",
+        input.dims()
+    );
+    ensure!(
+        fp8.data.rank() == 2,
+        "persistent prequantized FP8 weight must be rank 2"
+    );
+    let m = input.dims()[0];
+    let k = input.dims()[1];
+    let n = fp8.data.dims()[0];
+    ensure!(m > 0 && k > 0 && n > 0, "persistent FP8 linear is empty");
+    ensure!(
+        fp8.data.dims()[1] == k,
+        "persistent prequantized FP8 K mismatch: input K={k}, weight={:?}",
+        fp8.data.dims()
+    );
+    output.set_logical_shape(Shape::new([m, n]))?;
+    unsafe {
+        runtime.blaslt().linear_fp8_scaled(
+            input.storage(),
+            fp8.data.storage(),
+            output.storage_mut(),
+            crate::cuda::Fp8LinearConfig {
+                m,
+                n,
+                k,
+                scale_mode: Fp8ScaleMode::Tensorwide,
+                output_scale: fp8.activation_scale.dequantize_multiplier
+                    * fp8.weight_scale.dequantize_multiplier,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn linear_decode_into(
     runtime: &CudaRuntime,
     input: &Tensor<bf16>,
@@ -62,21 +105,8 @@ fn linear_decode_into(
             input.numel(),
             fp8.activation_scale.quantize_multiplier,
         )?;
-        runtime.blaslt().linear_fp8_scaled(
-            fp8_input.storage(),
-            fp8.data.storage(),
-            output.storage_mut(),
-            crate::cuda::Fp8LinearConfig {
-                m,
-                n,
-                k,
-                scale_mode: Fp8ScaleMode::Tensorwide,
-                output_scale: fp8.activation_scale.dequantize_multiplier
-                    * fp8.weight_scale.dequantize_multiplier,
-            },
-        )?;
     }
-    Ok(())
+    linear_decode_prequantized_fp8_into(runtime, fp8_input, fp8, output)
 }
 
 impl DecodeExecutor {
@@ -312,15 +342,23 @@ impl DecodeExecutor {
                 fp8_input,
                 wide,
             )?;
-            ops::silu_mul_packed_bf16_into(runtime, wide, activated)?;
-            linear_decode_into(
-                runtime,
-                activated,
-                &weights.feed_forward.down,
-                use_fp8,
-                fp8_input,
-                operator_output,
-            )?;
+            if let Some(fp8) = weights.feed_forward.down.fp8.as_ref().filter(|_| use_fp8) {
+                ops::silu_mul_packed_bf16_to_e4m3_into(
+                    runtime,
+                    wide,
+                    fp8_input,
+                    fp8.activation_scale.quantize_multiplier,
+                )?;
+                linear_decode_prequantized_fp8_into(runtime, fp8_input, fp8, operator_output)?;
+            } else {
+                ops::silu_mul_packed_bf16_into(runtime, wide, activated)?;
+                ops::linear_bf16_into(
+                    runtime,
+                    activated,
+                    &weights.feed_forward.down.bf16,
+                    operator_output,
+                )?;
+            }
 
             let next_norm = if layer + 1 < model.config.num_hidden_layers {
                 &model.weights.layers[layer + 1].operator_norm
@@ -355,20 +393,8 @@ impl DecodeExecutor {
                     normalized.numel(),
                     fp8.activation_scale.quantize_multiplier,
                 )?;
-                runtime.blaslt().linear_fp8_scaled(
-                    fp8_input.storage(),
-                    fp8.data.storage(),
-                    logits.storage_mut(),
-                    crate::cuda::Fp8LinearConfig {
-                        m: num_tokens,
-                        n: model.config.vocab_size,
-                        k: model.config.hidden_size,
-                        scale_mode: Fp8ScaleMode::Tensorwide,
-                        output_scale: fp8.activation_scale.dequantize_multiplier
-                            * fp8.weight_scale.dequantize_multiplier,
-                    },
-                )?;
             }
+            linear_decode_prequantized_fp8_into(runtime, fp8_input, fp8, logits)?;
         } else {
             ops::linear_bf16_into(runtime, normalized, &model.weights.embedding, logits)?;
         }
