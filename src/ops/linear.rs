@@ -82,8 +82,11 @@ pub fn linear_bf16(
     weight: &Tensor<bf16>,
 ) -> Result<Tensor<bf16>> {
     ensure!(x.rank() >= 1, "linear input must have rank >= 1");
-    ensure!(weight.rank() == 2, "linear weight must have rank 2, got {:?}", weight.dims());
-    let k = x.dims()[x.rank() - 1];
+    ensure!(
+        weight.rank() == 2,
+        "linear weight must have rank 2, got {:?}",
+        weight.dims()
+    );
     let n = weight.dims()[0];
     let mut output_dims = x.dims().to_vec();
     let last = output_dims.len() - 1;
@@ -146,7 +149,10 @@ pub fn linear_last_row_bf16(
     let rows = x.dims()[0];
     let k = x.dims()[1];
     let n = weight.dims()[0];
-    ensure!(rows > 0 && k > 0 && n > 0, "linear_last_row does not support empty tensors");
+    ensure!(
+        rows > 0 && k > 0 && n > 0,
+        "linear_last_row does not support empty tensors"
+    );
     ensure!(
         weight.dims()[1] == k,
         "linear_last_row dimension mismatch: input K={k}, weight={:?}",
