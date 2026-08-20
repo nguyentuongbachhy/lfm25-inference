@@ -33,6 +33,17 @@ impl CudaRuntime {
         let context = CudaContext::new(device)
             .with_context(|| format!("failed to create CUDA context on device {device}"))?;
 
+        // The runtime owns exactly one CUDA compute stream. cudarc enables
+        // per-allocation read/write events when event tracking is active, which
+        // is useful for cross-stream synchronization but redundant here and
+        // makes stream capture record synchronization nodes. Disable tracking
+        // before creating the stream or any CudaSlice so every allocation is
+        // event-free. Adding a second compute stream requires revisiting this
+        // invariant and adding explicit synchronization.
+        // SAFETY: all runtime GPU work is serialized onto `stream`; repository
+        // code does not create or submit work to another CUDA stream.
+        unsafe { context.disable_event_tracking() };
+
         let stream = context
             .new_stream()
             .context("failed to create CUDA compute stream")?;
