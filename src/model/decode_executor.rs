@@ -152,8 +152,7 @@ impl DecodeExecutor {
         // Do not pay graph instantiation on the first observation of a topology.
         // This keeps the first-token/tail-prefill path direct and only captures
         // shapes that demonstrably recur.
-        if !self.seen_graphs.contains_key(&key) {
-            self.seen_graphs.insert(key, ());
+        if self.seen_graphs.insert(key, ()).is_none() {
             self.direct_steps = self.direct_steps.saturating_add(1);
             return self.forward_prepared(model, runtime, cache);
         }
@@ -174,13 +173,18 @@ impl DecodeExecutor {
             return self.forward_prepared(model, runtime, cache);
         }
 
-        if let Err(error) = self.forward_prepared(model, runtime, cache) {
-            // Best effort termination of an active/invalidated capture before
-            // propagating the real model error.
+        if self.forward_prepared(model, runtime, cache).is_err() {
+            // Capture-specific failures must not take down serving. Terminate the
+            // capture, blacklist this topology, and submit the normal path once.
+            // If the model itself is invalid, that direct retry returns the real
+            // error to the caller.
             let _ = runtime.stream().end_capture(
                 CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD,
             );
-            return Err(error);
+            self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
+            self.failed_graphs.insert(key, ());
+            self.direct_steps = self.direct_steps.saturating_add(1);
+            return self.forward_prepared(model, runtime, cache);
         }
 
         let graph = match runtime.stream().end_capture(
