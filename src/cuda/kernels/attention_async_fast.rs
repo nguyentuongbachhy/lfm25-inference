@@ -399,7 +399,7 @@ impl AsyncAttentionFastKernels {
                 .arg(block_tables)
                 .arg(request_slots)
                 .arg(position_ids)
-                .arg(partials)
+                .arg(&mut *partials)
                 .arg(&num_tokens)
                 .arg(&num_pages)
                 .arg(&block_table_stride)
