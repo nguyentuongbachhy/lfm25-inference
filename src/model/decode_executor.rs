@@ -43,6 +43,7 @@ pub(crate) struct DecodeExecutor {
     logits: Tensor<bf16>,
     sampled: Tensor<u32>,
     graphs: HashMap<DecodeGraphKey, CudaGraph>,
+    seen_graphs: HashMap<DecodeGraphKey, ()>,
     failed_graphs: HashMap<DecodeGraphKey, ()>,
     graph_captures: u64,
     graph_replays: u64,
@@ -72,6 +73,7 @@ impl DecodeExecutor {
             logits: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, config.vocab_size]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
             graphs: HashMap::with_capacity(MAX_DECODE_GRAPHS),
+            seen_graphs: HashMap::with_capacity(MAX_DECODE_GRAPHS),
             failed_graphs: HashMap::new(),
             graph_captures: 0,
             graph_replays: 0,
@@ -131,7 +133,6 @@ impl DecodeExecutor {
         model: &Lfm2Model,
         runtime: &CudaRuntime,
         cache: &mut BatchModelCache,
-        allow_capture: bool,
     ) -> Result<()> {
         let key = self.graph_key(cache);
         let tokens = key.tokens;
@@ -148,22 +149,28 @@ impl DecodeExecutor {
             return Ok(());
         }
 
-        if !allow_capture
-            || self.graphs.len() >= MAX_DECODE_GRAPHS
-            || self.failed_graphs.contains_key(&key)
-        {
+        // Do not pay graph instantiation on the first observation of a topology.
+        // This keeps the first-token/tail-prefill path direct and only captures
+        // shapes that demonstrably recur.
+        if !self.seen_graphs.contains_key(&key) {
+            self.seen_graphs.insert(key, ());
             self.direct_steps = self.direct_steps.saturating_add(1);
             return self.forward_prepared(model, runtime, cache);
         }
 
-        if let Err(error) = runtime
+        if self.graphs.len() >= MAX_DECODE_GRAPHS || self.failed_graphs.contains_key(&key) {
+            self.direct_steps = self.direct_steps.saturating_add(1);
+            return self.forward_prepared(model, runtime, cache);
+        }
+
+        if runtime
             .stream()
             .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+            .is_err()
         {
             self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
             self.failed_graphs.insert(key, ());
             self.direct_steps = self.direct_steps.saturating_add(1);
-            let _ = error;
             return self.forward_prepared(model, runtime, cache);
         }
 
@@ -408,13 +415,12 @@ impl Lfm2Model {
         cache: &mut BatchModelCache,
         executor: &'a mut DecodeExecutor,
         input: &RaggedBatchInput<'_>,
-        allow_graph_capture: bool,
     ) -> Result<Option<&'a Tensor<u32>>> {
         if !executor.eligible(self, input) {
             return Ok(None);
         }
         cache.prepare_ragged(runtime, input)?;
-        executor.forward_prepared_graph(self, runtime, cache, allow_graph_capture)?;
+        executor.forward_prepared_graph(self, runtime, cache)?;
         Ok(Some(&executor.sampled))
     }
 }
