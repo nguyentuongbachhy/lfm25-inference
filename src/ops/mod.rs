@@ -2,6 +2,8 @@ mod attention;
 mod attention_async_fast;
 #[cfg(test)]
 mod attention_async_fast_tests;
+#[cfg(test)]
+mod attention_splitk_tests;
 mod attention_fused;
 #[cfg(test)]
 mod attention_regression_tests;
@@ -30,6 +32,8 @@ pub(crate) use attention_async_fast::{
     FastRaggedAttentionInput, paged_attention_fast_lfm2_bf16,
     paged_attention_fast_lfm2_bf16_into, paged_ragged_attention_fast_lfm2_bf16,
     paged_ragged_attention_fast_lfm2_bf16_into,
+    paged_ragged_attention_splitk_lfm2_bf16_into, splitk_decode_splits,
+    splitk_workspace_elements,
 };
 pub(crate) use attention_fused::{
     FusedAttentionInput, FusedPagedAttentionInput, FusedRaggedAttentionInput,
