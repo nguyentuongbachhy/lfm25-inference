@@ -28,10 +28,10 @@ fn bench_splitk_decode_sweep_paired() -> Result<()> {
             &vec![bf16::from_f32(0.01); batch * 32 * 64],
             Shape::new([batch, 32, 64]),
         )?;
-        let request_slots = runtime.upload(
-            &(0..batch).map(u32::try_from).collect::<Result<Vec<_>, _>>()?,
-            Shape::new([batch]),
-        )?;
+        let request_slots_host = (0..batch)
+            .map(u32::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let request_slots = runtime.upload(&request_slots_host, Shape::new([batch]))?;
 
         for context in [512usize, 1024, 2048, 4096, 8192] {
             let pages_per_request = context.div_ceil(page_size.value());
