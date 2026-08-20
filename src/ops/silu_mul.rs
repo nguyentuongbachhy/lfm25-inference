@@ -117,6 +117,40 @@ mod tests {
         x / (1.0 + (-x).exp())
     }
 
+    fn assert_fused_fp8_matches_unfused(
+        runtime: &CudaRuntime,
+        packed_host: &[f32],
+        rows: usize,
+        packed_width: usize,
+        scale: f32,
+    ) -> Result<()> {
+        assert_eq!(packed_host.len(), rows * packed_width);
+        let packed_host = packed_host
+            .iter()
+            .copied()
+            .map(bf16::from_f32)
+            .collect::<Vec<_>>();
+        let packed = runtime.upload(&packed_host, Shape::new([rows, packed_width]))?;
+        let activated = silu_mul_packed_bf16(runtime, &packed)?;
+
+        let mut reference = runtime.alloc_fp8(activated.shape().clone())?;
+        unsafe {
+            runtime.kernels().fp8_quantize().launch_bf16_e4m3(
+                runtime.stream(),
+                activated.storage(),
+                reference.storage_mut(),
+                activated.numel(),
+                scale,
+            )?;
+        }
+
+        let mut fused = runtime.alloc_fp8(activated.shape().clone())?;
+        silu_mul_packed_bf16_to_e4m3_into(runtime, &packed, &mut fused, scale)?;
+
+        assert_eq!(runtime.download(&fused)?, runtime.download(&reference)?);
+        Ok(())
+    }
+
     #[test]
     fn packed_silu_mul_handles_multiple_rows() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
@@ -142,34 +176,29 @@ mod tests {
     #[test]
     fn fused_silu_mul_fp8_matches_unfused_pipeline_byte_for_byte() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
-        // Cover two rows, negative/positive values and an odd intermediate width
-        // so both vectorized and scalar-tail semantics remain protected.
-        let packed_host = [
-            -4.0, -1.5, 0.25, 1.0, 2.5, 6.0,
-            0.5, -2.0, 3.0, -0.75, 1.25, 4.0,
-        ]
-        .map(bf16::from_f32);
-        let packed = runtime.upload(&packed_host, Shape::new([2, 6]))?;
         let scale = 9.75f32;
 
-        let activated = silu_mul_packed_bf16(&runtime, &packed)?;
-        let mut reference = runtime.alloc_fp8(activated.shape().clone())?;
-        unsafe {
-            runtime.kernels().fp8_quantize().launch_bf16_e4m3(
-                runtime.stream(),
-                activated.storage(),
-                reference.storage_mut(),
-                activated.numel(),
-                scale,
-            )?;
-        }
+        // intermediate_size=4 exercises the vectorized bfloat162/uchar2 path
+        // used by the real LFM2 MLP dimensions.
+        assert_fused_fp8_matches_unfused(
+            &runtime,
+            &[
+                -4.0, -1.5, 0.25, 1.0, 2.5, 6.0, -0.75, 1.25,
+                0.5, -2.0, 3.0, -0.75, 1.25, 4.0, -1.0, 2.0,
+            ],
+            2,
+            8,
+            scale,
+        )?;
 
-        let mut fused = runtime.alloc_fp8(activated.shape().clone())?;
-        silu_mul_packed_bf16_to_e4m3_into(&runtime, &packed, &mut fused, scale)?;
-
-        let reference_host = runtime.download(&reference)?;
-        let fused_host = runtime.download(&fused)?;
-        assert_eq!(fused_host, reference_host);
+        // intermediate_size=3 protects the scalar fallback for odd widths.
+        assert_fused_fp8_matches_unfused(
+            &runtime,
+            &[-4.0, -1.5, 0.25, 1.0, 2.5, 6.0, 0.5, -2.0, 3.0, -0.75, 1.25, 4.0],
+            2,
+            6,
+            scale,
+        )?;
         Ok(())
     }
 }
