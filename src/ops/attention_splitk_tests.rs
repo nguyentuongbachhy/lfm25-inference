@@ -10,9 +10,12 @@ use crate::{
     tensor::Shape,
 };
 
-use super::attention_async_fast::{
-    FastRaggedAttentionInput, paged_ragged_attention_fast_lfm2_bf16_into,
-    paged_ragged_attention_splitk_lfm2_bf16_into, splitk_workspace_elements,
+use super::{
+    attention::paged_ragged_attention_lfm2_bf16,
+    attention_async_fast::{
+        FastRaggedAttentionInput, paged_ragged_attention_splitk_lfm2_bf16_into,
+        splitk_workspace_elements,
+    },
 };
 
 fn compare_splitk_to_reference(page_size: KvPageSize) -> Result<()> {
@@ -76,7 +79,20 @@ fn compare_splitk_to_reference(page_size: KvPageSize) -> Result<()> {
         Shape::new([2]),
     )?;
 
-    let make_input = || FastRaggedAttentionInput {
+    // Use the independent reference paged-attention kernel here rather than the
+    // optimized async-fast kernel. This prevents a shared fast-path bug from
+    // making the split-K regression test pass accidentally.
+    let reference = paged_ragged_attention_lfm2_bf16(
+        &runtime,
+        &query,
+        &arena,
+        &block_tables,
+        block_table_stride,
+        &request_slots,
+        &positions,
+    )?;
+
+    let input = FastRaggedAttentionInput {
         query: &query,
         arena: &arena,
         block_tables: &block_tables,
@@ -84,15 +100,11 @@ fn compare_splitk_to_reference(page_size: KvPageSize) -> Result<()> {
         request_slots: &request_slots,
         position_ids: &positions,
     };
-
-    let mut reference = runtime.alloc_bf16(Shape::new([2, 32, 64]))?;
-    paged_ragged_attention_fast_lfm2_bf16_into(&runtime, make_input(), &mut reference)?;
-
     let mut partials = runtime.alloc_uninit::<f32>(Shape::new([splitk_workspace_elements(2)?]))?;
     let mut candidate = runtime.alloc_bf16(Shape::new([2, 32, 64]))?;
     paged_ragged_attention_splitk_lfm2_bf16_into(
         &runtime,
-        make_input(),
+        input,
         &mut partials,
         8,
         &mut candidate,
