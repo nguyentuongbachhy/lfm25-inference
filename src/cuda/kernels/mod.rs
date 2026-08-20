@@ -24,7 +24,7 @@ use attention::AttentionKernels;
 pub(crate) use attention::RaggedAttentionLaunch;
 pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
 use attention_async_fast::AsyncAttentionFastKernels;
-pub(crate) use attention_async_fast::FastRaggedAttentionLaunch;
+pub(crate) use attention_async_fast::{FastRaggedAttentionLaunch, SplitKRaggedAttentionLaunch};
 use attention_fused::FusedAttentionKernels;
 pub(crate) use attention_fused::{
     FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch,
