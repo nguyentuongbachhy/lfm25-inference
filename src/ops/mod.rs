@@ -56,4 +56,4 @@ pub(crate) use sampling::argmax_rows_bf16_into;
 pub use short_conv::{short_conv_lfm2_bf16, short_conv_segmented_lfm2_bf16};
 pub(crate) use short_conv::{short_conv_lfm2_bf16_into, short_conv_segmented_lfm2_bf16_into};
 pub use silu_mul::silu_mul_packed_bf16;
-pub(crate) use silu_mul::silu_mul_packed_bf16_into;
+pub(crate) use silu_mul::{silu_mul_packed_bf16_into, silu_mul_packed_bf16_to_e4m3_into};
