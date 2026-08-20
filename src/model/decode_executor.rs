@@ -2,6 +2,7 @@
 /// topology. All transformer layers reuse the same buffers sequentially; no
 /// workspace is allocated per layer or per decode step. Selective FP8 sites
 /// reuse one E4M3 activation scratch buffer across every linear projection.
+/// Long-context low-batch attention reuses one bounded FP32 split-K workspace.
 pub(crate) struct DecodeExecutor {
     maximum_tokens: usize,
     hidden: Tensor<bf16>,
@@ -15,7 +16,20 @@ pub(crate) struct DecodeExecutor {
     activated: Tensor<bf16>,
     logits: Tensor<bf16>,
     fp8_input: Tensor<u8>,
+    attention_splitk_partials: Tensor<f32>,
     sampled: Tensor<u32>,
+    splitk_attention_enabled: bool,
+}
+
+fn splitk_attention_enabled_from_env() -> bool {
+    std::env::var("LFM25_SPLITK_ATTENTION")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(true)
 }
 
 fn linear_decode_prequantized_fp8_into(
@@ -117,6 +131,7 @@ impl DecodeExecutor {
         let kv_width = config.num_key_value_heads * config.head_dim();
         let wide_width = (intermediate * 2).max(hidden * 3);
         let fp8_input_width = intermediate.max(hidden);
+        let splitk_workspace = ops::splitk_workspace_elements(maximum_tokens)?;
 
         Ok(Self {
             maximum_tokens,
@@ -131,7 +146,11 @@ impl DecodeExecutor {
             activated: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, intermediate]))?,
             logits: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, config.vocab_size]))?,
             fp8_input: runtime.alloc_fp8(Shape::new([maximum_tokens, fp8_input_width]))?,
+            attention_splitk_partials: runtime.alloc_uninit::<f32>(Shape::new([
+                splitk_workspace,
+            ]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
+            splitk_attention_enabled: splitk_attention_enabled_from_env(),
         })
     }
 
@@ -177,6 +196,7 @@ impl DecodeExecutor {
             "decode executor token count exceeds workspace"
         );
         let use_fp8 = model.decode_fp8_enabled;
+        let splitk_attention_enabled = self.splitk_attention_enabled;
 
         let Self {
             hidden,
@@ -190,6 +210,7 @@ impl DecodeExecutor {
             activated,
             logits,
             fp8_input,
+            attention_splitk_partials,
             sampled,
             ..
         } = self;
@@ -297,18 +318,38 @@ impl DecodeExecutor {
                             },
                             arena,
                         )?;
-                        ops::paged_ragged_attention_fast_lfm2_bf16_into(
-                            runtime,
-                            ops::FastRaggedAttentionInput {
-                                query,
-                                arena,
-                                block_tables: metadata.block_tables(),
-                                block_table_stride: metadata.block_table_stride(),
-                                request_slots: metadata.request_slots(),
-                                position_ids: metadata.positions(),
-                            },
-                            post_operator,
-                        )?;
+                        let input = ops::FastRaggedAttentionInput {
+                            query,
+                            arena,
+                            block_tables: metadata.block_tables(),
+                            block_table_stride: metadata.block_table_stride(),
+                            request_slots: metadata.request_slots(),
+                            position_ids: metadata.positions(),
+                        };
+                        let splits = if splitk_attention_enabled {
+                            ops::splitk_decode_splits(
+                                num_tokens,
+                                metadata.max_context_tokens(),
+                                arena.page_size().value(),
+                            )
+                        } else {
+                            1
+                        };
+                        if splits > 1 {
+                            ops::paged_ragged_attention_splitk_lfm2_bf16_into(
+                                runtime,
+                                input,
+                                attention_splitk_partials,
+                                splits,
+                                post_operator,
+                            )?;
+                        } else {
+                            ops::paged_ragged_attention_fast_lfm2_bf16_into(
+                                runtime,
+                                input,
+                                post_operator,
+                            )?;
+                        }
                     }
                     post_operator
                         .set_logical_shape(Shape::new([num_tokens, model.config.hidden_size]))?;
