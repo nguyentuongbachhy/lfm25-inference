@@ -13,6 +13,7 @@ const VECTOR_WIDTH: usize = 2;
 
 pub(crate) struct SiluMulKernels {
     silu_mul_packed_bf16: KernelLaunch,
+    silu_mul_packed_bf16_to_e4m3: KernelLaunch,
 }
 
 impl KernelSet for SiluMulKernels {
@@ -20,9 +21,19 @@ impl KernelSet for SiluMulKernels {
     const PTX: &'static str = include_str!(concat!(env!("OUT_DIR"), "/silu_mul.ptx"));
 
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
-        let function = load_function(&module, Self::MODULE_NAME, "silu_mul_packed_bf16")?;
+        let silu_mul_packed_bf16 =
+            load_function(&module, Self::MODULE_NAME, "silu_mul_packed_bf16")?;
+        let silu_mul_packed_bf16_to_e4m3 = load_function(
+            &module,
+            Self::MODULE_NAME,
+            "silu_mul_packed_bf16_to_e4m3",
+        )?;
         Ok(Self {
-            silu_mul_packed_bf16: KernelLaunch::new(function, MAX_BLOCK_SIZE)?,
+            silu_mul_packed_bf16: KernelLaunch::new(silu_mul_packed_bf16, MAX_BLOCK_SIZE)?,
+            silu_mul_packed_bf16_to_e4m3: KernelLaunch::new(
+                silu_mul_packed_bf16_to_e4m3,
+                MAX_BLOCK_SIZE,
+            )?,
         })
     }
 }
@@ -61,6 +72,54 @@ impl SiluMulKernels {
             .for_work_items(work_items)?;
         let mut args = stream.launch_builder(self.silu_mul_packed_bf16.function());
         args.arg(packed).arg(out).arg(&rows).arg(&intermediate_size);
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_packed_bf16_to_e4m3(
+        &self,
+        stream: &CudaStream,
+        packed: &CudaSlice<bf16>,
+        out: &mut CudaSlice<u8>,
+        rows: usize,
+        intermediate_size: usize,
+        scale: f32,
+    ) -> Result<()> {
+        ensure!(
+            rows > 0 && intermediate_size > 0,
+            "packed silu_mul FP8 fusion requires non-empty dimensions"
+        );
+        ensure!(
+            scale.is_finite() && scale > 0.0,
+            "packed silu_mul FP8 fusion requires a finite positive scale"
+        );
+        let output_elements = rows
+            .checked_mul(intermediate_size)
+            .ok_or_else(|| anyhow::anyhow!("packed silu_mul FP8 output size overflow"))?;
+        let packed_elements = output_elements
+            .checked_mul(2)
+            .ok_or_else(|| anyhow::anyhow!("packed silu_mul FP8 input size overflow"))?;
+        ensure!(
+            packed.len() >= packed_elements,
+            "packed silu_mul FP8 input storage too small"
+        );
+        ensure!(
+            out.len() >= output_elements,
+            "packed silu_mul FP8 output storage too small"
+        );
+        let work_items = output_elements.div_ceil(VECTOR_WIDTH).max(1);
+        let config = self
+            .silu_mul_packed_bf16_to_e4m3
+            .policy()
+            .for_work_items(work_items)?;
+        let mut args = stream.launch_builder(self.silu_mul_packed_bf16_to_e4m3.function());
+        args.arg(packed)
+            .arg(out)
+            .arg(&rows)
+            .arg(&intermediate_size)
+            .arg(&scale);
         unsafe {
             args.launch(config)?;
         }
