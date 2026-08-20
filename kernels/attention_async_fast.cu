@@ -9,6 +9,7 @@ constexpr uint32_t LFM2_NUM_Q_HEADS = 32U;
 constexpr uint32_t LFM2_NUM_KV_HEADS = 8U;
 constexpr uint32_t LFM2_HEAD_DIM = 64U;
 constexpr uint32_t LFM2_Q_PER_KV = 4U;
+constexpr uint32_t LFM2_SPLITK_PARTIAL_STRIDE = LFM2_HEAD_DIM + 2U;
 constexpr float LFM2_ATTN_SCALE = 0.125f;
 
 __device__ __forceinline__ void cp_async_16(void* dst, const void* src) {
@@ -179,9 +180,6 @@ __device__ __forceinline__ void paged_gqa_lfm2_bf16_async_fast_body(
 
                 dot = __shfl_sync(0xffffffffU, dot, 0) * LFM2_ATTN_SCALE;
                 const float next_maximum = fmaxf(maximum, dot);
-                // Preserve the branch-free online-softmax update, but use the
-                // CUDA fast exponential intrinsic. This isolates SFU latency
-                // from the control-flow regression seen in the one-exp variant.
                 const float old_scale = __expf(maximum - next_maximum);
                 const float new_scale = __expf(dot - next_maximum);
                 const float value0 = __bfloat162float(value_stage[stage][index0]);
@@ -204,6 +202,220 @@ __device__ __forceinline__ void paged_gqa_lfm2_bf16_async_fast_body(
         output[query_base + dim0] = __float2bfloat16_rn(accumulator0 / denominator);
         output[query_base + dim1] = __float2bfloat16_rn(accumulator1 / denominator);
     }
+}
+
+// Flash-Decoding style KV-axis decomposition. Each CTA handles one
+// (token, KV-head, split) tuple and writes online-softmax state rather than a
+// normalized output. A second kernel merges those states using the exact
+// log-sum-exp identity. Empty splits are represented by (-inf, 0, 0...).
+template <int PAGE_SIZE>
+__device__ __forceinline__ void paged_ragged_gqa_lfm2_bf16_splitk_body(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ value_cache,
+    const uint32_t* __restrict__ block_tables,
+    const uint32_t* __restrict__ request_slots,
+    const uint32_t* __restrict__ position_ids,
+    float* __restrict__ partials,
+    size_t num_tokens,
+    size_t num_pages,
+    size_t block_table_stride,
+    size_t block_table_rows,
+    uint32_t num_splits
+) {
+    const size_t split = blockIdx.x % num_splits;
+    const size_t item = blockIdx.x / num_splits;
+    const size_t token = item / LFM2_NUM_KV_HEADS;
+    const uint32_t kv_head = item % LFM2_NUM_KV_HEADS;
+    if (token >= num_tokens || block_table_stride == 0 || num_splits <= 1U) {
+        return;
+    }
+
+    const size_t table_row = static_cast<size_t>(request_slots[token]);
+    if (table_row >= block_table_rows) {
+        return;
+    }
+    const uint32_t* __restrict__ block_table =
+        block_tables + table_row * block_table_stride;
+    const uint32_t position = position_ids[token];
+    if (static_cast<size_t>(position) >= block_table_stride * PAGE_SIZE) {
+        return;
+    }
+
+    const size_t total_pages = static_cast<size_t>(position) / PAGE_SIZE + 1U;
+    const size_t first_page = total_pages * split / num_splits;
+    const size_t end_page = total_pages * (split + 1U) / num_splits;
+
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t warp = threadIdx.x >> 5;
+    const bool active = warp < LFM2_Q_PER_KV;
+    const uint32_t q_head = kv_head * LFM2_Q_PER_KV + warp;
+    const size_t partial_base =
+        ((token * LFM2_NUM_Q_HEADS + q_head) * num_splits + split)
+        * LFM2_SPLITK_PARTIAL_STRIDE;
+
+    if (first_page >= end_page) {
+        if (active) {
+            if (lane == 0U) {
+                partials[partial_base] = -INFINITY;
+                partials[partial_base + 1U] = 0.0f;
+            }
+            partials[partial_base + 2U + lane] = 0.0f;
+            partials[partial_base + 2U + lane + 32U] = 0.0f;
+        }
+        return;
+    }
+
+    const size_t first_physical_page = static_cast<size_t>(block_table[first_page]);
+    if (first_physical_page >= num_pages) {
+        return;
+    }
+
+    __shared__ __align__(16) __nv_bfloat16 key_stage[2][PAGE_SIZE * LFM2_HEAD_DIM];
+    __shared__ __align__(16) __nv_bfloat16 value_stage[2][PAGE_SIZE * LFM2_HEAD_DIM];
+    stage_page_async<PAGE_SIZE>(
+        key_cache,
+        value_cache,
+        first_physical_page,
+        kv_head,
+        key_stage[0],
+        value_stage[0]
+    );
+    cp_async_wait_all();
+    __syncthreads();
+
+    const size_t query_base =
+        (token * LFM2_NUM_Q_HEADS + q_head) * LFM2_HEAD_DIM;
+    const size_t dim0 = lane;
+    const size_t dim1 = lane + 32U;
+    const float q0 = active ? __bfloat162float(query[query_base + dim0]) : 0.0f;
+    const float q1 = active ? __bfloat162float(query[query_base + dim1]) : 0.0f;
+    float maximum = -INFINITY;
+    float denominator = 0.0f;
+    float accumulator0 = 0.0f;
+    float accumulator1 = 0.0f;
+
+    for (size_t page = first_page; page < end_page; ++page) {
+        const uint32_t stage = static_cast<uint32_t>((page - first_page) & 1U);
+        const bool has_next = page + 1U < end_page;
+        if (has_next) {
+            const size_t next_physical_page = static_cast<size_t>(block_table[page + 1U]);
+            if (next_physical_page >= num_pages) {
+                return;
+            }
+            stage_page_async<PAGE_SIZE>(
+                key_cache,
+                value_cache,
+                next_physical_page,
+                kv_head,
+                key_stage[stage ^ 1U],
+                value_stage[stage ^ 1U]
+            );
+        }
+
+        if (active) {
+            const size_t page_start = page * PAGE_SIZE;
+            const size_t remaining = static_cast<size_t>(position) + 1U - page_start;
+            const size_t page_tokens = remaining < PAGE_SIZE ? remaining : PAGE_SIZE;
+            for (size_t key_offset = 0; key_offset < page_tokens; ++key_offset) {
+                const size_t key_base = key_offset * LFM2_HEAD_DIM;
+                const size_t index0 = key_base + dim0;
+                const size_t index1 = key_base + dim1;
+                float dot =
+                    q0 * __bfloat162float(key_stage[stage][index0])
+                    + q1 * __bfloat162float(key_stage[stage][index1]);
+                #pragma unroll
+                for (uint32_t delta = 16U; delta > 0U; delta >>= 1U) {
+                    dot += __shfl_down_sync(0xffffffffU, dot, delta);
+                }
+                dot = __shfl_sync(0xffffffffU, dot, 0) * LFM2_ATTN_SCALE;
+                const float next_maximum = fmaxf(maximum, dot);
+                const float old_scale = __expf(maximum - next_maximum);
+                const float new_scale = __expf(dot - next_maximum);
+                accumulator0 = accumulator0 * old_scale
+                    + __bfloat162float(value_stage[stage][index0]) * new_scale;
+                accumulator1 = accumulator1 * old_scale
+                    + __bfloat162float(value_stage[stage][index1]) * new_scale;
+                denominator = denominator * old_scale + new_scale;
+                maximum = next_maximum;
+            }
+        }
+
+        if (has_next) {
+            cp_async_wait_all();
+            __syncthreads();
+        }
+    }
+
+    if (active) {
+        if (lane == 0U) {
+            partials[partial_base] = maximum;
+            partials[partial_base + 1U] = denominator;
+        }
+        partials[partial_base + 2U + dim0] = accumulator0;
+        partials[partial_base + 2U + dim1] = accumulator1;
+    }
+}
+
+extern "C" __global__
+__launch_bounds__(ATTENTION_ASYNC_FAST_BLOCK_SIZE)
+void merge_ragged_gqa_lfm2_bf16_splitk(
+    const float* __restrict__ partials,
+    __nv_bfloat16* __restrict__ output,
+    size_t num_tokens,
+    uint32_t num_splits
+) {
+    const size_t token = blockIdx.x / LFM2_NUM_KV_HEADS;
+    const uint32_t kv_head = blockIdx.x % LFM2_NUM_KV_HEADS;
+    if (token >= num_tokens || num_splits <= 1U) {
+        return;
+    }
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t warp = threadIdx.x >> 5;
+    if (warp >= LFM2_Q_PER_KV) {
+        return;
+    }
+    const uint32_t q_head = kv_head * LFM2_Q_PER_KV + warp;
+    const size_t dim0 = lane;
+    const size_t dim1 = lane + 32U;
+
+    float maximum = -INFINITY;
+    if (lane == 0U) {
+        for (uint32_t split = 0; split < num_splits; ++split) {
+            const size_t base =
+                ((token * LFM2_NUM_Q_HEADS + q_head) * num_splits + split)
+                * LFM2_SPLITK_PARTIAL_STRIDE;
+            maximum = fmaxf(maximum, partials[base]);
+        }
+    }
+    maximum = __shfl_sync(0xffffffffU, maximum, 0);
+
+    float denominator = 0.0f;
+    float accumulator0 = 0.0f;
+    float accumulator1 = 0.0f;
+    for (uint32_t split = 0; split < num_splits; ++split) {
+        const size_t base =
+            ((token * LFM2_NUM_Q_HEADS + q_head) * num_splits + split)
+            * LFM2_SPLITK_PARTIAL_STRIDE;
+        float partial_maximum = lane == 0U ? partials[base] : 0.0f;
+        float partial_denominator = lane == 0U ? partials[base + 1U] : 0.0f;
+        partial_maximum = __shfl_sync(0xffffffffU, partial_maximum, 0);
+        partial_denominator = __shfl_sync(0xffffffffU, partial_denominator, 0);
+        const float scale = partial_denominator == 0.0f
+            ? 0.0f
+            : __expf(partial_maximum - maximum);
+        if (lane == 0U) {
+            denominator += partial_denominator * scale;
+        }
+        accumulator0 += partials[base + 2U + dim0] * scale;
+        accumulator1 += partials[base + 2U + dim1] * scale;
+    }
+    denominator = __shfl_sync(0xffffffffU, denominator, 0);
+
+    const size_t output_base =
+        (token * LFM2_NUM_Q_HEADS + q_head) * LFM2_HEAD_DIM;
+    output[output_base + dim0] = __float2bfloat16_rn(accumulator0 / denominator);
+    output[output_base + dim1] = __float2bfloat16_rn(accumulator1 / denominator);
 }
 
 extern "C" __global__
@@ -283,5 +495,51 @@ void paged_ragged_gqa_lfm2_bf16_async_fast_ps32(
     paged_gqa_lfm2_bf16_async_fast_body<32, true>(
         query, key_cache, value_cache, block_tables, request_slots, position_ids,
         output, num_tokens, num_pages, block_table_stride, block_table_rows
+    );
+}
+
+extern "C" __global__
+__launch_bounds__(ATTENTION_ASYNC_FAST_BLOCK_SIZE)
+void paged_ragged_gqa_lfm2_bf16_splitk_ps16(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ value_cache,
+    const uint32_t* __restrict__ block_tables,
+    const uint32_t* __restrict__ request_slots,
+    const uint32_t* __restrict__ position_ids,
+    float* __restrict__ partials,
+    size_t num_tokens,
+    size_t num_pages,
+    size_t block_table_stride,
+    size_t block_table_rows,
+    uint32_t num_splits
+) {
+    paged_ragged_gqa_lfm2_bf16_splitk_body<16>(
+        query, key_cache, value_cache, block_tables, request_slots, position_ids,
+        partials, num_tokens, num_pages, block_table_stride, block_table_rows,
+        num_splits
+    );
+}
+
+extern "C" __global__
+__launch_bounds__(ATTENTION_ASYNC_FAST_BLOCK_SIZE)
+void paged_ragged_gqa_lfm2_bf16_splitk_ps32(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_bfloat16* __restrict__ key_cache,
+    const __nv_bfloat16* __restrict__ value_cache,
+    const uint32_t* __restrict__ block_tables,
+    const uint32_t* __restrict__ request_slots,
+    const uint32_t* __restrict__ position_ids,
+    float* __restrict__ partials,
+    size_t num_tokens,
+    size_t num_pages,
+    size_t block_table_stride,
+    size_t block_table_rows,
+    uint32_t num_splits
+) {
+    paged_ragged_gqa_lfm2_bf16_splitk_body<32>(
+        query, key_cache, value_cache, block_tables, request_slots, position_ids,
+        partials, num_tokens, num_pages, block_table_stride, block_table_rows,
+        num_splits
     );
 }
