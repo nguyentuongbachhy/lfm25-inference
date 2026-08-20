@@ -30,15 +30,13 @@ pub use attention::prefill_attention_lfm2_bf16;
 pub(crate) use attention::{HybridRaggedAttentionInput, hybrid_ragged_attention_lfm2_bf16};
 pub(crate) use attention_async_fast::{
     FastRaggedAttentionInput, paged_attention_fast_lfm2_bf16,
-    paged_attention_fast_lfm2_bf16_into, paged_ragged_attention_fast_lfm2_bf16,
-    paged_ragged_attention_fast_lfm2_bf16_into,
+    paged_ragged_attention_fast_lfm2_bf16, paged_ragged_attention_fast_lfm2_bf16_into,
     paged_ragged_attention_splitk_lfm2_bf16_into, splitk_decode_splits,
     splitk_workspace_elements,
 };
 pub(crate) use attention_fused::{
     FusedAttentionInput, FusedPagedAttentionInput, FusedRaggedAttentionInput,
-    fused_paged_attention_decode_lfm2_bf16, fused_paged_attention_decode_lfm2_bf16_into,
-    fused_ragged_paged_attention_decode_lfm2_bf16,
+    fused_paged_attention_decode_lfm2_bf16, fused_ragged_paged_attention_decode_lfm2_bf16,
     fused_ragged_paged_attention_decode_lfm2_bf16_into,
 };
 pub use embedding::embedding_bf16;
@@ -58,6 +56,6 @@ pub use rope::rope_qk_bf16_inplace;
 pub use sampling::{argmax_bf16, argmax_rows_bf16};
 pub(crate) use sampling::argmax_rows_bf16_into;
 pub use short_conv::{short_conv_lfm2_bf16, short_conv_segmented_lfm2_bf16};
-pub(crate) use short_conv::{short_conv_lfm2_bf16_into, short_conv_segmented_lfm2_bf16_into};
+pub(crate) use short_conv::short_conv_segmented_lfm2_bf16_into;
 pub use silu_mul::silu_mul_packed_bf16;
 pub(crate) use silu_mul::{silu_mul_packed_bf16_into, silu_mul_packed_bf16_to_e4m3_into};
