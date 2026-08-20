@@ -20,8 +20,8 @@ use super::{
 
 fn compare_splitk_to_reference(page_size: KvPageSize) -> Result<()> {
     let runtime = CudaRuntime::new(0)?;
-    // Different lengths intentionally exercise independent block-table rows and
-    // empty split ranges for the shorter request when num_splits=8.
+    // Different lengths intentionally exercise independent block-table rows.
+    // With 8 splits, the shorter request also exercises empty split ranges.
     let lengths = [257usize, 65usize];
     let pages = lengths.map(|length| length.div_ceil(page_size.value()));
     let block_table_stride = *pages.iter().max().context("missing page count")?;
@@ -91,31 +91,33 @@ fn compare_splitk_to_reference(page_size: KvPageSize) -> Result<()> {
         &request_slots,
         &positions,
     )?;
+    let reference_host = readback(&runtime, &reference)?;
 
-    let input = FastRaggedAttentionInput {
-        query: &query,
-        arena: &arena,
-        block_tables: &block_tables,
-        block_table_stride,
-        request_slots: &request_slots,
-        position_ids: &positions,
-    };
     let mut partials = runtime.alloc_uninit::<f32>(Shape::new([splitk_workspace_elements(2)?]))?;
     let mut candidate = runtime.alloc_bf16(Shape::new([2, 32, 64]))?;
-    paged_ragged_attention_splitk_lfm2_bf16_into(
-        &runtime,
-        input,
-        &mut partials,
-        8,
-        &mut candidate,
-    )?;
-
-    assert_close_bf16(
-        &readback(&runtime, &candidate)?,
-        &readback(&runtime, &reference)?,
-        0.04,
-        0.03,
-    );
+    for splits in [2usize, 4, 8] {
+        let input = FastRaggedAttentionInput {
+            query: &query,
+            arena: &arena,
+            block_tables: &block_tables,
+            block_table_stride,
+            request_slots: &request_slots,
+            position_ids: &positions,
+        };
+        paged_ragged_attention_splitk_lfm2_bf16_into(
+            &runtime,
+            input,
+            &mut partials,
+            splits,
+            &mut candidate,
+        )?;
+        assert_close_bf16(
+            &readback(&runtime, &candidate)?,
+            &reference_host,
+            0.04,
+            0.03,
+        );
+    }
     Ok(())
 }
 
