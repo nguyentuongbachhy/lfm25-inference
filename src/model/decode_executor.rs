@@ -1,3 +1,31 @@
+use cudarc::driver::{
+    CudaGraph,
+    sys::{CUgraphInstantiate_flags, CUstreamCaptureMode},
+};
+
+const MAX_DECODE_GRAPHS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum DecodeGraphPath {
+    OneKernel,
+    TwoKernel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DecodeGraphKey {
+    tokens: usize,
+    path: DecodeGraphPath,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DecodeGraphStats {
+    pub(crate) entries: usize,
+    pub(crate) captures: u64,
+    pub(crate) replays: u64,
+    pub(crate) capture_failures: u64,
+    pub(crate) direct_steps: u64,
+}
+
 /// Persistent fixed-address scratch for the BF16 single-token-per-segment
 /// serving topology. All transformer layers reuse the same buffers
 /// sequentially; no workspace is allocated per layer or per decode step.
@@ -14,6 +42,12 @@ pub(crate) struct DecodeExecutor {
     activated: Tensor<bf16>,
     logits: Tensor<bf16>,
     sampled: Tensor<u32>,
+    graphs: HashMap<DecodeGraphKey, CudaGraph>,
+    failed_graphs: HashMap<DecodeGraphKey, ()>,
+    graph_captures: u64,
+    graph_replays: u64,
+    graph_capture_failures: u64,
+    direct_steps: u64,
 }
 
 impl DecodeExecutor {
@@ -37,6 +71,12 @@ impl DecodeExecutor {
             activated: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, intermediate]))?,
             logits: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, config.vocab_size]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
+            graphs: HashMap::with_capacity(MAX_DECODE_GRAPHS),
+            failed_graphs: HashMap::new(),
+            graph_captures: 0,
+            graph_replays: 0,
+            graph_capture_failures: 0,
+            direct_steps: 0,
         })
     }
 
@@ -66,6 +106,98 @@ impl DecodeExecutor {
                 .iter()
                 .enumerate()
                 .all(|(index, &row)| usize::try_from(row).ok() == Some(index))
+    }
+
+    #[inline]
+    fn graph_key(&self, cache: &BatchModelCache) -> DecodeGraphKey {
+        let tokens = cache.gpu_batch.token_ids().numel();
+        let one_kernel = ops::should_use_mok_one_kernel(
+            cache.page_size.value(),
+            cache.gpu_batch.max_context_tokens(),
+            tokens,
+        );
+        DecodeGraphKey {
+            tokens,
+            path: if one_kernel {
+                DecodeGraphPath::OneKernel
+            } else {
+                DecodeGraphPath::TwoKernel
+            },
+        }
+    }
+
+    fn forward_prepared_graph(
+        &mut self,
+        model: &Lfm2Model,
+        runtime: &CudaRuntime,
+        cache: &mut BatchModelCache,
+        allow_capture: bool,
+    ) -> Result<()> {
+        let key = self.graph_key(cache);
+        let tokens = key.tokens;
+
+        // Graph replay executes only GPU nodes. Keep the host-side logical shape
+        // in sync so the following D2H copies exactly the active sampled rows.
+        self.sampled.set_logical_shape(Shape::new([tokens]))?;
+
+        if let Some(graph) = self.graphs.get(&key) {
+            graph
+                .launch()
+                .context("failed to launch cached decode CUDA graph")?;
+            self.graph_replays = self.graph_replays.saturating_add(1);
+            return Ok(());
+        }
+
+        if !allow_capture
+            || self.graphs.len() >= MAX_DECODE_GRAPHS
+            || self.failed_graphs.contains_key(&key)
+        {
+            self.direct_steps = self.direct_steps.saturating_add(1);
+            return self.forward_prepared(model, runtime, cache);
+        }
+
+        if let Err(error) = runtime
+            .stream()
+            .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+        {
+            self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
+            self.failed_graphs.insert(key, ());
+            self.direct_steps = self.direct_steps.saturating_add(1);
+            let _ = error;
+            return self.forward_prepared(model, runtime, cache);
+        }
+
+        if let Err(error) = self.forward_prepared(model, runtime, cache) {
+            // Best effort termination of an active/invalidated capture before
+            // propagating the real model error.
+            let _ = runtime.stream().end_capture(
+                CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD,
+            );
+            return Err(error);
+        }
+
+        let graph = match runtime.stream().end_capture(
+            CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD,
+        ) {
+            Ok(Some(graph)) => graph,
+            Ok(None) | Err(_) => {
+                self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
+                self.failed_graphs.insert(key, ());
+                self.direct_steps = self.direct_steps.saturating_add(1);
+                // Work submitted while capturing did not execute. Re-submit the
+                // normal executor path so this serving step still completes.
+                return self.forward_prepared(model, runtime, cache);
+            }
+        };
+
+        // Captured operations have not executed yet. Launch once for the current
+        // step, then retain the executable graph for subsequent matching steps.
+        graph
+            .launch()
+            .context("failed to launch newly captured decode CUDA graph")?;
+        self.graph_captures = self.graph_captures.saturating_add(1);
+        self.graphs.insert(key, graph);
+        Ok(())
     }
 
     fn forward_prepared(
@@ -249,6 +381,16 @@ impl DecodeExecutor {
         ops::linear_bf16_into(runtime, normalized, &model.weights.embedding, logits)?;
         ops::argmax_rows_bf16_into(runtime, logits, sampled)
     }
+
+    pub(crate) fn graph_stats(&self) -> DecodeGraphStats {
+        DecodeGraphStats {
+            entries: self.graphs.len(),
+            captures: self.graph_captures,
+            replays: self.graph_replays,
+            capture_failures: self.graph_capture_failures,
+            direct_steps: self.direct_steps,
+        }
+    }
 }
 
 impl Lfm2Model {
@@ -266,12 +408,13 @@ impl Lfm2Model {
         cache: &mut BatchModelCache,
         executor: &'a mut DecodeExecutor,
         input: &RaggedBatchInput<'_>,
+        allow_graph_capture: bool,
     ) -> Result<Option<&'a Tensor<u32>>> {
         if !executor.eligible(self, input) {
             return Ok(None);
         }
         cache.prepare_ragged(runtime, input)?;
-        executor.forward_prepared(self, runtime, cache)?;
+        executor.forward_prepared_graph(self, runtime, cache, allow_graph_capture)?;
         Ok(Some(&executor.sampled))
     }
 }
