@@ -25,6 +25,7 @@ mod rope;
 mod sampling;
 mod short_conv;
 mod silu_mul;
+mod splitk_policy;
 
 #[cfg(test)]
 pub(crate) use attention::paged_attention_lfm2_bf16_sync;
@@ -33,8 +34,7 @@ pub(crate) use attention::{HybridRaggedAttentionInput, hybrid_ragged_attention_l
 pub(crate) use attention_async_fast::{
     FastRaggedAttentionInput, paged_attention_fast_lfm2_bf16,
     paged_ragged_attention_fast_lfm2_bf16, paged_ragged_attention_fast_lfm2_bf16_into,
-    paged_ragged_attention_splitk_lfm2_bf16_into, splitk_decode_splits,
-    splitk_workspace_elements,
+    paged_ragged_attention_splitk_lfm2_bf16_into, splitk_workspace_elements,
 };
 pub(crate) use attention_fused::{
     FusedAttentionInput, FusedPagedAttentionInput, FusedRaggedAttentionInput,
@@ -61,3 +61,4 @@ pub use short_conv::{short_conv_lfm2_bf16, short_conv_segmented_lfm2_bf16};
 pub(crate) use short_conv::short_conv_segmented_lfm2_bf16_into;
 pub use silu_mul::silu_mul_packed_bf16;
 pub(crate) use silu_mul::{silu_mul_packed_bf16_into, silu_mul_packed_bf16_to_e4m3_into};
+pub(crate) use splitk_policy::splitk_decode_splits;
