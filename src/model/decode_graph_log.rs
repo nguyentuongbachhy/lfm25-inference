@@ -4,7 +4,8 @@ impl Drop for DecodeExecutor {
     fn drop(&mut self) {
         let stats = self.graph_stats();
         eprintln!(
-            "decode graphs: entries={} captures={} replays={} capture_failures={} direct_steps={}",
+            "decode graphs: enabled={} entries={} captures={} replays={} capture_failures={} direct_steps={}",
+            self.graphs_enabled(),
             stats.entries,
             stats.captures,
             stats.replays,

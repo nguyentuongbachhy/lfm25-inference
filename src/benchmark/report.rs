@@ -5,6 +5,8 @@ pub struct RequestObservation {
     pub ttft_ms: f64,
     pub tpot_ms: f64,
     pub queue_delay_ms: f64,
+    pub decode_gpu_ms: f64,
+    pub decode_submit_cpu_ms: f64,
     pub prompt_tokens: usize,
     pub output_tokens: usize,
     pub accepted: bool,
@@ -23,6 +25,12 @@ pub struct ServingSummary {
     pub tpot_p99_ms: Option<f64>,
     pub queue_delay_p50_ms: Option<f64>,
     pub queue_delay_p95_ms: Option<f64>,
+    pub decode_gpu_ms_per_token_mean: Option<f64>,
+    pub decode_gpu_ms_per_token_p50: Option<f64>,
+    pub decode_gpu_ms_per_token_p95: Option<f64>,
+    pub decode_submit_cpu_ms_per_token_mean: Option<f64>,
+    pub decode_submit_cpu_ms_per_token_p50: Option<f64>,
+    pub decode_submit_cpu_ms_per_token_p95: Option<f64>,
     pub wall_seconds: f64,
     pub accepted_requests_per_second: f64,
     pub prompt_tokens_per_second: f64,
@@ -55,9 +63,28 @@ impl ServingSummary {
             .filter(|item| item.accepted)
             .map(|item| item.queue_delay_ms)
             .collect();
+        let mut decode_gpu_ms_per_token = Vec::new();
+        let mut decode_submit_cpu_ms_per_token = Vec::new();
+        for item in observations.iter().filter(|item| item.accepted) {
+            let decode_tokens = item.output_tokens.saturating_sub(1);
+            if decode_tokens == 0 {
+                continue;
+            }
+            let decode_tokens = decode_tokens as f64;
+            let gpu = item.decode_gpu_ms / decode_tokens;
+            let submit = item.decode_submit_cpu_ms / decode_tokens;
+            if gpu.is_finite() {
+                decode_gpu_ms_per_token.push(gpu);
+            }
+            if submit.is_finite() {
+                decode_submit_cpu_ms_per_token.push(submit);
+            }
+        }
         ttft.sort_unstable_by(f64::total_cmp);
         tpot.sort_unstable_by(f64::total_cmp);
         queue_delay.sort_unstable_by(f64::total_cmp);
+        decode_gpu_ms_per_token.sort_unstable_by(f64::total_cmp);
+        decode_submit_cpu_ms_per_token.sort_unstable_by(f64::total_cmp);
         let accepted_requests = ttft.len();
         let slo_requests = observations
             .iter()
@@ -94,6 +121,18 @@ impl ServingSummary {
             tpot_p99_ms: percentile(&tpot, 0.99),
             queue_delay_p50_ms: percentile(&queue_delay, 0.50),
             queue_delay_p95_ms: percentile(&queue_delay, 0.95),
+            decode_gpu_ms_per_token_mean: mean(&decode_gpu_ms_per_token),
+            decode_gpu_ms_per_token_p50: percentile(&decode_gpu_ms_per_token, 0.50),
+            decode_gpu_ms_per_token_p95: percentile(&decode_gpu_ms_per_token, 0.95),
+            decode_submit_cpu_ms_per_token_mean: mean(&decode_submit_cpu_ms_per_token),
+            decode_submit_cpu_ms_per_token_p50: percentile(
+                &decode_submit_cpu_ms_per_token,
+                0.50,
+            ),
+            decode_submit_cpu_ms_per_token_p95: percentile(
+                &decode_submit_cpu_ms_per_token,
+                0.95,
+            ),
             wall_seconds,
             accepted_requests_per_second: accepted_requests as f64 / wall_seconds,
             prompt_tokens_per_second: prompt_tokens as f64 / wall_seconds,
@@ -102,6 +141,14 @@ impl ServingSummary {
             goodput_tokens,
             goodput_tokens_per_second: goodput_tokens as f64 / wall_seconds,
         }
+    }
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
     }
 }
 
@@ -116,6 +163,7 @@ fn percentile(sorted: &[f64], quantile: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn goodput_excludes_slo_violations_and_rejections() {
         let result = ServingSummary::from_observations(
@@ -124,6 +172,8 @@ mod tests {
                     ttft_ms: 10.0,
                     tpot_ms: 8.0,
                     queue_delay_ms: 1.0,
+                    decode_gpu_ms: 90.0,
+                    decode_submit_cpu_ms: 9.0,
                     prompt_tokens: 4,
                     output_tokens: 10,
                     accepted: true,
@@ -132,6 +182,8 @@ mod tests {
                     ttft_ms: 500.0,
                     tpot_ms: 8.0,
                     queue_delay_ms: 2.0,
+                    decode_gpu_ms: 180.0,
+                    decode_submit_cpu_ms: 18.0,
                     prompt_tokens: 4,
                     output_tokens: 10,
                     accepted: true,
@@ -140,6 +192,8 @@ mod tests {
                     ttft_ms: 0.0,
                     tpot_ms: 0.0,
                     queue_delay_ms: 0.0,
+                    decode_gpu_ms: 0.0,
+                    decode_submit_cpu_ms: 0.0,
                     prompt_tokens: 0,
                     output_tokens: 0,
                     accepted: false,
@@ -151,5 +205,7 @@ mod tests {
         );
         assert_eq!(result.goodput_tokens, 10);
         assert_eq!(result.slo_requests, 1);
+        assert_eq!(result.decode_gpu_ms_per_token_mean, Some(15.0));
+        assert_eq!(result.decode_submit_cpu_ms_per_token_mean, Some(1.5));
     }
 }

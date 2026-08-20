@@ -7,6 +7,17 @@ const MAX_DECODE_GRAPHS: usize = 32;
 const DECODE_GRAPH_INSTANTIATE_FLAGS: CUgraphInstantiate_flags =
     CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY;
 
+fn decode_cuda_graphs_enabled_from_env() -> bool {
+    std::env::var("LFM25_CUDA_GRAPHS")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(true)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum DecodeGraphPath {
     OneKernel,
@@ -44,6 +55,7 @@ pub(crate) struct DecodeExecutor {
     activated: Tensor<bf16>,
     logits: Tensor<bf16>,
     sampled: Tensor<u32>,
+    graphs_enabled: bool,
     graphs: HashMap<DecodeGraphKey, CudaGraph>,
     seen_graphs: HashMap<DecodeGraphKey, ()>,
     failed_graphs: HashMap<DecodeGraphKey, ()>,
@@ -60,6 +72,7 @@ impl DecodeExecutor {
         let intermediate = config.effective_intermediate_size();
         let kv_width = config.num_key_value_heads * config.head_dim();
         let wide_width = (intermediate * 2).max(hidden * 3);
+        let graphs_enabled = decode_cuda_graphs_enabled_from_env();
 
         Ok(Self {
             maximum_tokens,
@@ -74,6 +87,7 @@ impl DecodeExecutor {
             activated: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, intermediate]))?,
             logits: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, config.vocab_size]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
+            graphs_enabled,
             graphs: HashMap::with_capacity(MAX_DECODE_GRAPHS),
             seen_graphs: HashMap::with_capacity(MAX_DECODE_GRAPHS),
             failed_graphs: HashMap::new(),
@@ -136,13 +150,18 @@ impl DecodeExecutor {
         runtime: &CudaRuntime,
         cache: &mut BatchModelCache,
     ) -> Result<()> {
-        let key = self.graph_key(cache);
-        let tokens = key.tokens;
+        let tokens = cache.gpu_batch.token_ids().numel();
 
         // Graph replay executes only GPU nodes. Keep the host-side logical shape
         // in sync so the following D2H copies exactly the active sampled rows.
         self.sampled.set_logical_shape(Shape::new([tokens]))?;
 
+        if !self.graphs_enabled {
+            self.direct_steps = self.direct_steps.saturating_add(1);
+            return self.forward_prepared(model, runtime, cache);
+        }
+
+        let key = self.graph_key(cache);
         if let Some(graph) = self.graphs.get(&key) {
             graph
                 .launch()
@@ -417,6 +436,10 @@ impl DecodeExecutor {
         // the gather stage used by ragged prefill is unnecessary here.
         ops::linear_bf16_into(runtime, normalized, &model.weights.embedding, logits)?;
         ops::argmax_rows_bf16_into(runtime, logits, sampled)
+    }
+
+    pub(crate) fn graphs_enabled(&self) -> bool {
+        self.graphs_enabled
     }
 
     pub(crate) fn graph_stats(&self) -> DecodeGraphStats {
