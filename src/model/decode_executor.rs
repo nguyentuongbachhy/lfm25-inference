@@ -4,6 +4,8 @@ use cudarc::driver::{
 };
 
 const MAX_DECODE_GRAPHS: usize = 32;
+const DECODE_GRAPH_INSTANTIATE_FLAGS: CUgraphInstantiate_flags =
+    CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum DecodeGraphPath {
@@ -162,36 +164,54 @@ impl DecodeExecutor {
             return self.forward_prepared(model, runtime, cache);
         }
 
-        if runtime
+        if let Err(error) = runtime
             .stream()
             .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
-            .is_err()
         {
+            eprintln!("decode graph capture failed: key={key:?} stage=begin_capture error={error}");
             self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
             self.failed_graphs.insert(key, ());
             self.direct_steps = self.direct_steps.saturating_add(1);
             return self.forward_prepared(model, runtime, cache);
         }
 
-        if self.forward_prepared(model, runtime, cache).is_err() {
+        if let Err(error) = self.forward_prepared(model, runtime, cache) {
             // Capture-specific failures must not take down serving. Terminate the
             // capture, blacklist this topology, and submit the normal path once.
             // If the model itself is invalid, that direct retry returns the real
             // error to the caller.
-            let _ = runtime.stream().end_capture(
-                CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD,
-            );
+            let end_capture_error = runtime
+                .stream()
+                .end_capture(DECODE_GRAPH_INSTANTIATE_FLAGS)
+                .err();
+            eprintln!("decode graph capture failed: key={key:?} stage=forward error={error}");
+            if let Some(end_error) = end_capture_error {
+                eprintln!(
+                    "decode graph capture cleanup failed: key={key:?} stage=end_capture error={end_error}"
+                );
+            }
             self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
             self.failed_graphs.insert(key, ());
             self.direct_steps = self.direct_steps.saturating_add(1);
             return self.forward_prepared(model, runtime, cache);
         }
 
-        let graph = match runtime.stream().end_capture(
-            CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD,
-        ) {
+        let graph = match runtime
+            .stream()
+            .end_capture(DECODE_GRAPH_INSTANTIATE_FLAGS)
+        {
             Ok(Some(graph)) => graph,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
+                eprintln!("decode graph capture failed: key={key:?} stage=end_capture error=no_graph");
+                self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
+                self.failed_graphs.insert(key, ());
+                self.direct_steps = self.direct_steps.saturating_add(1);
+                // Work submitted while capturing did not execute. Re-submit the
+                // normal executor path so this serving step still completes.
+                return self.forward_prepared(model, runtime, cache);
+            }
+            Err(error) => {
+                eprintln!("decode graph capture failed: key={key:?} stage=end_capture error={error}");
                 self.graph_capture_failures = self.graph_capture_failures.saturating_add(1);
                 self.failed_graphs.insert(key, ());
                 self.direct_steps = self.direct_steps.saturating_add(1);
@@ -200,6 +220,12 @@ impl DecodeExecutor {
                 return self.forward_prepared(model, runtime, cache);
             }
         };
+
+        // `end_capture` uses cuGraphInstantiate, where the UPLOAD instantiate
+        // flag is invalid. Pre-upload explicitly through the graph API instead.
+        if let Err(error) = graph.upload() {
+            eprintln!("decode graph upload failed: key={key:?} error={error}");
+        }
 
         // Captured operations have not executed yet. Launch once for the current
         // step, then retain the executable graph for subsequent matching steps.
