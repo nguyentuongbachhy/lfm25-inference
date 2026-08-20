@@ -3,6 +3,8 @@ mod attention_async_fast;
 #[cfg(test)]
 mod attention_async_fast_tests;
 #[cfg(test)]
+mod attention_splitk_bench_tests;
+#[cfg(test)]
 mod attention_splitk_tests;
 mod attention_fused;
 #[cfg(test)]
@@ -40,7 +42,7 @@ pub(crate) use attention_fused::{
     fused_ragged_paged_attention_decode_lfm2_bf16_into,
 };
 pub use embedding::embedding_bf16;
-pub(crate) use embedding::embedding_bf16_into;
+pub(crate) use embedding_bf16_into;
 pub use gather::gather_rows_bf16;
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{
