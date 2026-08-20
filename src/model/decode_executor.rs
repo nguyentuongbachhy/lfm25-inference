@@ -1,6 +1,7 @@
-/// Persistent fixed-address scratch for the BF16 single-token-per-segment
-/// serving topology. All transformer layers reuse the same buffers
-/// sequentially; no workspace is allocated per layer or per decode step.
+/// Persistent fixed-address scratch for the single-token-per-segment serving
+/// topology. All transformer layers reuse the same buffers sequentially; no
+/// workspace is allocated per layer or per decode step. Selective FP8 sites
+/// reuse one E4M3 activation scratch buffer across every linear projection.
 pub(crate) struct DecodeExecutor {
     maximum_tokens: usize,
     hidden: Tensor<bf16>,
@@ -13,7 +14,69 @@ pub(crate) struct DecodeExecutor {
     wide: Tensor<bf16>,
     activated: Tensor<bf16>,
     logits: Tensor<bf16>,
+    fp8_input: Tensor<u8>,
     sampled: Tensor<u32>,
+}
+
+fn linear_decode_into(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    weight: &LinearWeight,
+    use_fp8: bool,
+    fp8_input: &mut Tensor<u8>,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
+    let Some(fp8) = weight.fp8.as_ref().filter(|_| use_fp8) else {
+        return ops::linear_bf16_into(runtime, input, &weight.bf16, output);
+    };
+
+    ensure!(
+        input.rank() == 2,
+        "persistent FP8 decode linear requires rank-2 input, got {:?}",
+        input.dims()
+    );
+    ensure!(
+        fp8.data.rank() == 2,
+        "persistent FP8 decode weight must be rank 2"
+    );
+    let m = input.dims()[0];
+    let k = input.dims()[1];
+    let n = fp8.data.dims()[0];
+    ensure!(
+        m > 0 && k > 0 && n > 0,
+        "persistent FP8 decode linear is empty"
+    );
+    ensure!(
+        fp8.data.dims()[1] == k,
+        "persistent FP8 decode K mismatch: input K={k}, weight={:?}",
+        fp8.data.dims()
+    );
+
+    fp8_input.set_logical_shape(Shape::new([m, k]))?;
+    output.set_logical_shape(Shape::new([m, n]))?;
+    unsafe {
+        runtime.kernels().fp8_quantize().launch_bf16_e4m3(
+            runtime.stream(),
+            input.storage(),
+            fp8_input.storage_mut(),
+            input.numel(),
+            fp8.activation_scale.quantize_multiplier,
+        )?;
+        runtime.blaslt().linear_fp8_scaled(
+            fp8_input.storage(),
+            fp8.data.storage(),
+            output.storage_mut(),
+            crate::cuda::Fp8LinearConfig {
+                m,
+                n,
+                k,
+                scale_mode: Fp8ScaleMode::Tensorwide,
+                output_scale: fp8.activation_scale.dequantize_multiplier
+                    * fp8.weight_scale.dequantize_multiplier,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 impl DecodeExecutor {
@@ -23,6 +86,7 @@ impl DecodeExecutor {
         let intermediate = config.effective_intermediate_size();
         let kv_width = config.num_key_value_heads * config.head_dim();
         let wide_width = (intermediate * 2).max(hidden * 3);
+        let fp8_input_width = intermediate.max(hidden);
 
         Ok(Self {
             maximum_tokens,
@@ -36,19 +100,18 @@ impl DecodeExecutor {
             wide: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, wide_width]))?,
             activated: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, intermediate]))?,
             logits: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, config.vocab_size]))?,
+            fp8_input: runtime.alloc_fp8(Shape::new([maximum_tokens, fp8_input_width]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
         })
     }
 
     #[inline]
-    fn eligible(&self, model: &Lfm2Model, input: &RaggedBatchInput<'_>) -> bool {
+    fn eligible(&self, input: &RaggedBatchInput<'_>) -> bool {
         let tokens = input.token_ids.len();
         if tokens == 0 || tokens > self.maximum_tokens {
             return false;
         }
-        let use_fp8 = model.decode_fp8_enabled && tokens <= model.maximum_fp8_batch;
-        if use_fp8
-            || input.positions.len() != tokens
+        if input.positions.len() != tokens
             || input.request_slots.len() != tokens
             || input.segment_slots.len() != tokens
             || input.segment_offsets.len() != tokens + 1
@@ -83,6 +146,7 @@ impl DecodeExecutor {
             num_tokens > 0 && num_tokens <= self.maximum_tokens,
             "decode executor token count exceeds workspace"
         );
+        let use_fp8 = model.decode_fp8_enabled;
 
         let Self {
             hidden,
@@ -95,6 +159,7 @@ impl DecodeExecutor {
             wide,
             activated,
             logits,
+            fp8_input,
             sampled,
             ..
         } = self;
@@ -112,7 +177,7 @@ impl DecodeExecutor {
             let weights = &model.weights.layers[layer];
             match (&weights.operator, layer_cache) {
                 (OperatorWeights::Conv(conv), BatchLayerCache::Conv(states)) => {
-                    ops::linear_bf16_into(runtime, normalized, &conv.input.bf16, wide)?;
+                    linear_decode_into(runtime, normalized, &conv.input, use_fp8, fp8_input, wide)?;
                     ops::short_conv_segmented_lfm2_bf16_into(
                         runtime,
                         wide,
@@ -122,19 +187,42 @@ impl DecodeExecutor {
                         metadata.segment_slots(),
                         post_operator,
                     )?;
-                    ops::linear_bf16_into(
+                    linear_decode_into(
                         runtime,
                         post_operator,
-                        &conv.output.bf16,
+                        &conv.output,
+                        use_fp8,
+                        fp8_input,
                         operator_output,
                     )?;
                 }
                 (OperatorWeights::Attention(attention), BatchLayerCache::Attention(arena)) => {
-                    ops::linear_bf16_into(runtime, normalized, &attention.query.bf16, query)?;
+                    linear_decode_into(
+                        runtime,
+                        normalized,
+                        &attention.query,
+                        use_fp8,
+                        fp8_input,
+                        query,
+                    )?;
                     query.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
-                    ops::linear_bf16_into(runtime, normalized, &attention.key.bf16, key)?;
+                    linear_decode_into(
+                        runtime,
+                        normalized,
+                        &attention.key,
+                        use_fp8,
+                        fp8_input,
+                        key,
+                    )?;
                     key.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
-                    ops::linear_bf16_into(runtime, normalized, &attention.value.bf16, value)?;
+                    linear_decode_into(
+                        runtime,
+                        normalized,
+                        &attention.value,
+                        use_fp8,
+                        fp8_input,
+                        value,
+                    )?;
                     value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
 
                     if ops::should_use_mok_one_kernel(
@@ -194,10 +282,12 @@ impl DecodeExecutor {
                     }
                     post_operator
                         .set_logical_shape(Shape::new([num_tokens, model.config.hidden_size]))?;
-                    ops::linear_bf16_into(
+                    linear_decode_into(
                         runtime,
                         post_operator,
-                        &attention.output.bf16,
+                        &attention.output,
+                        use_fp8,
+                        fp8_input,
                         operator_output,
                     )?;
                 }
@@ -214,17 +304,21 @@ impl DecodeExecutor {
                 normalized,
             )?;
 
-            ops::linear_bf16_into(
+            linear_decode_into(
                 runtime,
                 normalized,
-                &weights.feed_forward.gate_up.bf16,
+                &weights.feed_forward.gate_up,
+                use_fp8,
+                fp8_input,
                 wide,
             )?;
             ops::silu_mul_packed_bf16_into(runtime, wide, activated)?;
-            ops::linear_bf16_into(
+            linear_decode_into(
                 runtime,
                 activated,
-                &weights.feed_forward.down.bf16,
+                &weights.feed_forward.down,
+                use_fp8,
+                fp8_input,
                 operator_output,
             )?;
 
@@ -246,17 +340,113 @@ impl DecodeExecutor {
 
         // Pure decode has exactly one output row per token, in row order, so
         // the gather stage used by ragged prefill is unnecessary here.
-        ops::linear_bf16_into(runtime, normalized, &model.weights.embedding, logits)?;
+        if let (true, Some(fp8)) = (use_fp8, model.weights.lm_head_fp8.as_ref()) {
+            ensure!(
+                fp8.data.dims() == model.weights.embedding.dims(),
+                "FP8 LM head shape must match tied embedding"
+            );
+            fp8_input.set_logical_shape(Shape::new([num_tokens, model.config.hidden_size]))?;
+            logits.set_logical_shape(Shape::new([num_tokens, model.config.vocab_size]))?;
+            unsafe {
+                runtime.kernels().fp8_quantize().launch_bf16_e4m3(
+                    runtime.stream(),
+                    normalized.storage(),
+                    fp8_input.storage_mut(),
+                    normalized.numel(),
+                    fp8.activation_scale.quantize_multiplier,
+                )?;
+                runtime.blaslt().linear_fp8_scaled(
+                    fp8_input.storage(),
+                    fp8.data.storage(),
+                    logits.storage_mut(),
+                    crate::cuda::Fp8LinearConfig {
+                        m: num_tokens,
+                        n: model.config.vocab_size,
+                        k: model.config.hidden_size,
+                        scale_mode: Fp8ScaleMode::Tensorwide,
+                        output_scale: fp8.activation_scale.dequantize_multiplier
+                            * fp8.weight_scale.dequantize_multiplier,
+                    },
+                )?;
+            }
+        } else {
+            ops::linear_bf16_into(runtime, normalized, &model.weights.embedding, logits)?;
+        }
         ops::argmax_rows_bf16_into(runtime, logits, sampled)
     }
 }
 
 impl Lfm2Model {
+    fn prepare_decode_executor_fp8(
+        &self,
+        runtime: &CudaRuntime,
+        maximum_batch: usize,
+    ) -> Result<()> {
+        if !self.decode_fp8_enabled {
+            return Ok(());
+        }
+        for batch in 1..=maximum_batch {
+            for layer in &self.weights.layers {
+                for weight in [&layer.feed_forward.gate_up, &layer.feed_forward.down] {
+                    if weight.fp8.is_some() {
+                        runtime.blaslt().prepare_linear_fp8(
+                            batch,
+                            weight.bf16.dims()[0],
+                            weight.bf16.dims()[1],
+                            Fp8ScaleMode::Tensorwide,
+                        )?;
+                    }
+                }
+                match &layer.operator {
+                    OperatorWeights::Conv(conv) => {
+                        for weight in [&conv.input, &conv.output] {
+                            if weight.fp8.is_some() {
+                                runtime.blaslt().prepare_linear_fp8(
+                                    batch,
+                                    weight.bf16.dims()[0],
+                                    weight.bf16.dims()[1],
+                                    Fp8ScaleMode::Tensorwide,
+                                )?;
+                            }
+                        }
+                    }
+                    OperatorWeights::Attention(attention) => {
+                        for weight in [
+                            &attention.query,
+                            &attention.key,
+                            &attention.value,
+                            &attention.output,
+                        ] {
+                            if weight.fp8.is_some() {
+                                runtime.blaslt().prepare_linear_fp8(
+                                    batch,
+                                    weight.bf16.dims()[0],
+                                    weight.bf16.dims()[1],
+                                    Fp8ScaleMode::Tensorwide,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+            if self.weights.lm_head_fp8.is_some() {
+                runtime.blaslt().prepare_linear_fp8(
+                    batch,
+                    self.weights.embedding.dims()[0],
+                    self.weights.embedding.dims()[1],
+                    Fp8ScaleMode::Tensorwide,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new_decode_executor(
         &self,
         runtime: &CudaRuntime,
         maximum_tokens: usize,
     ) -> Result<DecodeExecutor> {
+        self.prepare_decode_executor_fp8(runtime, maximum_tokens)?;
         DecodeExecutor::new(runtime, &self.config, maximum_tokens)
     }
 
@@ -267,7 +457,7 @@ impl Lfm2Model {
         executor: &'a mut DecodeExecutor,
         input: &RaggedBatchInput<'_>,
     ) -> Result<Option<&'a Tensor<u32>>> {
-        if !executor.eligible(self, input) {
+        if !executor.eligible(input) {
             return Ok(None);
         }
         cache.prepare_ragged(runtime, input)?;
