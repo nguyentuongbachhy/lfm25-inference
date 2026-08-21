@@ -267,3 +267,6 @@ impl BatchModelCache {
 }
 
 include!("decode_executor.rs");
+
+#[cfg(test)]
+mod precision_scheduler_bench_tests;
