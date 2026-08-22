@@ -23,6 +23,6 @@ pub(crate) use kernels::{
     W8A16_TINY_M_LIMIT,
 };
 #[cfg(test)]
-pub(crate) use kernels::{RaggedAttentionLaunch, RaggedShortConvLaunch};
+pub(crate) use kernels::{RaggedAttentionLaunch, RaggedShortConvLaunch, TINY_BF16_MAX_M};
 pub use runtime::CudaRuntime;
 pub(crate) use runtime::TimingEvent;
