@@ -3,9 +3,8 @@ use half::bf16;
 
 use crate::{
     cuda::{
-        CudaRuntime,
+        CudaRuntime, TINY_BF16_MAX_M,
         benchmark::{BenchConfig, benchmark_gpu_paired},
-        kernels::TINY_BF16_MAX_M,
     },
     tensor::{Shape, Tensor},
 };
