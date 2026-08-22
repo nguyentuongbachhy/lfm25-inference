@@ -10,6 +10,7 @@ constexpr int ARGMAX_WORKERS_PER_LANE = 32;
 constexpr int ARGMAX_LANES_PER_STAGE1_BLOCK = 8;
 constexpr int ARGMAX_STAGE1_BLOCKS_PER_ROW =
     ARGMAX_LOGICAL_LANES / ARGMAX_LANES_PER_STAGE1_BLOCK;
+constexpr int ARGMAX_ATOMIC_BLOCKS_PER_ROW = 32;
 
 __device__ __forceinline__ bool argmax_better(
     float candidate_value,
@@ -246,4 +247,119 @@ void argmax_rows_bf16_stage2(
             output[row] = best_index;
         }
     }
+}
+
+// Encode one BF16 logit and the legacy argmax tie priority into a sortable
+// 32-bit key. This is possible because production vocab <= 65536: 16 bits hold
+// the ordered BF16 value, 8 bits prefer the smaller logical lane (column % 256),
+// and 8 bits prefer the earlier element within that lane (column / 256).
+//
+// The original kernel starts each logical lane at -FLT_MAX and compares with
+// strict `>`, so NaNs and -inf never become lane winners. Signed zero compares
+// equal in float, therefore both +0 and -0 are normalized to one key.
+__device__ __forceinline__ uint32_t argmax_atomic_key(
+    const __nv_bfloat16* __restrict__ input,
+    size_t index,
+    uint32_t column
+) {
+    uint16_t bits = reinterpret_cast<const uint16_t*>(input)[index];
+    const uint16_t magnitude = bits & 0x7fffU;
+    if ((magnitude & 0x7f80U) == 0x7f80U && (magnitude & 0x007fU) != 0U) {
+        return 0U;
+    }
+    if (bits == 0xff80U) {
+        return 0U;
+    }
+    if (magnitude == 0U) {
+        bits = 0U;
+    }
+
+    const uint16_t ordered = (bits & 0x8000U)
+        ? static_cast<uint16_t>(~bits)
+        : static_cast<uint16_t>(bits ^ 0x8000U);
+    const uint32_t logical_lane = column & 0xffU;
+    const uint32_t lane_offset = column >> 8U;
+    return (static_cast<uint32_t>(ordered) << 16U)
+        | ((0xffU - logical_lane) << 8U)
+        | (0xffU - lane_offset);
+}
+
+// Scratchless multi-CTA argmax. The output row itself is a temporary atomicMax
+// accumulator. The Rust launcher zeroes it asynchronously before this kernel.
+// Each CTA reduces locally first, limiting global contention to 32 atomics/row.
+extern "C" __global__
+__launch_bounds__(SAMPLING_MAX_BLOCK_SIZE)
+void argmax_rows_bf16_atomic_stage1(
+    const __nv_bfloat16* __restrict__ input,
+    uint32_t* __restrict__ output,
+    size_t rows,
+    size_t columns
+) {
+    const size_t row = blockIdx.x / ARGMAX_ATOMIC_BLOCKS_PER_ROW;
+    const uint32_t row_block =
+        static_cast<uint32_t>(blockIdx.x % ARGMAX_ATOMIC_BLOCKS_PER_ROW);
+    if (row >= rows) {
+        return;
+    }
+
+    const uint32_t worker = row_block * SAMPLING_MAX_BLOCK_SIZE + threadIdx.x;
+    constexpr uint32_t WORKERS_PER_ROW =
+        ARGMAX_ATOMIC_BLOCKS_PER_ROW * SAMPLING_MAX_BLOCK_SIZE;
+    const size_t row_base = row * columns;
+    uint32_t best_key = 0U;
+    for (size_t column = worker; column < columns; column += WORKERS_PER_ROW) {
+        const uint32_t key = argmax_atomic_key(
+            input,
+            row_base + column,
+            static_cast<uint32_t>(column)
+        );
+        best_key = max(best_key, key);
+    }
+
+    const uint32_t lane = threadIdx.x & 31U;
+    const uint32_t warp = threadIdx.x >> 5U;
+    #pragma unroll
+    for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+        best_key = max(best_key, __shfl_down_sync(0xffffffffU, best_key, offset));
+    }
+
+    __shared__ uint32_t warp_keys[8];
+    if (lane == 0U) {
+        warp_keys[warp] = best_key;
+    }
+    __syncthreads();
+
+    if (warp == 0U) {
+        best_key = lane < 8U ? warp_keys[lane] : 0U;
+        #pragma unroll
+        for (uint32_t offset = 16U; offset > 0U; offset >>= 1U) {
+            best_key = max(best_key, __shfl_down_sync(0xffffffffU, best_key, offset));
+        }
+        if (lane == 0U) {
+            atomicMax(output + row, best_key);
+        }
+    }
+}
+
+// Convert the packed winner key back to the token column in place. A zero key
+// means every candidate behaved like the legacy initial -FLT_MAX state (e.g.
+// all NaN/-inf), for which the original kernel returns index 0.
+extern "C" __global__
+__launch_bounds__(SAMPLING_MAX_BLOCK_SIZE)
+void argmax_rows_bf16_atomic_decode(
+    uint32_t* __restrict__ output,
+    size_t rows
+) {
+    const size_t row = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+    const uint32_t key = output[row];
+    if (key == 0U) {
+        output[row] = 0U;
+        return;
+    }
+    const uint32_t logical_lane = 0xffU - ((key >> 8U) & 0xffU);
+    const uint32_t lane_offset = 0xffU - (key & 0xffU);
+    output[row] = (lane_offset << 8U) | logical_lane;
 }
