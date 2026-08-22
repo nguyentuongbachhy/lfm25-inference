@@ -41,7 +41,8 @@ use gather::GatherKernels;
 pub(crate) use gather::GatherLaunch;
 use int8_tiny_m::Int8TinyMKernels;
 pub(crate) use int8_tiny_m::{
-    INT8_TINY_M_LIMIT, QuantizeS8RowsLaunch, TinyMInt8LinearLaunch,
+    INT8_TINY_M_LIMIT, QuantizeS8RowsLaunch, TinyMInt8LinearLaunch, TinyMW8A16LinearLaunch,
+    W8A16_TINY_M_LIMIT,
 };
 use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
