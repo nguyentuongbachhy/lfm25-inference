@@ -235,9 +235,10 @@ pub(super) fn run_owner_radix(
         )? {
             Some(sampled) => sampled,
             None => {
-                let logits = engine
-                    .model
-                    .forward_ragged_batch(&engine.runtime, &mut cache, input)?;
+                let logits =
+                    engine
+                        .model
+                        .forward_ragged_batch(&engine.runtime, &mut cache, input)?;
                 fallback_sampled = ops::argmax_rows_bf16(&engine.runtime, &logits)?;
                 &fallback_sampled
             }

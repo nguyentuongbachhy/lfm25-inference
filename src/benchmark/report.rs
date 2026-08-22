@@ -125,14 +125,8 @@ impl ServingSummary {
             decode_gpu_ms_per_token_p50: percentile(&decode_gpu_ms_per_token, 0.50),
             decode_gpu_ms_per_token_p95: percentile(&decode_gpu_ms_per_token, 0.95),
             decode_submit_cpu_ms_per_token_mean: mean(&decode_submit_cpu_ms_per_token),
-            decode_submit_cpu_ms_per_token_p50: percentile(
-                &decode_submit_cpu_ms_per_token,
-                0.50,
-            ),
-            decode_submit_cpu_ms_per_token_p95: percentile(
-                &decode_submit_cpu_ms_per_token,
-                0.95,
-            ),
+            decode_submit_cpu_ms_per_token_p50: percentile(&decode_submit_cpu_ms_per_token, 0.50),
+            decode_submit_cpu_ms_per_token_p95: percentile(&decode_submit_cpu_ms_per_token, 0.95),
             wall_seconds,
             accepted_requests_per_second: accepted_requests as f64 / wall_seconds,
             prompt_tokens_per_second: prompt_tokens as f64 / wall_seconds,

@@ -45,10 +45,7 @@ fn bench_splitk_case(
             )?;
         }
     }
-    let block_tables = runtime.upload(
-        &block_table_host,
-        Shape::new([batch, pages_per_request]),
-    )?;
+    let block_tables = runtime.upload(&block_table_host, Shape::new([batch, pages_per_request]))?;
     let positions = runtime.upload(
         &vec![u32::try_from(context - 1)?; batch],
         Shape::new([batch]),
@@ -57,9 +54,8 @@ fn bench_splitk_case(
     for splits in [2usize, 4, 8] {
         let mut baseline_output = runtime.alloc_bf16(Shape::new([batch, 32, 64]))?;
         let mut split_output = runtime.alloc_bf16(Shape::new([batch, 32, 64]))?;
-        let mut partials = runtime.alloc_uninit::<f32>(Shape::new([
-            splitk_workspace_elements(batch)?,
-        ]))?;
+        let mut partials =
+            runtime.alloc_uninit::<f32>(Shape::new([splitk_workspace_elements(batch)?]))?;
 
         let paired = benchmark_gpu_paired(
             runtime.context(),

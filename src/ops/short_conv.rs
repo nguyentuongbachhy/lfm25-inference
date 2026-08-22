@@ -86,13 +86,28 @@ pub fn short_conv_ragged_lfm2_bf16(
         projected.rank() == 2,
         "ragged convolution projection must have rank 2"
     );
-    ensure!(states.rank() == 3, "ragged convolution states must have rank 3");
+    ensure!(
+        states.rank() == 3,
+        "ragged convolution states must have rank 3"
+    );
     let num_tokens = projected.dims()[0];
     let hidden_size = projected.dims()[1] / 3;
-    ensure!(projected.dims()[1] == hidden_size * 3, "invalid projection width");
-    ensure!(weight.dims() == [hidden_size, 1, 3], "convolution weight mismatch");
-    ensure!(states.dims()[1..] == [hidden_size, 2], "convolution state mismatch");
-    ensure!(request_slots.numel() == num_tokens, "request slot count mismatch");
+    ensure!(
+        projected.dims()[1] == hidden_size * 3,
+        "invalid projection width"
+    );
+    ensure!(
+        weight.dims() == [hidden_size, 1, 3],
+        "convolution weight mismatch"
+    );
+    ensure!(
+        states.dims()[1..] == [hidden_size, 2],
+        "convolution state mismatch"
+    );
+    ensure!(
+        request_slots.numel() == num_tokens,
+        "request slot count mismatch"
+    );
     let num_request_slots = states.dims()[0];
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, hidden_size]))?;
     unsafe {
@@ -201,8 +216,8 @@ mod tests {
     fn short_conv_matches_causal_reference_and_updates_state() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
         let projected_host = [
-            1.0, 2.0, 0.5, 1.0, 3.0, 4.0, 2.0, 1.0, 1.0, 0.5, 5.0, 6.0, 1.0, 3.0,
-            2.0, 1.0, 7.0, 8.0,
+            1.0, 2.0, 0.5, 1.0, 3.0, 4.0, 2.0, 1.0, 1.0, 0.5, 5.0, 6.0, 1.0, 3.0, 2.0, 1.0, 7.0,
+            8.0,
         ]
         .map(bf16::from_f32);
         let weights_host = [0.25, 0.5, 1.0, -0.5, 0.25, 2.0].map(bf16::from_f32);
@@ -252,8 +267,7 @@ mod tests {
         let expected = [8.0, 15.0, 182.0, 561.0].map(bf16::from_f32);
         assert_close_bf16(&actual, &expected, 0.0, 0.0);
         let state = readback(&runtime, &states)?;
-        let expected_state = [0.0, 8.0, 0.0, 15.0, 0.0, 91.0, 0.0, 187.0]
-            .map(bf16::from_f32);
+        let expected_state = [0.0, 8.0, 0.0, 15.0, 0.0, 91.0, 0.0, 187.0].map(bf16::from_f32);
         assert_close_bf16(&state, &expected_state, 0.0, 0.0);
         Ok(())
     }

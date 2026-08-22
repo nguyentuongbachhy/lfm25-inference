@@ -23,11 +23,8 @@ impl KernelSet for SiluMulKernels {
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
         let silu_mul_packed_bf16 =
             load_function(&module, Self::MODULE_NAME, "silu_mul_packed_bf16")?;
-        let silu_mul_packed_bf16_to_e4m3 = load_function(
-            &module,
-            Self::MODULE_NAME,
-            "silu_mul_packed_bf16_to_e4m3",
-        )?;
+        let silu_mul_packed_bf16_to_e4m3 =
+            load_function(&module, Self::MODULE_NAME, "silu_mul_packed_bf16_to_e4m3")?;
         Ok(Self {
             silu_mul_packed_bf16: KernelLaunch::new(silu_mul_packed_bf16, MAX_BLOCK_SIZE)?,
             silu_mul_packed_bf16_to_e4m3: KernelLaunch::new(
