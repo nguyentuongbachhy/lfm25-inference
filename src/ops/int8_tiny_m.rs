@@ -102,6 +102,48 @@ pub(crate) fn quantize_int8_tiny_m_input_into(
     Ok(())
 }
 
+pub(crate) fn silu_mul_packed_bf16_to_int8_tiny_m_into(
+    runtime: &CudaRuntime,
+    packed: &Tensor<bf16>,
+    workspace: &mut Int8TinyMWorkspace,
+) -> Result<()> {
+    ensure!(packed.rank() == 2, "INT8 fused SwiGLU input must have rank 2");
+    let m = packed.dims()[0];
+    let packed_width = packed.dims()[1];
+    ensure!(
+        (1..=INT8_TINY_M_LIMIT).contains(&m),
+        "INT8 fused SwiGLU supports M=1..={INT8_TINY_M_LIMIT}, got {m}"
+    );
+    ensure!(
+        packed_width > 0 && packed_width.is_multiple_of(2),
+        "INT8 fused SwiGLU packed width must be positive and even"
+    );
+    let k = packed_width / 2;
+    ensure!(
+        workspace.maximum_m >= m && workspace.k == k,
+        "INT8 fused SwiGLU workspace shape mismatch"
+    );
+    workspace
+        .quantized_input
+        .set_logical_shape(Shape::new([m, k]))
+        .context("failed to resize fused INT8 input scratch")?;
+    workspace
+        .input_scales
+        .set_logical_shape(Shape::new([m]))
+        .context("failed to resize fused INT8 scale scratch")?;
+    unsafe {
+        runtime.kernels().silu_mul().launch_packed_bf16_to_s8_dynamic(
+            runtime.stream(),
+            packed.storage(),
+            workspace.quantized_input.storage_mut(),
+            workspace.input_scales.storage_mut(),
+            m,
+            k,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn linear_int8_tiny_m_prequantized_into(
     runtime: &CudaRuntime,
     m: usize,
