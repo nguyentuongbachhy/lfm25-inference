@@ -50,8 +50,9 @@ pub use embedding::embedding_bf16;
 pub(crate) use embedding::embedding_bf16_into;
 pub use gather::gather_rows_bf16;
 pub(crate) use int8_tiny_m::{
-    Int8PerChannelWeight, Int8TinyMWorkspace, linear_int8_tiny_m, linear_int8_tiny_m_into,
-    quantize_weight_s8_per_channel,
+    Int8PerChannelWeight, Int8TinyMWorkspace, linear_int8_tiny_m,
+    linear_int8_tiny_m_into, linear_int8_tiny_m_prequantized_into,
+    quantize_int8_tiny_m_input_into, quantize_weight_s8_per_channel,
 };
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{
