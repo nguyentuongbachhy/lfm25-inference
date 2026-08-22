@@ -52,10 +52,14 @@ pub use embedding::embedding_bf16;
 pub(crate) use embedding::embedding_bf16_into;
 pub use gather::gather_rows_bf16;
 pub(crate) use int8_tiny_m::{
-    Int8PerChannelWeight, Int8TinyMWorkspace, linear_int8_tiny_m,
-    linear_int8_tiny_m_into, linear_int8_tiny_m_prequantized_into, linear_w8a16_tiny_m,
-    linear_w8a16_tiny_m_into, quantize_int8_tiny_m_input_into,
-    quantize_weight_s8_per_channel, silu_mul_packed_bf16_to_int8_tiny_m_into,
+    Int8PerChannelWeight, Int8TinyMWorkspace, linear_int8_tiny_m_prequantized_into,
+    linear_w8a16_tiny_m_into, quantize_weight_s8_per_channel,
+    silu_mul_packed_bf16_to_int8_tiny_m_into,
+};
+#[cfg(test)]
+pub(crate) use int8_tiny_m::{
+    linear_int8_tiny_m, linear_int8_tiny_m_into, linear_w8a16_tiny_m,
+    quantize_int8_tiny_m_input_into,
 };
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{
