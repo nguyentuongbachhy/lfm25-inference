@@ -64,11 +64,23 @@ run_shape() {
   local site="$1"
   local n="$2"
   local k="$3"
-  "${BIN}" --site="${site}" --m=1 --n="${n}" --k="${k}" --iterations=1 | tee -a "${LOG}"
+  local weight_seed="$4"
+  local input_seed="$5"
+  "${BIN}" \
+    --site="${site}" \
+    --m=1 \
+    --n="${n}" \
+    --k="${k}" \
+    --iterations=1 \
+    --weight-seed="${weight_seed}" \
+    --input-seed="${input_seed}" | tee -a "${LOG}"
 }
 
-run_shape mlp_down 2048 8192
-run_shape mlp_gate_up 16384 2048
-run_shape lm_head 65536 2048
+for seeds in "0x9abc 0x1234" "0x51a7 0xc0de" "0xdead 0xbeef"; do
+  read -r weight_seed input_seed <<<"${seeds}"
+  run_shape mlp_down 2048 8192 "${weight_seed}" "${input_seed}"
+  run_shape mlp_gate_up 16384 2048 "${weight_seed}" "${input_seed}"
+  run_shape lm_head 65536 2048 "${weight_seed}" "${input_seed}"
+done
 
 echo "[nvfp4-accuracy] log: ${LOG}"
