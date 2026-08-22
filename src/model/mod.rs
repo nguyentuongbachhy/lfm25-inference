@@ -10,6 +10,8 @@ mod int8_real_model_tests;
 mod int8_sensitivity_tests;
 #[cfg(test)]
 mod w8a16_real_model_tests;
+#[cfg(test)]
+mod w8a16_sensitivity_tests;
 mod prefix;
 mod profile;
 pub(crate) mod quantization;
