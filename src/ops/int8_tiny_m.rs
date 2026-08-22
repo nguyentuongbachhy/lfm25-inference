@@ -63,29 +63,22 @@ pub(crate) fn quantize_weight_s8_per_channel(
     Ok(Int8PerChannelWeight { data, scales })
 }
 
-pub(crate) fn linear_int8_tiny_m_into(
+pub(crate) fn quantize_int8_tiny_m_input_into(
     runtime: &CudaRuntime,
     input: &Tensor<bf16>,
-    weight: &Int8PerChannelWeight,
     workspace: &mut Int8TinyMWorkspace,
-    output: &mut Tensor<bf16>,
 ) -> Result<()> {
     ensure!(input.rank() == 2, "INT8 tiny-M input must have rank 2");
-    ensure!(weight.data.rank() == 2, "INT8 tiny-M weight must have rank 2");
     let m = input.dims()[0];
     let k = input.dims()[1];
-    let n = weight.data.dims()[0];
     ensure!(
         (1..=INT8_TINY_M_LIMIT).contains(&m),
         "INT8 tiny-M linear supports M=1..={INT8_TINY_M_LIMIT}, got {m}"
     );
-    ensure!(weight.data.dims()[1] == k, "INT8 tiny-M weight/input K mismatch");
-    ensure!(weight.scales.numel() == n, "INT8 tiny-M weight scale count mismatch");
     ensure!(
         workspace.maximum_m >= m && workspace.k == k,
         "INT8 tiny-M workspace shape mismatch"
     );
-
     workspace
         .quantized_input
         .set_logical_shape(Shape::new([m, k]))
@@ -94,8 +87,6 @@ pub(crate) fn linear_int8_tiny_m_into(
         .input_scales
         .set_logical_shape(Shape::new([m]))
         .context("failed to resize INT8 scale scratch")?;
-    output.set_logical_shape(Shape::new([m, n]))?;
-
     unsafe {
         runtime.kernels().int8_tiny_m().launch_quantize_rows(
             runtime.stream(),
@@ -107,6 +98,28 @@ pub(crate) fn linear_int8_tiny_m_into(
                 cols: k,
             },
         )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn linear_int8_tiny_m_prequantized_into(
+    runtime: &CudaRuntime,
+    m: usize,
+    weight: &Int8PerChannelWeight,
+    workspace: &Int8TinyMWorkspace,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(weight.data.rank() == 2, "INT8 tiny-M weight must have rank 2");
+    let n = weight.data.dims()[0];
+    let k = weight.data.dims()[1];
+    ensure!(
+        (1..=INT8_TINY_M_LIMIT).contains(&m) && m <= workspace.maximum_m,
+        "INT8 tiny-M prequantized M is invalid"
+    );
+    ensure!(workspace.k == k, "INT8 tiny-M prequantized K mismatch");
+    ensure!(weight.scales.numel() == n, "INT8 tiny-M weight scale count mismatch");
+    output.set_logical_shape(Shape::new([m, n]))?;
+    unsafe {
         runtime.kernels().int8_tiny_m().launch_linear(
             runtime.stream(),
             TinyMInt8LinearLaunch {
@@ -122,6 +135,20 @@ pub(crate) fn linear_int8_tiny_m_into(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn linear_int8_tiny_m_into(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    weight: &Int8PerChannelWeight,
+    workspace: &mut Int8TinyMWorkspace,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(input.rank() == 2, "INT8 tiny-M input must have rank 2");
+    let m = input.dims()[0];
+    ensure!(weight.data.dims()[1] == input.dims()[1], "INT8 tiny-M weight/input K mismatch");
+    quantize_int8_tiny_m_input_into(runtime, input, workspace)?;
+    linear_int8_tiny_m_prequantized_into(runtime, m, weight, workspace, output)
 }
 
 pub(crate) fn linear_int8_tiny_m(
