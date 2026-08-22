@@ -23,6 +23,7 @@ mod qk_postprocess;
 mod rms_norm;
 mod rope;
 mod sampling;
+mod sampling_dispatch;
 mod short_conv;
 mod silu_mul;
 mod splitk_policy;
@@ -56,7 +57,9 @@ pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
 pub(crate) use rms_norm::{residual_rms_norm_bf16_into, rms_norm_bf16_into};
 pub use rope::rope_qk_bf16_inplace;
 pub use sampling::{argmax_bf16, argmax_rows_bf16};
-pub(crate) use sampling::argmax_rows_bf16_into;
+pub(crate) use sampling_dispatch::argmax_rows_bf16_into;
+#[cfg(test)]
+pub(crate) use sampling_dispatch::set_atomic_argmax_test_override;
 pub use short_conv::{short_conv_lfm2_bf16, short_conv_segmented_lfm2_bf16};
 pub(crate) use short_conv::short_conv_segmented_lfm2_bf16_into;
 pub use silu_mul::silu_mul_packed_bf16;
