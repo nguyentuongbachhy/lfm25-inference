@@ -6,10 +6,7 @@ use std::sync::atomic::{AtomicI8, Ordering};
 use anyhow::Result;
 use half::bf16;
 
-use crate::{
-    cuda::CudaRuntime,
-    tensor::Tensor,
-};
+use crate::{cuda::CudaRuntime, tensor::Tensor};
 
 use super::sampling;
 
@@ -66,11 +63,7 @@ pub(crate) fn argmax_rows_bf16_into(
     output: &mut Tensor<u32>,
 ) -> Result<()> {
     let use_atomic = input.rank() == 2
-        && should_use_atomic_argmax(
-            input.dims()[0],
-            input.dims()[1],
-            atomic_argmax_enabled(),
-        );
+        && should_use_atomic_argmax(input.dims()[0], input.dims()[1], atomic_argmax_enabled());
 
     if use_atomic {
         sampling::argmax_rows_bf16_atomic_into(runtime, input, output)
