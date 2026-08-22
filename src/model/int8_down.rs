@@ -110,3 +110,20 @@ impl Int8DownState {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+impl DecodeExecutor {
+    pub(crate) fn set_int8_tiny_m_down_layers(
+        &mut self,
+        runtime: &CudaRuntime,
+        model: &Lfm2Model,
+        selected_layers: &[usize],
+    ) -> Result<()> {
+        self.int8_down = Int8DownState::new_with_layers(runtime, model, selected_layers)?;
+        Ok(())
+    }
+
+    pub(crate) fn int8_test_logits(&self) -> &Tensor<bf16> {
+        &self.logits
+    }
+}
