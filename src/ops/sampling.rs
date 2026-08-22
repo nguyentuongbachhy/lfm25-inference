@@ -61,13 +61,16 @@ pub(crate) fn argmax_rows_bf16_atomic_into(
     ensure!(rows > 0 && columns > 0, "atomic argmax input is empty");
     output.set_logical_shape(Shape::new([rows]))?;
     unsafe {
-        runtime.kernels().sampling().launch_argmax_rows_bf16_atomic(
-            runtime.stream(),
-            input.storage(),
-            output.storage_mut(),
-            rows,
-            columns,
-        )?;
+        runtime
+            .kernels()
+            .sampling()
+            .launch_argmax_rows_bf16_atomic(
+                runtime.stream(),
+                input.storage(),
+                output.storage_mut(),
+                rows,
+                columns,
+            )?;
     }
     Ok(())
 }
