@@ -99,11 +99,7 @@ impl SamplingKernels {
             .policy()
             .exact_blocks(stage1_blocks)?;
         let mut stage1 = stream.launch_builder(self.argmax_rows_atomic_stage1.function());
-        stage1
-            .arg(input)
-            .arg(&mut *output)
-            .arg(&rows)
-            .arg(&columns);
+        stage1.arg(input).arg(&mut *output).arg(&rows).arg(&columns);
         unsafe {
             stage1.launch(stage1_config)?;
         }
