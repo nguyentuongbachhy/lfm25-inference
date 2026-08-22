@@ -7,6 +7,9 @@ use crate::{cache::KvPageSize, cuda::CudaRuntime};
 use super::{Fp8PrecisionPolicy, Lfm2Model, RaggedBatchInput};
 
 const DECODE_STEPS: usize = 6;
+const BENCH_WARMUP_STEPS: usize = 4;
+const BENCH_MEASURED_STEPS: usize = 20;
+const CACHE_DECODE_HEADROOM: usize = 64;
 
 fn model_dir() -> PathBuf {
     env::var_os("LFM25_MODEL_DIR")
@@ -37,7 +40,7 @@ fn prefill_cache(
     context: usize,
 ) -> Result<super::BatchModelCache> {
     let page_size = KvPageSize::P16;
-    let capacity = context + DECODE_STEPS + 2;
+    let capacity = context + CACHE_DECODE_HEADROOM;
     let physical_pages = batch
         .checked_mul(capacity.div_ceil(page_size.value()))
         .context("INT8 production test page count overflow")?;
@@ -94,6 +97,24 @@ fn prefill_cache(
     Ok(cache)
 }
 
+fn decode_metadata(batch: usize) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>)> {
+    let request_slots = (0..batch)
+        .map(u32::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let segment_offsets = (0..=batch)
+        .map(u32::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let segment_slots = request_slots.clone();
+    let output_rows = request_slots.clone();
+    Ok((request_slots, segment_offsets, segment_slots, output_rows))
+}
+
+fn forced_tokens(batch: usize, step: usize) -> Result<Vec<u32>> {
+    (0..batch)
+        .map(|slot| Ok(5000u32 + u32::try_from(step * 17 + slot)?))
+        .collect::<Result<Vec<_>>>()
+}
+
 #[test]
 #[ignore = "real checkpoint production INT8 validation"]
 fn production_int8_tiny_m_matches_baseline_argmax_for_forced_history() -> Result<()> {
@@ -108,22 +129,11 @@ fn production_int8_tiny_m_matches_baseline_argmax_for_forced_history() -> Result
                 model.new_decode_executor_with_int8_tiny_m_down(&runtime, batch, false)?;
             let mut candidate =
                 model.new_decode_executor_with_int8_tiny_m_down(&runtime, batch, true)?;
-
-            let request_slots = (0..batch)
-                .map(u32::try_from)
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let segment_offsets = (0..=batch)
-                .map(u32::try_from)
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let segment_slots = request_slots.clone();
-            let output_rows = request_slots.clone();
+            let (request_slots, segment_offsets, segment_slots, output_rows) =
+                decode_metadata(batch)?;
 
             for step in 0..DECODE_STEPS {
-                let token_ids = (0..batch)
-                    .map(|slot| {
-                        Ok(5000u32 + u32::try_from(step * 17 + slot)?)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let token_ids = forced_tokens(batch, step)?;
                 let positions = vec![u32::try_from(context + step)?; batch];
                 let input = RaggedBatchInput {
                     token_ids: &token_ids,
@@ -162,6 +172,139 @@ fn production_int8_tiny_m_matches_baseline_argmax_for_forced_history() -> Result
             eprintln!(
                 "INT8 production forced-history agreement passed B={batch} context={context} steps={DECODE_STEPS}"
             );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct DecodePass {
+    samples_ms: Vec<f64>,
+    final_sampled: Vec<u32>,
+}
+
+fn run_decode_pass(
+    runtime: &CudaRuntime,
+    model: &Lfm2Model,
+    batch: usize,
+    context: usize,
+    int8_enabled: bool,
+) -> Result<DecodePass> {
+    let mut cache = prefill_cache(runtime, model, batch, context)?;
+    let mut executor =
+        model.new_decode_executor_with_int8_tiny_m_down(runtime, batch, int8_enabled)?;
+    let (request_slots, segment_offsets, segment_slots, output_rows) = decode_metadata(batch)?;
+
+    for step in 0..BENCH_WARMUP_STEPS {
+        let token_ids = forced_tokens(batch, step)?;
+        let positions = vec![u32::try_from(context + step)?; batch];
+        let sampled = model
+            .try_forward_ragged_decode(
+                runtime,
+                &mut cache,
+                &mut executor,
+                &RaggedBatchInput {
+                    token_ids: &token_ids,
+                    positions: &positions,
+                    request_slots: &request_slots,
+                    segment_offsets: &segment_offsets,
+                    segment_slots: &segment_slots,
+                    output_rows: &output_rows,
+                },
+            )?
+            .context("production executor rejected INT8 benchmark warmup input")?;
+        let _ = sampled;
+    }
+    runtime.synchronize()?;
+
+    let mut samples_ms = Vec::with_capacity(BENCH_MEASURED_STEPS);
+    let mut final_sampled = Vec::new();
+    for measured in 0..BENCH_MEASURED_STEPS {
+        let step = BENCH_WARMUP_STEPS + measured;
+        let token_ids = forced_tokens(batch, step)?;
+        let positions = vec![u32::try_from(context + step)?; batch];
+        let started = runtime.record_timing_event()?;
+        let sampled = model
+            .try_forward_ragged_decode(
+                runtime,
+                &mut cache,
+                &mut executor,
+                &RaggedBatchInput {
+                    token_ids: &token_ids,
+                    positions: &positions,
+                    request_slots: &request_slots,
+                    segment_offsets: &segment_offsets,
+                    segment_slots: &segment_slots,
+                    output_rows: &output_rows,
+                },
+            )?
+            .context("production executor rejected INT8 benchmark input")?;
+        let finished = runtime.record_timing_event()?;
+        samples_ms.push(runtime.elapsed_ms(&started, &finished)?);
+        final_sampled = runtime.download(sampled)?;
+    }
+
+    Ok(DecodePass {
+        samples_ms,
+        final_sampled,
+    })
+}
+
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn percentile(values: &[f64], quantile: f64) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable_by(f64::total_cmp);
+    sorted[((sorted.len() - 1) as f64 * quantile).round() as usize]
+}
+
+#[test]
+#[ignore = "real checkpoint production INT8 ABBA benchmark"]
+fn bench_production_int8_tiny_m_down_abba() -> Result<()> {
+    let runtime = CudaRuntime::new(0)?;
+    let model = load_model(&runtime)?;
+
+    for context in [128usize, 512, 2048] {
+        for batch in [1usize, 2] {
+            let mut baseline_samples = Vec::with_capacity(BENCH_MEASURED_STEPS * 2);
+            let mut candidate_samples = Vec::with_capacity(BENCH_MEASURED_STEPS * 2);
+            let mut reference_tokens: Option<Vec<u32>> = None;
+            let mut top1_agreement = true;
+
+            // Balanced AB/BA across whole production passes. Each pass starts
+            // from the same prefill state and receives the same forced history.
+            for int8_enabled in [false, true, true, false] {
+                let pass = run_decode_pass(&runtime, &model, batch, context, int8_enabled)?;
+                match &reference_tokens {
+                    Some(reference) => top1_agreement &= pass.final_sampled == *reference,
+                    None => reference_tokens = Some(pass.final_sampled.clone()),
+                }
+                if int8_enabled {
+                    candidate_samples.extend(pass.samples_ms);
+                } else {
+                    baseline_samples.extend(pass.samples_ms);
+                }
+            }
+
+            let baseline_mean = mean(&baseline_samples);
+            let candidate_mean = mean(&candidate_samples);
+            let baseline_p95 = percentile(&baseline_samples, 0.95);
+            let candidate_p95 = percentile(&candidate_samples, 0.95);
+            println!(
+                "int8_production_down B={} C={} baseline_mean_ms={:.6} int8_mean_ms={:.6} mean_speedup={:.4}x baseline_p95_ms={:.6} int8_p95_ms={:.6} p95_speedup={:.4}x top1_agreement={}",
+                batch,
+                context,
+                baseline_mean,
+                candidate_mean,
+                baseline_mean / candidate_mean,
+                baseline_p95,
+                candidate_p95,
+                baseline_p95 / candidate_p95,
+                top1_agreement,
+            );
+            ensure!(top1_agreement, "INT8 production ABBA final argmax mismatch at B={batch} C={context}");
         }
     }
     Ok(())
