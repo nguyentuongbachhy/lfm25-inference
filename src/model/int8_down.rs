@@ -21,6 +21,7 @@ fn int8_tiny_m_down_enabled_from_env() -> bool {
 struct Int8DownState {
     weights: Vec<Option<ops::Int8PerChannelWeight>>,
     workspace: Option<ops::Int8TinyMWorkspace>,
+    w8a16_activation: Option<Tensor<bf16>>,
     mode: Int8DownMode,
 }
 
@@ -86,9 +87,17 @@ impl Int8DownState {
             )?),
             Int8DownMode::W8A16 => None,
         };
+        let w8a16_activation = match mode {
+            Int8DownMode::W8A8 => None,
+            Int8DownMode::W8A16 => Some(runtime.alloc_uninit::<bf16>(Shape::new([
+                INT8_TINY_M_DOWN_MAX_BATCH,
+                intermediate,
+            ]))?),
+        };
         Ok(Some(Self {
             weights,
             workspace,
+            w8a16_activation,
             mode,
         }))
     }
@@ -99,7 +108,6 @@ impl Int8DownState {
         layer: usize,
         m: usize,
         packed_gate_up: &Tensor<bf16>,
-        activated: &mut Tensor<bf16>,
         output: &mut Tensor<bf16>,
     ) -> Result<bool> {
         if m == 0 || m > INT8_TINY_M_DOWN_MAX_BATCH {
@@ -129,6 +137,10 @@ impl Int8DownState {
                 )?;
             }
             Int8DownMode::W8A16 => {
+                let activated = self
+                    .w8a16_activation
+                    .as_mut()
+                    .context("W8A16 down state is missing its BF16 activation scratch")?;
                 ops::silu_mul_packed_bf16_into(runtime, packed_gate_up, activated)?;
                 ops::linear_w8a16_tiny_m_into(runtime, activated, weight, output)?;
             }
