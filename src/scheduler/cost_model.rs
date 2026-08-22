@@ -142,6 +142,51 @@ impl CostCurve {
         }
     }
 
+    /// Prefill profiles are single-segment token curves. Dense profiles are
+    /// interpolated between neighboring measured token counts so scheduler
+    /// admission does not jump from (for example) the 128-token cost straight
+    /// to the 512-token cost. Exact measurements remain exact. Outside the
+    /// measured envelope, fall back to the conservative generic predictor.
+    pub fn predict_prefill_interpolated(&self, tokens: usize) -> f64 {
+        if tokens == 0 {
+            return 0.0;
+        }
+
+        if let Some(point) = self.points.iter().find(|point| {
+            point.batch == 1 && point.tokens == tokens && point.context == tokens
+        }) {
+            return point.milliseconds;
+        }
+
+        let mut lower = None;
+        let mut upper = None;
+        for point in &self.points {
+            if point.batch != 1 || point.tokens != point.context {
+                continue;
+            }
+            if point.tokens < tokens
+                && lower.is_none_or(|best: CostPoint| point.tokens > best.tokens)
+            {
+                lower = Some(*point);
+            }
+            if point.tokens > tokens
+                && upper.is_none_or(|best: CostPoint| point.tokens < best.tokens)
+            {
+                upper = Some(*point);
+            }
+        }
+
+        match (lower, upper) {
+            (Some(lower), Some(upper)) => {
+                let span = upper.tokens - lower.tokens;
+                let offset = tokens - lower.tokens;
+                let weight = offset as f64 / span as f64;
+                lower.milliseconds + (upper.milliseconds - lower.milliseconds) * weight
+            }
+            _ => self.predict(1, tokens, tokens),
+        }
+    }
+
     fn interpolate_decode_batch(&self, batch: usize, context: usize) -> Option<f64> {
         let mut lower = None;
         let mut upper = None;
@@ -225,7 +270,34 @@ impl HardwareCostModel {
     }
 
     pub fn predict_prefill_ms(&self, tokens: usize) -> f64 {
-        self.prefill_bf16.predict(1, tokens, tokens)
+        self.prefill_bf16.predict_prefill_interpolated(tokens)
+    }
+
+    /// Find the largest page-aligned aggregate prefill token count that fits a
+    /// latency budget. The search is deliberately tiny (<= 32 candidates for
+    /// PS16 with the current 512-token ceiling), so a measured/interpolated LUT
+    /// remains simpler and more deterministic than fitting an analytic model.
+    pub fn max_prefill_tokens_within_budget(
+        &self,
+        budget_ms: f64,
+        hard_limit: usize,
+    ) -> usize {
+        if !budget_ms.is_finite() || budget_ms <= 0.0 || hard_limit == 0 {
+            return 0;
+        }
+        let quantum = self.page_size.max(1);
+        let mut best = 0usize;
+        let mut candidate = quantum;
+        while candidate <= hard_limit {
+            if self.predict_prefill_ms(candidate) <= budget_ms {
+                best = candidate;
+            }
+            let Some(next) = candidate.checked_add(quantum) else {
+                break;
+            };
+            candidate = next;
+        }
+        best
     }
 }
 
@@ -301,6 +373,91 @@ mod tests {
         }])?;
         assert!(curve.predict_decode_interpolated(32, 2048) >= 24.0);
         assert!(curve.predict_decode_interpolated(16, 4096) >= 24.0);
+        Ok(())
+    }
+
+    #[test]
+    fn prefill_interpolation_preserves_dense_measurements_and_removes_token_cliffs() -> Result<()> {
+        let curve = CostCurve::new(vec![
+            CostPoint {
+                batch: 1,
+                tokens: 128,
+                context: 128,
+                milliseconds: 14.0,
+            },
+            CostPoint {
+                batch: 1,
+                tokens: 256,
+                context: 256,
+                milliseconds: 24.0,
+            },
+            CostPoint {
+                batch: 1,
+                tokens: 512,
+                context: 512,
+                milliseconds: 47.0,
+            },
+        ])?;
+        assert_eq!(curve.predict_prefill_interpolated(128), 14.0);
+        assert_eq!(curve.predict_prefill_interpolated(256), 24.0);
+        let token_129 = curve.predict_prefill_interpolated(129);
+        assert!(token_129 > 14.0 && token_129 < 24.0);
+        let token_384 = curve.predict_prefill_interpolated(384);
+        assert!(token_384 > 24.0 && token_384 < 47.0);
+        Ok(())
+    }
+
+    #[test]
+    fn prefill_budget_solver_returns_largest_page_aligned_safe_chunk() -> Result<()> {
+        let model = HardwareCostModel {
+            schema_version: 1,
+            gpu_name: "test".into(),
+            page_size: 16,
+            decode_bf16: CostCurve::new(vec![CostPoint {
+                batch: 1,
+                tokens: 1,
+                context: 128,
+                milliseconds: 6.0,
+            }])?,
+            decode_fp8: CostCurve::new(vec![CostPoint {
+                batch: 1,
+                tokens: 1,
+                context: 128,
+                milliseconds: 5.0,
+            }])?,
+            prefill_bf16: CostCurve::new(vec![
+                CostPoint {
+                    batch: 1,
+                    tokens: 128,
+                    context: 128,
+                    milliseconds: 14.0,
+                },
+                CostPoint {
+                    batch: 1,
+                    tokens: 256,
+                    context: 256,
+                    milliseconds: 24.0,
+                },
+                CostPoint {
+                    batch: 1,
+                    tokens: 384,
+                    context: 384,
+                    milliseconds: 34.0,
+                },
+                CostPoint {
+                    batch: 1,
+                    tokens: 512,
+                    context: 512,
+                    milliseconds: 47.0,
+                },
+            ])?,
+            interactive_prompt_limit: 2048,
+            ttft_slo_ms: 400.0,
+            tpot_slo_ms: 50.0,
+        };
+        assert_eq!(model.max_prefill_tokens_within_budget(24.0, 512), 256);
+        assert_eq!(model.max_prefill_tokens_within_budget(33.9, 512), 368);
+        assert_eq!(model.max_prefill_tokens_within_budget(5.0, 512), 0);
         Ok(())
     }
 }
