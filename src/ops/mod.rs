@@ -3,6 +3,8 @@ mod attention_async_fast;
 #[cfg(test)]
 mod attention_async_fast_tests;
 #[cfg(test)]
+mod attention_cta_bench_tests;
+#[cfg(test)]
 mod attention_splitk_bench_tests;
 #[cfg(test)]
 mod attention_splitk_tests;
