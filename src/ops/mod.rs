@@ -53,6 +53,7 @@ pub(crate) use int8_tiny_m::{
     Int8PerChannelWeight, Int8TinyMWorkspace, linear_int8_tiny_m,
     linear_int8_tiny_m_into, linear_int8_tiny_m_prequantized_into,
     quantize_int8_tiny_m_input_into, quantize_weight_s8_per_channel,
+    silu_mul_packed_bf16_to_int8_tiny_m_into,
 };
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{
