@@ -1,7 +1,7 @@
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicI8, Ordering},
-};
+use std::sync::OnceLock;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicI8, Ordering};
 
 use anyhow::Result;
 use half::bf16;
