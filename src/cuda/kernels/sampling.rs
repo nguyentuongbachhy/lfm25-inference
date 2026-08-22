@@ -9,10 +9,14 @@ use crate::cuda::{launch::KernelLaunch, module::load_function};
 use super::kernel_set::KernelSet;
 
 const MAX_BLOCK_SIZE: u32 = 256;
+const ARGMAX_LOGICAL_LANES: usize = 256;
+const ARGMAX_STAGE1_BLOCKS_PER_ROW: usize = 32;
 
 pub(crate) struct SamplingKernels {
     argmax: KernelLaunch,
     argmax_rows: KernelLaunch,
+    argmax_rows_stage1: KernelLaunch,
+    argmax_rows_stage2: KernelLaunch,
 }
 
 impl KernelSet for SamplingKernels {
@@ -22,9 +26,15 @@ impl KernelSet for SamplingKernels {
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
         let argmax = load_function(&module, Self::MODULE_NAME, "argmax_bf16")?;
         let argmax_rows = load_function(&module, Self::MODULE_NAME, "argmax_rows_bf16")?;
+        let argmax_rows_stage1 =
+            load_function(&module, Self::MODULE_NAME, "argmax_rows_bf16_stage1")?;
+        let argmax_rows_stage2 =
+            load_function(&module, Self::MODULE_NAME, "argmax_rows_bf16_stage2")?;
         Ok(Self {
             argmax: KernelLaunch::new(argmax, MAX_BLOCK_SIZE)?,
             argmax_rows: KernelLaunch::new(argmax_rows, MAX_BLOCK_SIZE)?,
+            argmax_rows_stage1: KernelLaunch::new(argmax_rows_stage1, MAX_BLOCK_SIZE)?,
+            argmax_rows_stage2: KernelLaunch::new(argmax_rows_stage2, MAX_BLOCK_SIZE)?,
         })
     }
 }
@@ -49,6 +59,66 @@ impl SamplingKernels {
         args.arg(input).arg(output).arg(&rows).arg(&columns);
         unsafe {
             args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_argmax_rows_bf16_multiblock(
+        &self,
+        stream: &CudaStream,
+        input: &CudaSlice<bf16>,
+        partial_values: &mut CudaSlice<f32>,
+        partial_indices: &mut CudaSlice<u32>,
+        output: &mut CudaSlice<u32>,
+        rows: usize,
+        columns: usize,
+    ) -> Result<()> {
+        ensure!(rows > 0 && columns > 0, "multi-block argmax shape is empty");
+        ensure!(
+            columns <= u32::MAX as usize,
+            "multi-block argmax columns exceed u32 index range"
+        );
+        let required = rows
+            .checked_mul(columns)
+            .ok_or_else(|| anyhow::anyhow!("multi-block argmax input size overflow"))?;
+        let partial_elements = rows
+            .checked_mul(ARGMAX_LOGICAL_LANES)
+            .ok_or_else(|| anyhow::anyhow!("multi-block argmax scratch size overflow"))?;
+        ensure!(input.len() >= required, "multi-block argmax input too small");
+        ensure!(
+            partial_values.len() >= partial_elements,
+            "multi-block argmax value scratch too small"
+        );
+        ensure!(
+            partial_indices.len() >= partial_elements,
+            "multi-block argmax index scratch too small"
+        );
+        ensure!(output.len() >= rows, "multi-block argmax output too small");
+
+        let stage1_blocks = rows
+            .checked_mul(ARGMAX_STAGE1_BLOCKS_PER_ROW)
+            .ok_or_else(|| anyhow::anyhow!("multi-block argmax grid size overflow"))?;
+        let stage1_config = self.argmax_rows_stage1.policy().exact_blocks(stage1_blocks)?;
+        let mut stage1 = stream.launch_builder(self.argmax_rows_stage1.function());
+        stage1
+            .arg(input)
+            .arg(partial_values)
+            .arg(partial_indices)
+            .arg(&rows)
+            .arg(&columns);
+        unsafe {
+            stage1.launch(stage1_config)?;
+        }
+
+        let stage2_config = self.argmax_rows_stage2.policy().exact_blocks(rows)?;
+        let mut stage2 = stream.launch_builder(self.argmax_rows_stage2.function());
+        stage2
+            .arg(partial_values)
+            .arg(partial_indices)
+            .arg(output)
+            .arg(&rows);
+        unsafe {
+            stage2.launch(stage2_config)?;
         }
         Ok(())
     }
