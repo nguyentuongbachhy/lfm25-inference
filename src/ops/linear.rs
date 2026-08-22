@@ -87,6 +87,27 @@ pub fn linear_bf16(
         "linear weight must have rank 2, got {:?}",
         weight.dims()
     );
+    let n = weight.dims()[0];
+    let mut output_dims = x.dims().to_vec();
+    let last = output_dims.len() - 1;
+    output_dims[last] = n;
+    let mut out = runtime.alloc_bf16(Shape::new(output_dims))?;
+    linear_bf16_into(runtime, x, weight, &mut out)?;
+    Ok(out)
+}
+
+pub(crate) fn linear_bf16_into(
+    runtime: &CudaRuntime,
+    x: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    out: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(x.rank() >= 1, "linear input must have rank >= 1");
+    ensure!(
+        weight.rank() == 2,
+        "linear weight must have rank 2, got {:?}",
+        weight.dims()
+    );
     ensure!(x.numel() > 0, "linear does not support empty input");
     ensure!(weight.numel() > 0, "linear does not support empty weight");
     let k = x.dims()[x.rank() - 1];
@@ -101,13 +122,13 @@ pub fn linear_bf16(
     let mut output_dims = x.dims().to_vec();
     let last = output_dims.len() - 1;
     output_dims[last] = n;
-    let mut out = runtime.alloc_bf16(Shape::new(output_dims))?;
+    out.set_logical_shape(Shape::new(output_dims))?;
     unsafe {
         runtime
             .blaslt()
             .linear_bf16(x.storage(), weight.storage(), out.storage_mut(), m, n, k)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 pub fn linear_last_row_bf16(
@@ -236,7 +257,8 @@ mod tests {
         let out = linear_bf16(&runtime, &x, &weight)?;
         assert_eq!(out.dims(), &[2, 2, 3]);
         let expected =
-            [1.0, 2.0, 3.0, 3.0, 4.0, 7.0, 5.0, 6.0, 11.0, 7.0, 8.0, 15.0].map(bf16::from_f32);
+            [1.0, 2.0, 3.0, 3.0, 4.0, 7.0, 5.0, 6.0, 11.0, 7.0, 8.0, 15.0]
+                .map(bf16::from_f32);
         assert_close_bf16(&readback(&runtime, &out)?, &expected, 0.01, 0.01);
         Ok(())
     }
