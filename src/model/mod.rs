@@ -2,6 +2,8 @@ mod calibration;
 mod evaluation;
 mod fp8_analysis;
 mod lfm2;
+#[cfg(test)]
+mod int8_real_model_tests;
 mod prefix;
 mod profile;
 pub(crate) mod quantization;
