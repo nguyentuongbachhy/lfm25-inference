@@ -19,7 +19,8 @@ pub(crate) use kernels::{
     FusedRaggedDecodeLaunch, GatherLaunch, HybridAttentionLaunch, INT8_TINY_M_LIMIT,
     KvCacheWriteLaunch, PagedAttentionLaunch, QkPostprocessLaunch, QuantizeS8RowsLaunch,
     ResidualRmsNormLaunch, RmsNormLaunch, RopeLaunch, SegmentedShortConvLaunch, ShortConvLaunch,
-    SplitKRaggedAttentionLaunch, TinyMInt8LinearLaunch,
+    SplitKRaggedAttentionLaunch, TinyMInt8LinearLaunch, TinyMW8A16LinearLaunch,
+    W8A16_TINY_M_LIMIT,
 };
 #[cfg(test)]
 pub(crate) use kernels::{RaggedAttentionLaunch, RaggedShortConvLaunch};
