@@ -9,6 +9,8 @@ use crate::{
     tensor::{Shape, Tensor},
 };
 
+const ROTATING_WEIGHT_COUNT: usize = 4;
+
 fn tiny_bf16_nt_into(
     runtime: &CudaRuntime,
     input: &Tensor<bf16>,
@@ -183,6 +185,110 @@ fn bench_tiny_bf16_decode_shapes() -> Result<()> {
                 stats.reference.p95_us,
                 stats.candidate.p95_us,
                 stats.speedup_p95,
+                rel_l2,
+                cosine,
+                max_abs,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "GPU microbenchmark with rotating weights to exceed L2"]
+fn bench_tiny_bf16_decode_shapes_rotating_weights() -> Result<()> {
+    let runtime = CudaRuntime::new(0)?;
+    let bench = BenchConfig {
+        warmup: 12,
+        batches: 30,
+        // Keep this a multiple of ROTATING_WEIGHT_COUNT so every measured
+        // batch sees the same number of launches for each weight tensor.
+        iterations_per_batch: 8,
+    };
+
+    for (site, n, k) in [
+        ("down", 2_048usize, 8_192usize),
+        ("gate_up", 16_384usize, 2_048usize),
+    ] {
+        let mut weights = Vec::with_capacity(ROTATING_WEIGHT_COUNT);
+        for weight_index in 0..ROTATING_WEIGHT_COUNT {
+            weights.push(runtime.upload(
+                &deterministic_values(n * k, 29 + weight_index * 2, 257),
+                Shape::new([n, k]),
+            )?);
+        }
+        let weight_bytes = n
+            .checked_mul(k)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<bf16>()))
+            .ok_or_else(|| anyhow::anyhow!("tiny BF16 rotating weight byte size overflow"))?;
+
+        for m in [1usize, 2, 4, 8] {
+            let input = runtime.upload(
+                &deterministic_values(m * k, 17 + m, 251),
+                Shape::new([m, k]),
+            )?;
+            let mut reference = runtime.alloc_uninit::<bf16>(Shape::new([m, n]))?;
+            let mut candidate = runtime.alloc_uninit::<bf16>(Shape::new([m, n]))?;
+
+            unsafe {
+                runtime.blaslt().linear_bf16(
+                    input.storage(),
+                    weights[0].storage(),
+                    reference.storage_mut(),
+                    m,
+                    n,
+                    k,
+                )?;
+            }
+            tiny_bf16_nt_into(&runtime, &input, &weights[0], &mut candidate)?;
+            runtime.synchronize()?;
+            let reference_host = runtime.download(&reference)?;
+            let candidate_host = runtime.download(&candidate)?;
+            let (rel_l2, cosine, max_abs) = output_metrics(&reference_host, &candidate_host);
+
+            let mut reference_weight = 0usize;
+            let mut candidate_weight = 0usize;
+            let stats = benchmark_gpu_paired(
+                runtime.context(),
+                runtime.stream(),
+                bench,
+                || {
+                    let weight = &weights[reference_weight];
+                    reference_weight = (reference_weight + 1) % weights.len();
+                    unsafe {
+                        runtime.blaslt().linear_bf16(
+                            input.storage(),
+                            weight.storage(),
+                            reference.storage_mut(),
+                            m,
+                            n,
+                            k,
+                        )
+                    }
+                },
+                || {
+                    let weight = &weights[candidate_weight];
+                    candidate_weight = (candidate_weight + 1) % weights.len();
+                    tiny_bf16_nt_into(&runtime, &input, weight, &mut candidate)
+                },
+            )?;
+
+            println!(
+                "tiny_bf16_rotating weights={} site={} M={} N={} K={} weight_mib={:.3} cublaslt_mean_us={:.3} tiny_mean_us={:.3} mean_speedup={:.4}x cublaslt_p95_us={:.3} tiny_p95_us={:.3} p95_speedup={:.4}x cublaslt_effective_gbps={:.3} tiny_effective_gbps={:.3} rel_l2={:.8} cosine={:.8} max_abs={:.6}",
+                weights.len(),
+                site,
+                m,
+                n,
+                k,
+                weight_bytes as f64 / (1024.0 * 1024.0),
+                stats.reference.mean_us,
+                stats.candidate.mean_us,
+                stats.speedup_mean,
+                stats.reference.p95_us,
+                stats.candidate.p95_us,
+                stats.speedup_p95,
+                stats.reference.effective_gbps(weight_bytes),
+                stats.candidate.effective_gbps(weight_bytes),
                 rel_l2,
                 cosine,
                 max_abs,
