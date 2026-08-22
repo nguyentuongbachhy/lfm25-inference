@@ -11,6 +11,8 @@ mod int8_real_model_tests;
 #[cfg(test)]
 mod int8_sensitivity_tests;
 #[cfg(test)]
+mod w8a16_production_tests;
+#[cfg(test)]
 mod w8a16_real_model_tests;
 #[cfg(test)]
 mod w8a16_sensitivity_tests;
