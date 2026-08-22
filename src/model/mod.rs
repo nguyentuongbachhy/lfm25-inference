@@ -6,6 +6,8 @@ mod lfm2;
 mod int8_production_tests;
 #[cfg(test)]
 mod int8_real_model_tests;
+#[cfg(test)]
+mod int8_sensitivity_tests;
 mod prefix;
 mod profile;
 pub(crate) mod quantization;
