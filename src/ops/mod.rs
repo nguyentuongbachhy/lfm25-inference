@@ -16,6 +16,8 @@ mod gather;
 mod int8_tiny_m;
 #[cfg(test)]
 mod int8_tiny_m_tests;
+#[cfg(test)]
+mod w8a16_tiny_m_tests;
 mod linear;
 mod mok_dispatch;
 #[cfg(test)]
