@@ -120,7 +120,9 @@ fn production_int8_tiny_m_matches_baseline_argmax_for_forced_history() -> Result
 
             for step in 0..DECODE_STEPS {
                 let token_ids = (0..batch)
-                    .map(|slot| 5000u32 + u32::try_from(step * 17 + slot)?)
+                    .map(|slot| {
+                        Ok(5000u32 + u32::try_from(step * 17 + slot)?)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 let positions = vec![u32::try_from(context + step)?; batch];
                 let input = RaggedBatchInput {
