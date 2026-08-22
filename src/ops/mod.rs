@@ -13,6 +13,9 @@ mod attention_fused;
 mod attention_regression_tests;
 mod embedding;
 mod gather;
+mod int8_tiny_m;
+#[cfg(test)]
+mod int8_tiny_m_tests;
 mod linear;
 mod mok_dispatch;
 #[cfg(test)]
@@ -46,6 +49,10 @@ pub(crate) use attention_fused::{
 pub use embedding::embedding_bf16;
 pub(crate) use embedding::embedding_bf16_into;
 pub use gather::gather_rows_bf16;
+pub(crate) use int8_tiny_m::{
+    Int8PerChannelWeight, Int8TinyMWorkspace, linear_int8_tiny_m, linear_int8_tiny_m_into,
+    quantize_weight_s8_per_channel,
+};
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{
     linear_bf16_into, linear_fp8_e4m3, linear_last_row_fp8_e4m3, quantize_weight_e4m3,
