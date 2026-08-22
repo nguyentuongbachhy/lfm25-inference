@@ -1,5 +1,7 @@
 mod attention;
 mod attention_async_fast;
+#[cfg(test)]
+mod attention_cta128;
 mod attention_fused;
 mod embedding;
 mod fp8_quantize;
@@ -25,6 +27,8 @@ pub(crate) use attention::RaggedAttentionLaunch;
 pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
 use attention_async_fast::AsyncAttentionFastKernels;
 pub(crate) use attention_async_fast::{FastRaggedAttentionLaunch, SplitKRaggedAttentionLaunch};
+#[cfg(test)]
+use attention_cta128::AttentionCta128Kernels;
 use attention_fused::FusedAttentionKernels;
 pub(crate) use attention_fused::{
     FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch,
@@ -59,6 +63,8 @@ pub(crate) struct Kernels {
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
     attention_async_fast: AsyncAttentionFastKernels,
+    #[cfg(test)]
+    attention_cta128: AttentionCta128Kernels,
     attention_fused: FusedAttentionKernels,
     qk_postprocess: QkPostprocessKernels,
     short_conv: ShortConvKernels,
@@ -78,6 +84,8 @@ impl Kernels {
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
             attention_async_fast: AsyncAttentionFastKernels::load(context)?,
+            #[cfg(test)]
+            attention_cta128: AttentionCta128Kernels::load(context)?,
             attention_fused: FusedAttentionKernels::load(context)?,
             qk_postprocess: QkPostprocessKernels::load(context)?,
             short_conv: ShortConvKernels::load(context)?,
@@ -114,6 +122,11 @@ impl Kernels {
 
     pub(crate) fn attention_async_fast(&self) -> &AsyncAttentionFastKernels {
         &self.attention_async_fast
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attention_cta128(&self) -> &AttentionCta128Kernels {
+        &self.attention_cta128
     }
 
     pub(crate) fn attention_fused(&self) -> &FusedAttentionKernels {
