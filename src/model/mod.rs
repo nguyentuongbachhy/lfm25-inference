@@ -1,9 +1,9 @@
+#[cfg(test)]
+mod argmax_production_tests;
 mod calibration;
 mod evaluation;
 mod fp8_analysis;
 mod lfm2;
-#[cfg(test)]
-mod argmax_production_tests;
 mod prefix;
 mod profile;
 pub(crate) mod quantization;
