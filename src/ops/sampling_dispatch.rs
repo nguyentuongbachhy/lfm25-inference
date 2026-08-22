@@ -13,7 +13,11 @@ use crate::{
 
 use super::sampling;
 
-const ATOMIC_ARGMAX_MAX_ROWS: usize = 64;
+// Full-model ABBA on the target RTX 5060 showed stable mean/p95 wins through
+// B=16. B=32 was context-dependent and B=64 regressed materially, so keep the
+// measured production boundary conservative even though the atomic kernel is
+// functionally valid up to 64 rows.
+const ATOMIC_ARGMAX_MAX_ROWS: usize = 16;
 const ATOMIC_ARGMAX_MAX_COLUMNS: usize = 65_536;
 
 static ATOMIC_ARGMAX_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -25,12 +29,12 @@ fn atomic_argmax_enabled_from_env() -> bool {
     *ATOMIC_ARGMAX_ENABLED.get_or_init(|| {
         std::env::var("LFM25_ATOMIC_ARGMAX")
             .map(|value| {
-                matches!(
+                !matches!(
                     value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "on" | "yes"
+                    "0" | "false" | "off" | "no"
                 )
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
