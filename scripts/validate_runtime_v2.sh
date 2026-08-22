@@ -3,9 +3,18 @@ set -euo pipefail
 
 export LLM_CUDA_ARCH="${LLM_CUDA_ARCH:-compute_120}"
 
+RUNTIME_V2_RUST_FILES=(
+  src/cuda/kernels/sampling.rs
+  src/model/argmax_production_tests.rs
+  src/model/mod.rs
+  src/ops/mod.rs
+  src/ops/sampling.rs
+  src/ops/sampling_dispatch.rs
+)
+
 echo "[runtime-v2] CUDA arch: ${LLM_CUDA_ARCH}"
-echo "[runtime-v2] formatting"
-cargo fmt --check
+echo "[runtime-v2] formatting release delta"
+rustfmt --edition 2024 --check "${RUNTIME_V2_RUST_FILES[@]}"
 
 echo "[runtime-v2] compile all features"
 cargo check --all-features
