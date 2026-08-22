@@ -1,6 +1,12 @@
 const INT8_TINY_M_DOWN_MAX_BATCH: usize = 2;
 const INT8_TINY_M_DOWN_LAYERS: [usize; 7] = [0, 1, 2, 3, 4, 5, 7];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Int8DownMode {
+    W8A8,
+    W8A16,
+}
+
 fn int8_tiny_m_down_enabled_from_env() -> bool {
     std::env::var("LFM25_INT8_TINY_M_DOWN")
         .map(|value| {
@@ -14,7 +20,8 @@ fn int8_tiny_m_down_enabled_from_env() -> bool {
 
 struct Int8DownState {
     weights: Vec<Option<ops::Int8PerChannelWeight>>,
-    workspace: ops::Int8TinyMWorkspace,
+    workspace: Option<ops::Int8TinyMWorkspace>,
+    mode: Int8DownMode,
 }
 
 impl Int8DownState {
@@ -24,13 +31,14 @@ impl Int8DownState {
         } else {
             &[]
         };
-        Self::new_with_layers(runtime, model, layers)
+        Self::new_with_layers(runtime, model, layers, Int8DownMode::W8A8)
     }
 
     fn new_with_layers(
         runtime: &CudaRuntime,
         model: &Lfm2Model,
         selected_layers: &[usize],
+        mode: Int8DownMode,
     ) -> Result<Option<Self>> {
         if selected_layers.is_empty() {
             return Ok(None);
@@ -54,7 +62,7 @@ impl Int8DownState {
         for (layer, layer_weights) in model.weights.layers.iter().enumerate() {
             let selected = selected_layers.contains(&layer)
                 // Existing selective-FP8 down sites always keep the production
-                // fused E4M3 path. The INT8 experiment only replaces BF16 tails.
+                // fused E4M3 path. INT8 experiments only replace BF16 tails.
                 && layer_weights.feed_forward.down.fp8.is_none();
             weights.push(if selected {
                 Some(ops::quantize_weight_s8_per_channel(
@@ -70,13 +78,18 @@ impl Int8DownState {
             weights.iter().filter(|weight| weight.is_some()).count() <= selected_layers.len(),
             "INT8 tiny-M down state installed too many weights"
         );
-        Ok(Some(Self {
-            weights,
-            workspace: ops::Int8TinyMWorkspace::new(
+        let workspace = match mode {
+            Int8DownMode::W8A8 => Some(ops::Int8TinyMWorkspace::new(
                 runtime,
                 INT8_TINY_M_DOWN_MAX_BATCH,
                 intermediate,
-            )?,
+            )?),
+            Int8DownMode::W8A16 => None,
+        };
+        Ok(Some(Self {
+            weights,
+            workspace,
+            mode,
         }))
     }
 
@@ -86,6 +99,7 @@ impl Int8DownState {
         layer: usize,
         m: usize,
         packed_gate_up: &Tensor<bf16>,
+        activated: &mut Tensor<bf16>,
         output: &mut Tensor<bf16>,
     ) -> Result<bool> {
         if m == 0 || m > INT8_TINY_M_DOWN_MAX_BATCH {
@@ -95,18 +109,30 @@ impl Int8DownState {
             return Ok(false);
         };
 
-        ops::silu_mul_packed_bf16_to_int8_tiny_m_into(
-            runtime,
-            packed_gate_up,
-            &mut self.workspace,
-        )?;
-        ops::linear_int8_tiny_m_prequantized_into(
-            runtime,
-            m,
-            weight,
-            &self.workspace,
-            output,
-        )?;
+        match self.mode {
+            Int8DownMode::W8A8 => {
+                let workspace = self
+                    .workspace
+                    .as_mut()
+                    .context("W8A8 down state is missing its quantization workspace")?;
+                ops::silu_mul_packed_bf16_to_int8_tiny_m_into(
+                    runtime,
+                    packed_gate_up,
+                    workspace,
+                )?;
+                ops::linear_int8_tiny_m_prequantized_into(
+                    runtime,
+                    m,
+                    weight,
+                    workspace,
+                    output,
+                )?;
+            }
+            Int8DownMode::W8A16 => {
+                ops::silu_mul_packed_bf16_into(runtime, packed_gate_up, activated)?;
+                ops::linear_w8a16_tiny_m_into(runtime, activated, weight, output)?;
+            }
+        }
         Ok(true)
     }
 }
@@ -119,7 +145,27 @@ impl DecodeExecutor {
         model: &Lfm2Model,
         selected_layers: &[usize],
     ) -> Result<()> {
-        self.int8_down = Int8DownState::new_with_layers(runtime, model, selected_layers)?;
+        self.int8_down = Int8DownState::new_with_layers(
+            runtime,
+            model,
+            selected_layers,
+            Int8DownMode::W8A8,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_w8a16_tiny_m_down_layers(
+        &mut self,
+        runtime: &CudaRuntime,
+        model: &Lfm2Model,
+        selected_layers: &[usize],
+    ) -> Result<()> {
+        self.int8_down = Int8DownState::new_with_layers(
+            runtime,
+            model,
+            selected_layers,
+            Int8DownMode::W8A16,
+        )?;
         Ok(())
     }
 
