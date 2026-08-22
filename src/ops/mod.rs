@@ -34,6 +34,8 @@ mod sampling_dispatch;
 mod short_conv;
 mod silu_mul;
 mod splitk_policy;
+#[cfg(test)]
+mod tiny_bf16_bench_tests;
 
 #[cfg(test)]
 pub(crate) use attention::paged_attention_lfm2_bf16_sync;
