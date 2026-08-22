@@ -16,6 +16,8 @@ mod rope;
 mod sampling;
 mod short_conv;
 mod silu_mul;
+#[cfg(test)]
+mod tiny_bf16;
 
 use std::sync::Arc;
 
@@ -60,6 +62,10 @@ pub(crate) use short_conv::RaggedShortConvLaunch;
 use short_conv::ShortConvKernels;
 pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch};
 use silu_mul::SiluMulKernels;
+#[cfg(test)]
+use tiny_bf16::TinyBf16Kernels;
+#[cfg(test)]
+pub(crate) use tiny_bf16::TINY_BF16_MAX_M;
 
 pub(crate) struct Kernels {
     embedding: EmbeddingKernels,
@@ -77,6 +83,8 @@ pub(crate) struct Kernels {
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
     int8_tiny_m: Int8TinyMKernels,
+    #[cfg(test)]
+    tiny_bf16: TinyBf16Kernels,
     gather: GatherKernels,
     metadata: MetadataKernels,
 }
@@ -99,6 +107,8 @@ impl Kernels {
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
             int8_tiny_m: Int8TinyMKernels::load(context)?,
+            #[cfg(test)]
+            tiny_bf16: TinyBf16Kernels::load(context)?,
             gather: GatherKernels::load(context)?,
             metadata: MetadataKernels::load(context)?,
         })
@@ -159,6 +169,11 @@ impl Kernels {
 
     pub(crate) fn int8_tiny_m(&self) -> &Int8TinyMKernels {
         &self.int8_tiny_m
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tiny_bf16(&self) -> &TinyBf16Kernels {
+        &self.tiny_bf16
     }
 
     pub(crate) fn gather(&self) -> &GatherKernels {
