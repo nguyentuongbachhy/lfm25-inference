@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <numeric>
 
 __global__ void bf16_gemv_reference(
     const __nv_bfloat16* __restrict__ weight,
@@ -45,6 +46,47 @@ float bf16_bits_to_float(uint16_t bits) {
   return value;
 }
 
+std::vector<int> top_indices(const std::vector<float>& values, size_t count) {
+  count = std::min(count, values.size());
+  std::vector<int> indices(values.size());
+  std::iota(indices.begin(), indices.end(), 0);
+  std::partial_sort(
+      indices.begin(),
+      indices.begin() + static_cast<std::ptrdiff_t>(count),
+      indices.end(),
+      [&](int lhs, int rhs) { return values[lhs] > values[rhs]; });
+  indices.resize(count);
+  return indices;
+}
+
+int rank_of(const std::vector<float>& values, int index) {
+  float target = values[static_cast<size_t>(index)];
+  int rank = 1;
+  for (float value : values) {
+    if (value > target) {
+      ++rank;
+    }
+  }
+  return rank;
+}
+
+int overlap_count(
+    const std::vector<int>& lhs,
+    const std::vector<int>& rhs,
+    size_t count) {
+  count = std::min(count, std::min(lhs.size(), rhs.size()));
+  int overlap = 0;
+  for (size_t i = 0; i < count; ++i) {
+    for (size_t j = 0; j < count; ++j) {
+      if (lhs[i] == rhs[j]) {
+        ++overlap;
+        break;
+      }
+    }
+  }
+  return overlap;
+}
+
 struct AccuracyMetrics {
   double rel_l2 = 0.0;
   double cosine = 0.0;
@@ -52,6 +94,16 @@ struct AccuracyMetrics {
   double mean_abs = 0.0;
   int reference_top1 = -1;
   int nvfp4_top1 = -1;
+  int reference_top1_rank_in_nvfp4 = -1;
+  int nvfp4_top1_rank_in_reference = -1;
+  int top5_overlap = 0;
+  int top10_overlap = 0;
+  float reference_top1_value = 0.0f;
+  float reference_top1_nvfp4_value = 0.0f;
+  float nvfp4_top1_reference_value = 0.0f;
+  float nvfp4_top1_value = 0.0f;
+  float reference_margin = 0.0f;
+  float nvfp4_margin = 0.0f;
   bool finite = true;
 };
 
@@ -64,12 +116,12 @@ AccuracyMetrics compute_metrics(
   double nvfp4_sq = 0.0;
   double dot = 0.0;
   double abs_sum = 0.0;
-  float reference_max = -std::numeric_limits<float>::infinity();
-  float nvfp4_max = -std::numeric_limits<float>::infinity();
+  std::vector<float> nvfp4_values(reference.size());
 
   for (size_t i = 0; i < reference.size(); ++i) {
     float ref = reference[i];
     float got = bf16_bits_to_float(nvfp4[i]);
+    nvfp4_values[i] = got;
     if (!std::isfinite(ref) || !std::isfinite(got)) {
       metrics.finite = false;
     }
@@ -82,21 +134,47 @@ AccuracyMetrics compute_metrics(
     double abs_diff = std::abs(diff);
     abs_sum += abs_diff;
     metrics.max_abs = std::max(metrics.max_abs, abs_diff);
-
-    if (ref > reference_max) {
-      reference_max = ref;
-      metrics.reference_top1 = static_cast<int>(i);
-    }
-    if (got > nvfp4_max) {
-      nvfp4_max = got;
-      metrics.nvfp4_top1 = static_cast<int>(i);
-    }
   }
 
   metrics.rel_l2 = std::sqrt(diff_sq / std::max(reference_sq, 1.0e-30));
   metrics.cosine = dot / std::sqrt(std::max(reference_sq * nvfp4_sq, 1.0e-30));
   metrics.mean_abs = abs_sum / static_cast<double>(reference.size());
+
+  auto reference_top = top_indices(reference, 10);
+  auto nvfp4_top = top_indices(nvfp4_values, 10);
+  metrics.reference_top1 = reference_top.front();
+  metrics.nvfp4_top1 = nvfp4_top.front();
+  metrics.reference_top1_rank_in_nvfp4 = rank_of(nvfp4_values, metrics.reference_top1);
+  metrics.nvfp4_top1_rank_in_reference = rank_of(reference, metrics.nvfp4_top1);
+  metrics.top5_overlap = overlap_count(reference_top, nvfp4_top, 5);
+  metrics.top10_overlap = overlap_count(reference_top, nvfp4_top, 10);
+  metrics.reference_top1_value = reference[static_cast<size_t>(metrics.reference_top1)];
+  metrics.reference_top1_nvfp4_value =
+      nvfp4_values[static_cast<size_t>(metrics.reference_top1)];
+  metrics.nvfp4_top1_reference_value = reference[static_cast<size_t>(metrics.nvfp4_top1)];
+  metrics.nvfp4_top1_value = nvfp4_values[static_cast<size_t>(metrics.nvfp4_top1)];
+  if (reference_top.size() > 1) {
+    metrics.reference_margin =
+        reference[static_cast<size_t>(reference_top[0])] -
+        reference[static_cast<size_t>(reference_top[1])];
+  }
+  if (nvfp4_top.size() > 1) {
+    metrics.nvfp4_margin =
+        nvfp4_values[static_cast<size_t>(nvfp4_top[0])] -
+        nvfp4_values[static_cast<size_t>(nvfp4_top[1])];
+  }
   return metrics;
+}
+
+uint32_t parse_seed(int argc, char** argv, const char* key, uint32_t fallback) {
+  size_t key_len = std::strlen(key);
+  for (int i = 1; i < argc; ++i) {
+    std::string arg(argv[i]);
+    if (arg.rfind(key, 0) == 0) {
+      return static_cast<uint32_t>(std::strtoul(arg.c_str() + key_len, nullptr, 0));
+    }
+  }
+  return fallback;
 }
 
 int main(int argc, char** argv) {
@@ -107,6 +185,8 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  uint32_t weight_seed = parse_seed(argc, argv, "--weight-seed=", 0x9abcU);
+  uint32_t input_seed = parse_seed(argc, argv, "--input-seed=", 0x1234U);
   int cutlass_m = options.n;
   int cutlass_n = options.m;
   int k = options.k;
@@ -131,8 +211,8 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemset(buffers.weight_scale, 0, weight_scale_elements * sizeof(Scale)));
   CUDA_CHECK(cudaMemset(buffers.input_scale, 0, input_scale_elements * sizeof(Scale)));
 
-  launch_fill(buffers.weight_bf16, weight_elements, 0x9abcU);
-  launch_fill(buffers.input_bf16, input_elements, 0x1234U);
+  launch_fill(buffers.weight_bf16, weight_elements, weight_seed);
+  launch_fill(buffers.input_bf16, input_elements, input_seed);
   launch_quantize(
       buffers.weight_bf16,
       buffers.weight_fp4,
@@ -204,14 +284,21 @@ int main(int argc, char** argv) {
   AccuracyMetrics metrics = compute_metrics(reference, nvfp4);
   bool top1_agreement = metrics.reference_top1 == metrics.nvfp4_top1;
   std::printf(
-      "nvfp4_accuracy site=%s M=%d N=%d K=%d tileN=%d rel_l2=%.8f cosine=%.8f "
-      "max_abs=%.8f mean_abs=%.8f finite=%s reference_top1=%d nvfp4_top1=%d "
-      "top1_agreement=%s\n",
+      "nvfp4_accuracy site=%s M=%d N=%d K=%d tileN=%d weight_seed=%u input_seed=%u "
+      "rel_l2=%.8f cosine=%.8f max_abs=%.8f mean_abs=%.8f finite=%s "
+      "reference_top1=%d nvfp4_top1=%d top1_agreement=%s "
+      "reference_margin=%.8f nvfp4_margin=%.8f "
+      "reference_top1_rank_in_nvfp4=%d nvfp4_top1_rank_in_reference=%d "
+      "top5_overlap=%d top10_overlap=%d "
+      "reference_top1_value=%.8f reference_top1_nvfp4_value=%.8f "
+      "nvfp4_top1_reference_value=%.8f nvfp4_top1_value=%.8f\n",
       options.site.c_str(),
       options.m,
       options.n,
       options.k,
       NVFP4_TILE_N,
+      weight_seed,
+      input_seed,
       metrics.rel_l2,
       metrics.cosine,
       metrics.max_abs,
@@ -219,7 +306,17 @@ int main(int argc, char** argv) {
       metrics.finite ? "true" : "false",
       metrics.reference_top1,
       metrics.nvfp4_top1,
-      top1_agreement ? "true" : "false");
+      top1_agreement ? "true" : "false",
+      metrics.reference_margin,
+      metrics.nvfp4_margin,
+      metrics.reference_top1_rank_in_nvfp4,
+      metrics.nvfp4_top1_rank_in_reference,
+      metrics.top5_overlap,
+      metrics.top10_overlap,
+      metrics.reference_top1_value,
+      metrics.reference_top1_nvfp4_value,
+      metrics.nvfp4_top1_reference_value,
+      metrics.nvfp4_top1_value);
 
   if (!metrics.finite || metrics.rel_l2 > 0.30 || metrics.cosine < 0.95) {
     return 3;
