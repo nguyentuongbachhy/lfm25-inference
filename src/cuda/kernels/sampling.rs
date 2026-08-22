@@ -102,8 +102,8 @@ impl SamplingKernels {
         let mut stage1 = stream.launch_builder(self.argmax_rows_stage1.function());
         stage1
             .arg(input)
-            .arg(partial_values)
-            .arg(partial_indices)
+            .arg(&mut *partial_values)
+            .arg(&mut *partial_indices)
             .arg(&rows)
             .arg(&columns);
         unsafe {
@@ -113,8 +113,8 @@ impl SamplingKernels {
         let stage2_config = self.argmax_rows_stage2.policy().exact_blocks(rows)?;
         let mut stage2 = stream.launch_builder(self.argmax_rows_stage2.function());
         stage2
-            .arg(partial_values)
-            .arg(partial_indices)
+            .arg(&*partial_values)
+            .arg(&*partial_indices)
             .arg(output)
             .arg(&rows);
         unsafe {
