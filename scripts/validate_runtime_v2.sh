@@ -3,6 +3,9 @@ set -euo pipefail
 
 export LLM_CUDA_ARCH="${LLM_CUDA_ARCH:-compute_120}"
 
+# The v1/main base still carries unrelated rustfmt debt. Runtime-v2 therefore
+# checks formatting only for Rust files touched by this release delta so the
+# validation branch does not absorb cosmetic changes outside its scope.
 RUNTIME_V2_RUST_FILES=(
   src/cuda/kernels/sampling.rs
   src/model/argmax_production_tests.rs
