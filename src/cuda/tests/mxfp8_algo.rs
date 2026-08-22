@@ -3,9 +3,7 @@ use std::{ffi::c_void, mem::size_of, sync::Arc};
 use anyhow::{Context as _, Result, ensure};
 use cudarc::{
     cublaslt::{result, sys},
-    driver::{
-        CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, PushKernelArg,
-    },
+    driver::{CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, PushKernelArg},
 };
 use half::bf16;
 
@@ -154,8 +152,7 @@ impl MatmulDesc {
         let desc = Self { raw };
         let trans_a = 0_i32;
         let trans_b = 1_i32;
-        let scale_mode =
-            sys::cublasLtMatmulMatrixScale_t::CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+        let scale_mode = sys::cublasLtMatmulMatrixScale_t::CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
         unsafe {
             result::set_matmul_desc_attribute(
                 desc.raw,
@@ -272,7 +269,10 @@ impl Mxfp8AlgoPlan {
         let c_layout = MatrixLayout::row_major(sys::cudaDataType_t::CUDA_R_16BF, m, n)?;
         let preference = Preference::new()?;
 
-        let mut storage = Vec::with_capacity(MAX_HEURISTICS);
+        let mut storage =
+            Vec::<std::mem::MaybeUninit<sys::cublasLtMatmulHeuristicResult_t>>::with_capacity(
+                MAX_HEURISTICS,
+            );
         storage.resize_with(MAX_HEURISTICS, std::mem::MaybeUninit::uninit);
         let mut returned = 0_i32;
         unsafe {
@@ -308,7 +308,10 @@ impl Mxfp8AlgoPlan {
                 });
             }
         }
-        ensure!(!candidates.is_empty(), "no usable MXFP8 heuristic algorithms");
+        ensure!(
+            !candidates.is_empty(),
+            "no usable MXFP8 heuristic algorithms"
+        );
         let workspace = unsafe { stream.alloc::<u8>(WORKSPACE_BYTES) }?;
 
         Ok(Self {
@@ -540,19 +543,15 @@ fn bench_mxfp8_block32_algorithm_sweep() -> Result<()> {
         }
         runtime.synchronize()?;
 
-        let tensorwide_stats = benchmark_gpu(
-            runtime.context(),
-            runtime.stream(),
-            bench,
-            || unsafe {
+        let tensorwide_stats =
+            benchmark_gpu(runtime.context(), runtime.stream(), bench, || unsafe {
                 runtime.blaslt().linear_fp8_scaled(
                     x_tensorwide.storage(),
                     weight_tensorwide.storage(),
                     tensorwide_out.storage_mut(),
                     tensorwide_config,
                 )
-            },
-        )?;
+            })?;
 
         let mut timings = Vec::with_capacity(plan.candidates.len());
         for rank in 0..plan.candidates.len() {
@@ -565,19 +564,14 @@ fn bench_mxfp8_block32_algorithm_sweep() -> Result<()> {
                 )?;
             }
             runtime.synchronize()?;
-            let stats = benchmark_gpu(
-                runtime.context(),
-                runtime.stream(),
-                bench,
-                || unsafe {
-                    plan.matmul(
-                        rank,
-                        x_mxfp8.storage(),
-                        weight_mxfp8.storage(),
-                        mxfp8_out.storage_mut(),
-                    )
-                },
-            )?;
+            let stats = benchmark_gpu(runtime.context(), runtime.stream(), bench, || unsafe {
+                plan.matmul(
+                    rank,
+                    x_mxfp8.storage(),
+                    weight_mxfp8.storage(),
+                    mxfp8_out.storage_mut(),
+                )
+            })?;
             let candidate = &plan.candidates[rank];
             println!(
                 "mxfp8_algo site={site} M={m} N={n} K={k} rank={rank} workspace={} waves={:.4} mean_us={:.3} p50_us={:.3} p95_us={:.3}",
@@ -614,8 +608,14 @@ fn bench_mxfp8_block32_algorithm_sweep() -> Result<()> {
             "MXFP8 best-algorithm output contains non-finite values"
         );
         let (rel_l2, cosine, max_abs) = output_metrics(&bf16_host, &mxfp8_host);
-        ensure!(rel_l2 < 0.10, "MXFP8 algorithm-sweep rel_l2 too large: {rel_l2}");
-        ensure!(cosine > 0.995, "MXFP8 algorithm-sweep cosine too low: {cosine}");
+        ensure!(
+            rel_l2 < 0.10,
+            "MXFP8 algorithm-sweep rel_l2 too large: {rel_l2}"
+        );
+        ensure!(
+            cosine > 0.995,
+            "MXFP8 algorithm-sweep cosine too low: {cosine}"
+        );
 
         println!(
             "mxfp8_algo_best site={site} M={m} N={n} K={k} candidates={} first_us={first_us:.3} best_rank={best_rank} best_us={best_us:.3} speedup_vs_first={:.4}x tensorwide_gemm_us={:.3} mxfp8_vs_tensorwide={:.4}x rel_l2={rel_l2:.8} cosine={cosine:.8} max_abs={max_abs:.6}",
