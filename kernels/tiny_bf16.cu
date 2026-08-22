@@ -1,5 +1,6 @@
 #include <cuda_bf16.h>
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
