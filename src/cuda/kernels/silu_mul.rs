@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{Result, ensure};
-use cudarc::driver::{CudaModule, CudaSlice, CudaStream, PushKernelArg};
+use anyhow::{Context as _, Result, ensure};
+use cudarc::driver::{CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::bf16;
 
 use crate::cuda::{launch::KernelLaunch, module::load_function};
@@ -14,6 +14,7 @@ const VECTOR_WIDTH: usize = 2;
 pub(crate) struct SiluMulKernels {
     silu_mul_packed_bf16: KernelLaunch,
     silu_mul_packed_bf16_to_e4m3: KernelLaunch,
+    silu_mul_packed_bf16_to_s8_dynamic: KernelLaunch,
 }
 
 impl KernelSet for SiluMulKernels {
@@ -28,10 +29,19 @@ impl KernelSet for SiluMulKernels {
             Self::MODULE_NAME,
             "silu_mul_packed_bf16_to_e4m3",
         )?;
+        let silu_mul_packed_bf16_to_s8_dynamic = load_function(
+            &module,
+            Self::MODULE_NAME,
+            "silu_mul_packed_bf16_to_s8_dynamic",
+        )?;
         Ok(Self {
             silu_mul_packed_bf16: KernelLaunch::new(silu_mul_packed_bf16, MAX_BLOCK_SIZE)?,
             silu_mul_packed_bf16_to_e4m3: KernelLaunch::new(
                 silu_mul_packed_bf16_to_e4m3,
+                MAX_BLOCK_SIZE,
+            )?,
+            silu_mul_packed_bf16_to_s8_dynamic: KernelLaunch::new(
+                silu_mul_packed_bf16_to_s8_dynamic,
                 MAX_BLOCK_SIZE,
             )?,
         })
@@ -120,6 +130,58 @@ impl SiluMulKernels {
             .arg(&rows)
             .arg(&intermediate_size)
             .arg(&scale);
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_packed_bf16_to_s8_dynamic(
+        &self,
+        stream: &CudaStream,
+        packed: &CudaSlice<bf16>,
+        out: &mut CudaSlice<i8>,
+        scales: &mut CudaSlice<f32>,
+        rows: usize,
+        intermediate_size: usize,
+    ) -> Result<()> {
+        ensure!(
+            rows > 0 && intermediate_size > 0,
+            "packed silu_mul INT8 fusion requires non-empty dimensions"
+        );
+        let output_elements = rows
+            .checked_mul(intermediate_size)
+            .context("packed silu_mul INT8 output size overflow")?;
+        let packed_elements = output_elements
+            .checked_mul(2)
+            .context("packed silu_mul INT8 input size overflow")?;
+        ensure!(
+            packed.len() >= packed_elements,
+            "packed silu_mul INT8 input storage too small"
+        );
+        ensure!(
+            out.len() >= output_elements,
+            "packed silu_mul INT8 output storage too small"
+        );
+        ensure!(scales.len() >= rows, "packed silu_mul INT8 scale storage too small");
+
+        let shared_mem_bytes = intermediate_size
+            .checked_mul(std::mem::size_of::<bf16>())
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .context("packed silu_mul INT8 shared-memory size overflow")?;
+        let grid_x = u32::try_from(rows).context("packed silu_mul INT8 grid exceeds u32")?;
+        let block_size = self.silu_mul_packed_bf16_to_s8_dynamic.policy().block_size();
+        let config = LaunchConfig {
+            grid_dim: (grid_x, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes,
+        };
+        let mut args = stream.launch_builder(self.silu_mul_packed_bf16_to_s8_dynamic.function());
+        args.arg(packed)
+            .arg(out)
+            .arg(scales)
+            .arg(&rows)
+            .arg(&intermediate_size);
         unsafe {
             args.launch(config)?;
         }
