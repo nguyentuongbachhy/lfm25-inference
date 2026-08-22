@@ -4,6 +4,7 @@ use half::bf16;
 use crate::{
     cuda::{
         CudaRuntime, INT8_TINY_M_LIMIT, QuantizeS8RowsLaunch, TinyMInt8LinearLaunch,
+        TinyMW8A16LinearLaunch, W8A16_TINY_M_LIMIT,
     },
     tensor::{Shape, Tensor},
 };
@@ -26,7 +27,10 @@ impl Int8TinyMWorkspace {
             (1..=INT8_TINY_M_LIMIT).contains(&maximum_m),
             "INT8 tiny-M workspace requires maximum M=1..={INT8_TINY_M_LIMIT}"
         );
-        ensure!(k > 0 && k.is_multiple_of(4), "INT8 tiny-M workspace requires K divisible by 4");
+        ensure!(
+            k > 0 && k.is_multiple_of(4),
+            "INT8 tiny-M workspace requires K divisible by 4"
+        );
         Ok(Self {
             quantized_input: runtime.alloc_uninit::<i8>(Shape::new([maximum_m, k]))?,
             input_scales: runtime.alloc_uninit::<f32>(Shape::new([maximum_m]))?,
@@ -159,7 +163,10 @@ pub(crate) fn linear_int8_tiny_m_prequantized_into(
         "INT8 tiny-M prequantized M is invalid"
     );
     ensure!(workspace.k == k, "INT8 tiny-M prequantized K mismatch");
-    ensure!(weight.scales.numel() == n, "INT8 tiny-M weight scale count mismatch");
+    ensure!(
+        weight.scales.numel() == n,
+        "INT8 tiny-M weight scale count mismatch"
+    );
     output.set_logical_shape(Shape::new([m, n]))?;
     unsafe {
         runtime.kernels().int8_tiny_m().launch_linear(
@@ -188,7 +195,10 @@ pub(crate) fn linear_int8_tiny_m_into(
 ) -> Result<()> {
     ensure!(input.rank() == 2, "INT8 tiny-M input must have rank 2");
     let m = input.dims()[0];
-    ensure!(weight.data.dims()[1] == input.dims()[1], "INT8 tiny-M weight/input K mismatch");
+    ensure!(
+        weight.data.dims()[1] == input.dims()[1],
+        "INT8 tiny-M weight/input K mismatch"
+    );
     quantize_int8_tiny_m_input_into(runtime, input, workspace)?;
     linear_int8_tiny_m_prequantized_into(runtime, m, weight, workspace, output)
 }
@@ -200,7 +210,58 @@ pub(crate) fn linear_int8_tiny_m(
     workspace: &mut Int8TinyMWorkspace,
 ) -> Result<Tensor<bf16>> {
     ensure!(input.rank() == 2, "INT8 tiny-M input must have rank 2");
-    let mut output = runtime.alloc_bf16(Shape::new([input.dims()[0], weight.data.dims()[0]]))?;
+    let mut output =
+        runtime.alloc_bf16(Shape::new([input.dims()[0], weight.data.dims()[0]]))?;
     linear_int8_tiny_m_into(runtime, input, weight, workspace, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn linear_w8a16_tiny_m_into(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    weight: &Int8PerChannelWeight,
+    output: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(input.rank() == 2, "W8A16 tiny-M input must have rank 2");
+    ensure!(weight.data.rank() == 2, "W8A16 tiny-M weight must have rank 2");
+    let m = input.dims()[0];
+    let k = input.dims()[1];
+    let n = weight.data.dims()[0];
+    ensure!(
+        (1..=W8A16_TINY_M_LIMIT).contains(&m),
+        "W8A16 tiny-M supports M=1..={W8A16_TINY_M_LIMIT}, got {m}"
+    );
+    ensure!(
+        weight.data.dims()[1] == k,
+        "W8A16 tiny-M weight/input K mismatch"
+    );
+    ensure!(weight.scales.numel() == n, "W8A16 tiny-M weight scale count mismatch");
+    output.set_logical_shape(Shape::new([m, n]))?;
+    unsafe {
+        runtime.kernels().int8_tiny_m().launch_weight_only_linear(
+            runtime.stream(),
+            TinyMW8A16LinearLaunch {
+                input: input.storage(),
+                weight: weight.data.storage(),
+                weight_scales: weight.scales.storage(),
+                output: output.storage_mut(),
+                m,
+                n,
+                k,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn linear_w8a16_tiny_m(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    weight: &Int8PerChannelWeight,
+) -> Result<Tensor<bf16>> {
+    ensure!(input.rank() == 2, "W8A16 tiny-M input must have rank 2");
+    let mut output =
+        runtime.alloc_bf16(Shape::new([input.dims()[0], weight.data.dims()[0]]))?;
+    linear_w8a16_tiny_m_into(runtime, input, weight, &mut output)?;
     Ok(output)
 }
