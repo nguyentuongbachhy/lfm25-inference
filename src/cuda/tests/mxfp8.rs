@@ -3,9 +3,7 @@ use std::{ffi::c_void, mem::size_of, sync::Arc};
 use anyhow::{Context as _, Result, ensure};
 use cudarc::{
     cublaslt::{result, sys},
-    driver::{
-        CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, PushKernelArg,
-    },
+    driver::{CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, PushKernelArg},
 };
 use half::bf16;
 
@@ -53,11 +51,7 @@ impl Mxfp8Quantizer {
             "mxfp8_research",
             include_str!(concat!(env!("OUT_DIR"), "/mxfp8_research.ptx")),
         )?;
-        let function = load_function(
-            &module,
-            "mxfp8_research",
-            "quantize_bf16_mxfp8_vec32",
-        )?;
+        let function = load_function(&module, "mxfp8_research", "quantize_bf16_mxfp8_vec32")?;
         Ok(Self {
             _module: module,
             quantize: KernelLaunch::new_with_multiple(function, 256, 32)?,
@@ -157,8 +151,7 @@ impl MatmulDesc {
         let desc = Self { raw };
         let trans_a = 0_i32;
         let trans_b = 1_i32;
-        let scale_mode =
-            sys::cublasLtMatmulMatrixScale_t::CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+        let scale_mode = sys::cublasLtMatmulMatrixScale_t::CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
         unsafe {
             result::set_matmul_desc_attribute(
                 desc.raw,
@@ -495,12 +488,16 @@ fn mxfp8_block32_dynamic_scales_match_bf16_small_shape() -> Result<()> {
         "MXFP8 small-shape output contains non-finite values"
     );
     let (rel_l2, cosine, max_abs) = output_metrics(&reference, &candidate);
-    println!(
-        "mxfp8_small rel_l2={rel_l2:.8} cosine={cosine:.8} max_abs={max_abs:.6}"
+    println!("mxfp8_small rel_l2={rel_l2:.8} cosine={cosine:.8} max_abs={max_abs:.6}");
+    ensure!(
+        rel_l2 < 0.02,
+        "MXFP8 small-shape rel_l2 too large: {rel_l2}"
     );
-    ensure!(rel_l2 < 0.02, "MXFP8 small-shape rel_l2 too large: {rel_l2}");
     ensure!(cosine > 0.999, "MXFP8 small-shape cosine too low: {cosine}");
-    ensure!(max_abs <= 1.0, "MXFP8 small-shape max_abs too large: {max_abs}");
+    ensure!(
+        max_abs <= 1.0,
+        "MXFP8 small-shape max_abs too large: {max_abs}"
+    );
     Ok(())
 }
 
@@ -551,8 +548,7 @@ fn bench_mxfp8_block32_outlier_shapes() -> Result<()> {
             let x = runtime.upload(&x_host, Shape::new([m, k]))?;
             let mut x_tensorwide = runtime.zeros::<u8>(Shape::new([m, k]))?;
             let mut x_mxfp8 = runtime.zeros::<u8>(Shape::new([m, k]))?;
-            let mut x_mxfp8_scales =
-                runtime.zeros::<u8>(Shape::new([scale_storage_len(m, k)?]))?;
+            let mut x_mxfp8_scales = runtime.zeros::<u8>(Shape::new([scale_storage_len(m, k)?]))?;
             let mut bf16_out = runtime.zeros::<bf16>(Shape::new([m, n]))?;
             let mut tensorwide_out = runtime.zeros::<bf16>(Shape::new([m, n]))?;
             let mut mxfp8_out = runtime.zeros::<bf16>(Shape::new([m, n]))?;
@@ -623,11 +619,8 @@ fn bench_mxfp8_block32_outlier_shapes() -> Result<()> {
             let (mxfp8_rel_l2, mxfp8_cosine, mxfp8_max_abs) =
                 output_metrics(&bf16_host, &mxfp8_host);
 
-            let tensorwide_quant = benchmark_gpu(
-                runtime.context(),
-                runtime.stream(),
-                bench,
-                || unsafe {
+            let tensorwide_quant =
+                benchmark_gpu(runtime.context(), runtime.stream(), bench, || unsafe {
                     runtime.kernels().fp8_quantize().launch_bf16_e4m3(
                         runtime.stream(),
                         x.storage(),
@@ -635,13 +628,9 @@ fn bench_mxfp8_block32_outlier_shapes() -> Result<()> {
                         m * k,
                         x_quantize_scale,
                     )
-                },
-            )?;
-            let mxfp8_quant = benchmark_gpu(
-                runtime.context(),
-                runtime.stream(),
-                bench,
-                || unsafe {
+                })?;
+            let mxfp8_quant =
+                benchmark_gpu(runtime.context(), runtime.stream(), bench, || unsafe {
                     quantizer.launch(
                         runtime.stream(),
                         x.storage(),
@@ -650,33 +639,24 @@ fn bench_mxfp8_block32_outlier_shapes() -> Result<()> {
                         m,
                         k,
                     )
-                },
-            )?;
-            let tensorwide_gemm = benchmark_gpu(
-                runtime.context(),
-                runtime.stream(),
-                bench,
-                || unsafe {
+                })?;
+            let tensorwide_gemm =
+                benchmark_gpu(runtime.context(), runtime.stream(), bench, || unsafe {
                     runtime.blaslt().linear_fp8_scaled(
                         x_tensorwide.storage(),
                         weight_tensorwide.storage(),
                         tensorwide_out.storage_mut(),
                         tensorwide_config,
                     )
-                },
-            )?;
-            let mxfp8_gemm = benchmark_gpu(
-                runtime.context(),
-                runtime.stream(),
-                bench,
-                || unsafe {
+                })?;
+            let mxfp8_gemm =
+                benchmark_gpu(runtime.context(), runtime.stream(), bench, || unsafe {
                     mxfp8_plan.matmul(
                         x_mxfp8.storage(),
                         weight_mxfp8.storage(),
                         mxfp8_out.storage_mut(),
                     )
-                },
-            )?;
+                })?;
 
             let tensorwide_e2e = benchmark_gpu_paired(
                 runtime.context(),
