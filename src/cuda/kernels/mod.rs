@@ -6,6 +6,7 @@ mod attention_fused;
 mod embedding;
 mod fp8_quantize;
 mod gather;
+mod int8_tiny_m;
 mod kernel_set;
 mod kv_cache;
 mod metadata;
@@ -38,6 +39,10 @@ pub(crate) use embedding::EmbeddingLaunch;
 use fp8_quantize::Fp8QuantizeKernels;
 use gather::GatherKernels;
 pub(crate) use gather::GatherLaunch;
+use int8_tiny_m::Int8TinyMKernels;
+pub(crate) use int8_tiny_m::{
+    INT8_TINY_M_LIMIT, QuantizeS8RowsLaunch, TinyMInt8LinearLaunch,
+};
 use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
 pub(crate) use kv_cache::KvCacheWriteLaunch;
@@ -70,6 +75,7 @@ pub(crate) struct Kernels {
     short_conv: ShortConvKernels,
     sampling: SamplingKernels,
     fp8_quantize: Fp8QuantizeKernels,
+    int8_tiny_m: Int8TinyMKernels,
     gather: GatherKernels,
     metadata: MetadataKernels,
 }
@@ -91,6 +97,7 @@ impl Kernels {
             short_conv: ShortConvKernels::load(context)?,
             sampling: SamplingKernels::load(context)?,
             fp8_quantize: Fp8QuantizeKernels::load(context)?,
+            int8_tiny_m: Int8TinyMKernels::load(context)?,
             gather: GatherKernels::load(context)?,
             metadata: MetadataKernels::load(context)?,
         })
@@ -147,6 +154,10 @@ impl Kernels {
 
     pub(crate) fn fp8_quantize(&self) -> &Fp8QuantizeKernels {
         &self.fp8_quantize
+    }
+
+    pub(crate) fn int8_tiny_m(&self) -> &Int8TinyMKernels {
+        &self.int8_tiny_m
     }
 
     pub(crate) fn gather(&self) -> &GatherKernels {
