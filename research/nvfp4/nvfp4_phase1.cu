@@ -131,6 +131,11 @@ struct DeviceBuffers {
   }
 };
 
+enum class Nvfp4ScaleMode : int {
+  kNearest = 0,
+  kRoundUp = 1,
+};
+
 __device__ __forceinline__ uint32_t mix32(uint32_t x) {
   x ^= x >> 16;
   x *= 0x7feb352dU;
@@ -171,12 +176,33 @@ __device__ __forceinline__ size_t scale_offset(
   return tile * 512U + local;
 }
 
+__device__ __forceinline__ Scale nvfp4_scale_from_amax(
+    float amax,
+    Nvfp4ScaleMode scale_mode) {
+  float requested = amax / 6.0f;
+  Scale scale = amax == 0.0f ? Scale(1.0f) : Scale(requested);
+  float scale_f = static_cast<float>(scale);
+  if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
+    return Scale(1.0f);
+  }
+
+  // NVFP4 has a positive UE4M3 scale. The CUTLASS conversion rounds to
+  // nearest-even; the alternative policy deliberately advances to the next
+  // finite UE4M3 value only when that nearest value would under-scale amax.
+  if (scale_mode == Nvfp4ScaleMode::kRoundUp && scale_f < requested &&
+      scale.raw() < 0x7eU) {
+    ++scale.raw();
+  }
+  return scale;
+}
+
 __global__ void quantize_bf16_nvfp4(
     const __nv_bfloat16* __restrict__ src,
     uint8_t* __restrict__ dst,
     Scale* __restrict__ scales,
     size_t rows,
-    size_t k) {
+    size_t k,
+    Nvfp4ScaleMode scale_mode) {
   size_t blocks_k = k / kScaleVector;
   size_t logical_block = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   size_t total_blocks = rows * blocks_k;
@@ -194,7 +220,7 @@ __global__ void quantize_bf16_nvfp4(
     amax = fmaxf(amax, fabsf(__bfloat162float(src[base + static_cast<size_t>(i)])));
   }
 
-  Scale scale = amax == 0.0f ? Scale(1.0f) : Scale(amax / 6.0f);
+  Scale scale = nvfp4_scale_from_amax(amax, scale_mode);
   float scale_f = static_cast<float>(scale);
   if (!(scale_f > 0.0f) || !isfinite(scale_f)) {
     scale = Scale(1.0f);
@@ -236,11 +262,13 @@ void launch_quantize(
     Scale* scales,
     size_t rows,
     size_t k,
-    cudaStream_t stream = nullptr) {
+    cudaStream_t stream = nullptr,
+    Nvfp4ScaleMode scale_mode = Nvfp4ScaleMode::kNearest) {
   size_t logical_blocks = rows * (k / kScaleVector);
   constexpr int threads = 256;
   int blocks = static_cast<int>((logical_blocks + threads - 1U) / threads);
-  quantize_bf16_nvfp4<<<blocks, threads, 0, stream>>>(src, dst, scales, rows, k);
+  quantize_bf16_nvfp4<<<blocks, threads, 0, stream>>>(
+      src, dst, scales, rows, k, scale_mode);
   CUDA_CHECK(cudaGetLastError());
 }
 

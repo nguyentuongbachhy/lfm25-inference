@@ -15,6 +15,7 @@ struct CheckpointOptions {
   int rows = 0;
   int n = 0;
   int k = 0;
+  Nvfp4ScaleMode scale_mode = Nvfp4ScaleMode::kNearest;
 };
 
 CheckpointOptions parse_checkpoint_options(int argc, char** argv) {
@@ -39,6 +40,15 @@ CheckpointOptions parse_checkpoint_options(int argc, char** argv) {
       options.n = std::atoi(v);
     } else if (const char* v = value("--k=")) {
       options.k = std::atoi(v);
+    } else if (const char* v = value("--scale-mode=")) {
+      if (std::strcmp(v, "nearest") == 0) {
+        options.scale_mode = Nvfp4ScaleMode::kNearest;
+      } else if (std::strcmp(v, "round_up") == 0) {
+        options.scale_mode = Nvfp4ScaleMode::kRoundUp;
+      } else {
+        std::fprintf(stderr, "unsupported NVFP4 scale mode: %s\\n", v);
+        std::exit(2);
+      }
     }
   }
   return options;
@@ -165,9 +175,9 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemset(buffers.c, 0, output_elements * sizeof(ElementC)));
 
   launch_quantize(buffers.weight_bf16, buffers.weight_fp4, buffers.weight_scale,
-                  options.n, options.k);
+                  options.n, options.k, nullptr, options.scale_mode);
   launch_quantize(buffers.input_bf16, buffers.input_fp4, buffers.input_scale,
-                  options.rows, options.k);
+                  options.rows, options.k, nullptr, options.scale_mode);
 
   int cutlass_m = options.n;
   int cutlass_n = options.rows;
@@ -263,10 +273,12 @@ int main(int argc, char** argv) {
   }
 
   std::printf(
-      "nvfp4_checkpoint site=%s rows=%d N=%d K=%d tileN=%d nrmse=%.8f cosine=%.8f "
+      "nvfp4_checkpoint site=%s scale_mode=%s rows=%d N=%d K=%d tileN=%d nrmse=%.8f cosine=%.8f "
       "max_abs=%.8f mean_abs=%.8f output_rms_ratio=%.8f non_finite=%zu "
       "top1_agreement=%.8f top5_overlap=%.8f top10_overlap=%.8f mean_kl=%.8f\n",
-      options.site.c_str(), options.rows, options.n, options.k, NVFP4_TILE_N,
+      options.site.c_str(),
+      options.scale_mode == Nvfp4ScaleMode::kRoundUp ? "round_up" : "nearest",
+      options.rows, options.n, options.k, NVFP4_TILE_N,
       nrmse, cosine, max_abs, mean_abs, output_rms_ratio, non_finite,
       top1_agreement, top5_overlap, top10_overlap, mean_kl);
   return non_finite == 0 ? 0 : 3;

@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${NVFP4_WORK_DIR:-${ROOT}/target/nvfp4-sm120}"
+mkdir -p "${WORK_DIR}"
+WORK_DIR="$(realpath "${WORK_DIR}")"
 CUTLASS_DIR="${WORK_DIR}/cutlass"
 BRIDGE_BIN="${WORK_DIR}/nvfp4-checkpoint-tn64"
 BRIDGE_SOURCE="${ROOT}/research/nvfp4/nvfp4_checkpoint_site.cu"
@@ -16,6 +18,12 @@ MAX_TOKENS="${NVFP4_CHECKPOINT_MAX_TOKENS:-1024}"
 EVAL_SEQUENCES="${NVFP4_CHECKPOINT_EVAL_SEQUENCES:-16}"
 EVAL_TOKENS="${NVFP4_CHECKPOINT_EVAL_TOKENS:-128}"
 SITES="${NVFP4_CHECKPOINT_SITES:-layers.2.mlp.gate_up,layers.3.mlp.gate_up,layers.5.mlp.gate_up,layers.7.mlp.gate_up,layers.8.mlp.gate_up,layers.9.mlp.gate_up,layers.11.mlp.gate_up,layers.15.mlp.gate_up,layers.6.mlp.down,layers.8.mlp.down,layers.9.mlp.down,layers.10.mlp.down,layers.12.mlp.down,layers.14.mlp.down,layers.15.mlp.down,lm_head}"
+SCALE_MODE="${NVFP4_CHECKPOINT_SCALE_MODE:-nearest}"
+
+if [[ "${SCALE_MODE}" != "nearest" && "${SCALE_MODE}" != "round_up" ]]; then
+  echo "[nvfp4-checkpoint] NVFP4_CHECKPOINT_SCALE_MODE must be nearest or round_up" >&2
+  exit 2
+fi
 
 if [[ $# -ne 2 ]]; then
   echo "usage: bash scripts/check_nvfp4_checkpoint.sh CALIBRATION_CORPUS VALIDATION_CORPUS" >&2
@@ -25,7 +33,6 @@ fi
 CALIBRATION_CORPUS="$(realpath "$1")"
 VALIDATION_CORPUS="$(realpath "$2")"
 MODEL="$(realpath "${MODEL}")"
-mkdir -p "${WORK_DIR}"
 
 for tool in git nvcc cargo python3 realpath; do
   command -v "${tool}" >/dev/null 2>&1 || {
@@ -173,6 +180,7 @@ fn maybe_characterize_nvfp4_checkpoint(
             .arg(format!("--rows={rows}"))
             .arg(format!("--n={n}"))
             .arg(format!("--k={feature_size}"))
+            .arg(format!("--scale-mode={}", env::var("NVFP4_CHECKPOINT_SCALE_MODE").unwrap_or_else(|_| "nearest".to_owned())))
             .arg(format!("--weight={}", weight_path.display()))
             .arg(format!("--input={}", input_path.display()))
             .arg(format!("--reference={}", reference_path.display()))
@@ -236,6 +244,7 @@ echo "[nvfp4-checkpoint] model: ${MODEL}"
 echo "[nvfp4-checkpoint] calibration corpus: ${CALIBRATION_CORPUS}"
 echo "[nvfp4-checkpoint] validation corpus: ${VALIDATION_CORPUS}"
 echo "[nvfp4-checkpoint] selected sites: 16"
+echo "[nvfp4-checkpoint] scale mode: ${SCALE_MODE}"
 
 (
   cd "${WORKTREE}"
@@ -295,7 +304,7 @@ for row in rows:
             f" kl={float(row['mean_kl']):.6f}"
         )
     print(
-        f"nvfp4_checkpoint_summary site={row['site']} verdict={verdict} "
+        f"nvfp4_checkpoint_summary site={row['site']} scale_mode={row.get('scale_mode', 'nearest')} verdict={verdict} "
         f"nrmse={nrmse:.6f} cosine={cosine:.6f}{extra}"
     )
 PY
