@@ -19,14 +19,40 @@ struct Int8DownState {
 
 impl Int8DownState {
     fn new(runtime: &CudaRuntime, model: &Lfm2Model, enabled: bool) -> Result<Option<Self>> {
-        if !enabled {
+        let layers: &[usize] = if enabled {
+            &INT8_TINY_M_DOWN_LAYERS
+        } else {
+            &[]
+        };
+        Self::new_with_layers(runtime, model, layers)
+    }
+
+    fn new_with_layers(
+        runtime: &CudaRuntime,
+        model: &Lfm2Model,
+        selected_layers: &[usize],
+    ) -> Result<Option<Self>> {
+        if selected_layers.is_empty() {
             return Ok(None);
         }
+        ensure!(
+            selected_layers
+                .iter()
+                .all(|&layer| layer < model.weights.layers.len()),
+            "INT8 tiny-M down layer mask contains an out-of-range layer"
+        );
+        let mut ordered = selected_layers.to_vec();
+        ordered.sort_unstable();
+        ordered.dedup();
+        ensure!(
+            ordered.len() == selected_layers.len(),
+            "INT8 tiny-M down layer mask contains duplicates"
+        );
 
         let intermediate = model.config.effective_intermediate_size();
         let mut weights = Vec::with_capacity(model.weights.layers.len());
         for (layer, layer_weights) in model.weights.layers.iter().enumerate() {
-            let selected = INT8_TINY_M_DOWN_LAYERS.contains(&layer)
+            let selected = selected_layers.contains(&layer)
                 // Existing selective-FP8 down sites always keep the production
                 // fused E4M3 path. The INT8 experiment only replaces BF16 tails.
                 && layer_weights.feed_forward.down.fp8.is_none();
@@ -41,8 +67,7 @@ impl Int8DownState {
         }
 
         ensure!(
-            weights.iter().filter(|weight| weight.is_some()).count()
-                <= INT8_TINY_M_DOWN_LAYERS.len(),
+            weights.iter().filter(|weight| weight.is_some()).count() <= selected_layers.len(),
             "INT8 tiny-M down state installed too many weights"
         );
         Ok(Some(Self {
