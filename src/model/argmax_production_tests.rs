@@ -110,6 +110,7 @@ fn prefill_cache(
     Ok(cache)
 }
 
+#[allow(clippy::type_complexity)]
 fn decode_metadata(batch: usize) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>)> {
     let request_slots = (0..batch)
         .map(u32::try_from)
