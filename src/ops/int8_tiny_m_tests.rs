@@ -94,9 +94,8 @@ fn int8_tiny_m_dp4a_matches_cpu_quantized_reference() -> Result<()> {
                 for k in 0..K {
                     sum += i32::from(input_i8[row * K + k]) * i32::from(weight_i8[col * K + k]);
                 }
-                expected.push(bf16::from_f32(
-                    sum as f32 * input_scales[row] * weight_scales[col],
-                ));
+                let scale = input_scales[row] * weight_scales[col];
+                expected.push(bf16::from_f32(sum as f32 * scale));
             }
         }
         assert_eq_bf16(&readback(&runtime, &output)?, &expected);
