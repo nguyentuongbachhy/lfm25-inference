@@ -130,6 +130,7 @@ fn bench_int8_tiny_m_real_down_sites() -> Result<()> {
         let fp8_site = policy.sites.iter().find(|site| site.site == site_name);
 
         for m in [1usize, 2] {
+            runtime.blaslt().prepare_linear_bf16(m, n, k)?;
             let input = runtime.upload(&samples[..m * k], Shape::new([m, k]))?;
             let mut bf16_output = runtime.alloc_bf16(Shape::new([m, n]))?;
             let mut int8_output = runtime.alloc_bf16(Shape::new([m, n]))?;
