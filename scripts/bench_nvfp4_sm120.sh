@@ -12,6 +12,7 @@ CUTLASS_REF="${CUTLASS_REF:-v4.7.0}"
 ITERATIONS="${NVFP4_ITERATIONS:-100}"
 BUILD_JOBS="${NVFP4_BUILD_JOBS:-$(nproc)}"
 EXAMPLE_REL="examples/79_blackwell_geforce_gemm/79a_blackwell_geforce_nvfp4_bf16_gemm.cu"
+SUBBYTE_REL="include/cutlass/subbyte_reference.h"
 EXAMPLE_TARGET="79a_blackwell_geforce_nvfp4_bf16_gemm"
 EXAMPLE_BIN="${CUTLASS_BUILD_DIR}/examples/79_blackwell_geforce_gemm/${EXAMPLE_TARGET}"
 
@@ -60,12 +61,44 @@ else
 fi
 
 SOURCE="${CUTLASS_DIR}/${EXAMPLE_REL}"
+SUBBYTE_SOURCE="${CUTLASS_DIR}/${SUBBYTE_REL}"
 if [[ ! -f "${SOURCE}" ]]; then
   echo "[nvfp4-sm120] CUTLASS NVFP4 example not found: ${SOURCE}" >&2
   exit 1
 fi
+if [[ ! -f "${SUBBYTE_SOURCE}" ]]; then
+  echo "[nvfp4-sm120] CUTLASS subbyte helper not found: ${SUBBYTE_SOURCE}" >&2
+  exit 1
+fi
 
-git -C "${CUTLASS_DIR}" checkout -- "${EXAMPLE_REL}"
+git -C "${CUTLASS_DIR}" checkout -- "${EXAMPLE_REL}" "${SUBBYTE_REL}"
+
+patch_cuda128_atomic_scope() {
+  python3 - "${SUBBYTE_SOURCE}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "__nv_atomic_load_n(ptr_, __NV_ATOMIC_RELAXED)"
+new = "__nv_atomic_load_n(ptr_, __NV_ATOMIC_RELAXED, __NV_THREAD_SCOPE_DEVICE)"
+count = text.count(old)
+if count == 1:
+    path.write_text(text.replace(old, new, 1))
+    print("[nvfp4-sm120] patched CUTLASS __nv_atomic_load_n with explicit device scope")
+elif new in text:
+    print("[nvfp4-sm120] CUTLASS atomic scope patch already present")
+else:
+    raise SystemExit(
+        "[nvfp4-sm120] CUTLASS subbyte atomic-load call changed; refusing to patch"
+    )
+PY
+}
+
+# CUDA 12.8 documents the scope argument for __nv_atomic_load_n, but this
+# compiler rejects CUTLASS 4.7's two-argument call in the subbyte device path.
+# Make the device scope explicit. The following RMW uses device-scope atomicCAS.
+patch_cuda128_atomic_scope
 
 if [[ ! -f "${CUTLASS_BUILD_DIR}/CMakeCache.txt" ]]; then
   echo "[nvfp4-sm120] configuring CUTLASS for SM120a"
@@ -126,11 +159,12 @@ build_variant() {
   fi
 }
 
+rm -f "${BIN_DIR}"/nvfp4_tn*
 for tile_n in 8 16 32 64 128; do
   build_variant "${tile_n}"
 done
 
-git -C "${CUTLASS_DIR}" checkout -- "${EXAMPLE_REL}"
+git -C "${CUTLASS_DIR}" checkout -- "${EXAMPLE_REL}" "${SUBBYTE_REL}"
 
 if ! compgen -G "${BIN_DIR}/nvfp4_tn*" >/dev/null; then
   echo "[nvfp4-sm120] no NVFP4 CUTLASS variants compiled" >&2
@@ -163,8 +197,8 @@ run_nvfp4() {
 
   [[ -x "${bin}" ]] || return 0
 
-  # Compute Y^T = W * X^T so the tiny runtime M maps to CUTLASS N.
-  # Column-major D makes the physical output layout equivalent to row-major Y.
+  # Runtime computes Y = X * W^T. Benchmark the equivalent Y^T = W * X^T so
+  # small runtime M maps to CUTLASS N, where SM120 narrow-N kernels apply.
   local cutlass_m="${original_n}"
   local cutlass_n="${original_m}"
   local output
