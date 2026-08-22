@@ -202,6 +202,7 @@ impl AsyncAttentionFastKernels {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validate_ragged_common(
         page_size: usize,
         query: &CudaSlice<bf16>,

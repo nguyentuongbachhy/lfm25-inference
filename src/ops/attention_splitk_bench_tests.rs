@@ -10,7 +10,7 @@ use crate::{
     tensor::Shape,
 };
 
-use super::attention_async_fast::{splitk_decode_splits, splitk_workspace_elements};
+use super::attention_async_fast::splitk_workspace_elements;
 
 fn bench_splitk_case(
     runtime: &CudaRuntime,
@@ -53,7 +53,6 @@ fn bench_splitk_case(
         &vec![u32::try_from(context - 1)?; batch],
         Shape::new([batch]),
     )?;
-    let production_splits = splitk_decode_splits(batch, context, page_size.value());
 
     for splits in [2usize, 4, 8] {
         let mut baseline_output = runtime.alloc_bf16(Shape::new([batch, 32, 64]))?;
@@ -119,12 +118,11 @@ fn bench_splitk_case(
         )?;
 
         println!(
-            "splitk_sweep page_size={} batch={} context={} splits={} production_splits={} baseline_mean={:.3}us baseline_p50={:.3}us baseline_p95={:.3}us split_mean={:.3}us split_p50={:.3}us split_p95={:.3}us speedup_mean={:.4}x speedup_p50={:.4}x speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
+            "splitk_sweep page_size={} batch={} context={} splits={} baseline_mean={:.3}us baseline_p50={:.3}us baseline_p95={:.3}us split_mean={:.3}us split_p50={:.3}us split_p95={:.3}us speedup_mean={:.4}x speedup_p50={:.4}x speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
             page_size.value(),
             batch,
             context,
             splits,
-            production_splits,
             paired.reference.mean_us,
             paired.reference.p50_us,
             paired.reference.p95_us,

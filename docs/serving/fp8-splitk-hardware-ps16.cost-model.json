@@ -1,0 +1,386 @@
+{
+  "schema_version": 1,
+  "gpu_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "page_size": 16,
+  "decode_bf16": {
+    "points": [
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 6.011744022369385
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 7.545695781707764
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 7.633120059967041
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 7.737184047698975
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 8.341856002807617
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 9.428544044494629
+      },
+      {
+        "batch": 64,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 10.529952049255371
+      },
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 6.5096001625061035
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 8.183263778686523
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 8.417856216430664
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 8.771712303161621
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 9.959199905395508
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 12.035552024841309
+      },
+      {
+        "batch": 64,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 15.867487907409668
+      },
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 7.372928142547607
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 9.172767639160156
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 9.899200439453125
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 11.255711555480957
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 14.844063758850098
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 22.60099220275879
+      },
+      {
+        "batch": 64,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 35.16886520385742
+      },
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 11.495488166809082
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 13.800127983093262
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 16.340511322021484
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 21.548959732055664
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 36.7432975769043
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 65.53129577636719
+      }
+    ]
+  },
+  "decode_fp8": {
+    "points": [
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 6.011744022369385
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 7.545695781707764
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 7.633120059967041
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 7.737184047698975
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 8.341856002807617
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 9.428544044494629
+      },
+      {
+        "batch": 64,
+        "tokens": 1,
+        "context": 128,
+        "milliseconds": 10.529952049255371
+      },
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 6.5096001625061035
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 8.183263778686523
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 8.417856216430664
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 8.771712303161621
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 9.959199905395508
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 12.035552024841309
+      },
+      {
+        "batch": 64,
+        "tokens": 1,
+        "context": 512,
+        "milliseconds": 15.867487907409668
+      },
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 7.372928142547607
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 9.172767639160156
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 9.899200439453125
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 11.255711555480957
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 14.844063758850098
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 22.60099220275879
+      },
+      {
+        "batch": 64,
+        "tokens": 1,
+        "context": 2048,
+        "milliseconds": 35.16886520385742
+      },
+      {
+        "batch": 1,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 11.495488166809082
+      },
+      {
+        "batch": 2,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 13.800127983093262
+      },
+      {
+        "batch": 4,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 16.340511322021484
+      },
+      {
+        "batch": 8,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 21.548959732055664
+      },
+      {
+        "batch": 16,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 36.7432975769043
+      },
+      {
+        "batch": 32,
+        "tokens": 1,
+        "context": 8192,
+        "milliseconds": 65.53129577636719
+      }
+    ]
+  },
+  "prefill_bf16": {
+    "points": [
+      {
+        "batch": 1,
+        "tokens": 32,
+        "context": 32,
+        "milliseconds": 9.714995
+      },
+      {
+        "batch": 1,
+        "tokens": 128,
+        "context": 128,
+        "milliseconds": 13.983195
+      },
+      {
+        "batch": 1,
+        "tokens": 512,
+        "context": 512,
+        "milliseconds": 46.610260000000004
+      },
+      {
+        "batch": 1,
+        "tokens": 1024,
+        "context": 1024,
+        "milliseconds": 107.361128
+      },
+      {
+        "batch": 1,
+        "tokens": 2048,
+        "context": 2048,
+        "milliseconds": 278.65227999999996
+      },
+      {
+        "batch": 1,
+        "tokens": 4096,
+        "context": 4096,
+        "milliseconds": 840.2585449999999
+      },
+      {
+        "batch": 1,
+        "tokens": 8192,
+        "context": 8192,
+        "milliseconds": 2870.747849
+      }
+    ]
+  },
+  "interactive_prompt_limit": 2048,
+  "ttft_slo_ms": 400.0,
+  "tpot_slo_ms": 50.0
+}

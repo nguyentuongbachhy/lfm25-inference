@@ -11,9 +11,6 @@ use crate::{
 
 pub(crate) const SPLITK_MAX_SPLITS: usize = 8;
 const SPLITK_PARTIAL_STRIDE: usize = 66;
-const SPLITK_TARGET_BLOCKS: usize = 64;
-const SPLITK_MIN_PAGES_PER_SPLIT: usize = 8;
-const SPLITK_MIN_CONTEXT_TOKENS: usize = 1024;
 
 pub(crate) struct FastRaggedAttentionInput<'a> {
     pub(crate) query: &'a Tensor<bf16>,
@@ -30,31 +27,6 @@ pub(crate) fn splitk_workspace_elements(maximum_tokens: usize) -> Result<usize> 
         .and_then(|value| value.checked_mul(SPLITK_MAX_SPLITS))
         .and_then(|value| value.checked_mul(SPLITK_PARTIAL_STRIDE))
         .context("split-K decode workspace size overflow")
-}
-
-/// Choose enough KV-axis splits to expose roughly 64 CTAs at low decode batch,
-/// but never split a short context into tiny page ranges. For the 8-KV-head
-/// LFM2 topology this yields B1->8, B2->4, B4->2 and B>=8->1 at sufficiently
-/// long context. Returning one means the existing single-CTA-per-KV-head path.
-pub(crate) fn splitk_decode_splits(
-    num_tokens: usize,
-    maximum_context_tokens: usize,
-    page_size: usize,
-) -> usize {
-    if num_tokens == 0
-        || maximum_context_tokens < SPLITK_MIN_CONTEXT_TOKENS
-        || !matches!(page_size, 16 | 32)
-    {
-        return 1;
-    }
-    let base_blocks = num_tokens.saturating_mul(8).max(1);
-    let occupancy_splits = SPLITK_TARGET_BLOCKS
-        .div_ceil(base_blocks)
-        .clamp(1, SPLITK_MAX_SPLITS);
-    let context_pages = maximum_context_tokens.div_ceil(page_size);
-    let page_splits = (context_pages / SPLITK_MIN_PAGES_PER_SPLIT)
-        .clamp(1, SPLITK_MAX_SPLITS);
-    occupancy_splits.min(page_splits).max(1)
 }
 
 pub(crate) fn paged_attention_fast_lfm2_bf16(
@@ -227,17 +199,6 @@ pub(crate) fn paged_ragged_attention_splitk_lfm2_bf16_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splitk_dispatch_targets_low_batch_long_context_only() {
-        assert_eq!(splitk_decode_splits(1, 512, 16), 1);
-        assert_eq!(splitk_decode_splits(1, 1024, 16), 8);
-        assert_eq!(splitk_decode_splits(2, 2048, 16), 4);
-        assert_eq!(splitk_decode_splits(4, 2048, 16), 2);
-        assert_eq!(splitk_decode_splits(8, 2048, 16), 1);
-        assert_eq!(splitk_decode_splits(1, 1024, 32), 4);
-        assert_eq!(splitk_decode_splits(1, 2048, 32), 8);
-    }
 
     #[test]
     fn splitk_workspace_is_bounded_for_serving_capacity() -> Result<()> {
