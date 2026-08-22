@@ -1,3 +1,5 @@
+include!("int8_down.rs");
+
 /// Persistent fixed-address scratch for the single-token-per-segment serving
 /// topology. All transformer layers reuse the same buffers sequentially; no
 /// workspace is allocated per layer or per decode step. Selective FP8 sites
@@ -19,6 +21,7 @@ pub(crate) struct DecodeExecutor {
     attention_splitk_partials: Tensor<f32>,
     sampled: Tensor<u32>,
     splitk_attention_enabled: bool,
+    int8_down: Option<Int8DownState>,
 }
 
 fn splitk_attention_enabled_from_env() -> bool {
@@ -124,8 +127,14 @@ fn linear_decode_into(
 }
 
 impl DecodeExecutor {
-    fn new(runtime: &CudaRuntime, config: &Lfm2Config, maximum_tokens: usize) -> Result<Self> {
+    fn new(
+        runtime: &CudaRuntime,
+        model: &Lfm2Model,
+        maximum_tokens: usize,
+        int8_tiny_m_down_enabled: bool,
+    ) -> Result<Self> {
         ensure!(maximum_tokens > 0, "decode executor requires token capacity");
+        let config = &model.config;
         let hidden = config.hidden_size;
         let intermediate = config.effective_intermediate_size();
         let kv_width = config.num_key_value_heads * config.head_dim();
@@ -151,6 +160,7 @@ impl DecodeExecutor {
             ]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
             splitk_attention_enabled: splitk_attention_enabled_from_env(),
+            int8_down: Int8DownState::new(runtime, model, int8_tiny_m_down_enabled)?,
         })
     }
 
@@ -212,6 +222,7 @@ impl DecodeExecutor {
             fp8_input,
             attention_splitk_partials,
             sampled,
+            int8_down,
             ..
         } = self;
 
@@ -392,13 +403,20 @@ impl DecodeExecutor {
                 )?;
                 linear_decode_prequantized_fp8_into(runtime, fp8_input, fp8, operator_output)?;
             } else {
-                ops::silu_mul_packed_bf16_into(runtime, wide, activated)?;
-                ops::linear_bf16_into(
-                    runtime,
-                    activated,
-                    &weights.feed_forward.down.bf16,
-                    operator_output,
-                )?;
+                let used_int8 = if let Some(state) = int8_down.as_mut() {
+                    state.try_run(runtime, layer, num_tokens, wide, operator_output)?
+                } else {
+                    false
+                };
+                if !used_int8 {
+                    ops::silu_mul_packed_bf16_into(runtime, wide, activated)?;
+                    ops::linear_bf16_into(
+                        runtime,
+                        activated,
+                        &weights.feed_forward.down.bf16,
+                        operator_output,
+                    )?;
+                }
             }
 
             let next_norm = if layer + 1 < model.config.num_hidden_layers {
@@ -440,6 +458,11 @@ impl DecodeExecutor {
             ops::linear_bf16_into(runtime, normalized, &model.weights.embedding, logits)?;
         }
         ops::argmax_rows_bf16_into(runtime, logits, sampled)
+    }
+
+    #[cfg(test)]
+    fn logits(&self) -> &Tensor<bf16> {
+        &self.logits
     }
 }
 
@@ -514,7 +537,23 @@ impl Lfm2Model {
         maximum_tokens: usize,
     ) -> Result<DecodeExecutor> {
         self.prepare_decode_executor_fp8(runtime, maximum_tokens)?;
-        DecodeExecutor::new(runtime, &self.config, maximum_tokens)
+        DecodeExecutor::new(
+            runtime,
+            self,
+            maximum_tokens,
+            int8_tiny_m_down_enabled_from_env(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_decode_executor_with_int8_tiny_m_down(
+        &self,
+        runtime: &CudaRuntime,
+        maximum_tokens: usize,
+        enabled: bool,
+    ) -> Result<DecodeExecutor> {
+        self.prepare_decode_executor_fp8(runtime, maximum_tokens)?;
+        DecodeExecutor::new(runtime, self, maximum_tokens, enabled)
     }
 
     pub(crate) fn try_forward_ragged_decode<'a>(
