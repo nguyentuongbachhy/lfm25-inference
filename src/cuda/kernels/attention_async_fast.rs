@@ -165,9 +165,18 @@ impl AsyncAttentionFastKernels {
             .and_then(|value| value.checked_mul(page_size))
             .and_then(|value| value.checked_mul(64))
             .context("fast-exp attention cache size overflow")?;
-        ensure!(query.len() >= q_required, "fast-exp query storage too small");
-        ensure!(output.len() >= q_required, "fast-exp output storage too small");
-        ensure!(key_cache.len() >= cache_required, "fast-exp K cache too small");
+        ensure!(
+            query.len() >= q_required,
+            "fast-exp query storage too small"
+        );
+        ensure!(
+            output.len() >= q_required,
+            "fast-exp output storage too small"
+        );
+        ensure!(
+            key_cache.len() >= cache_required,
+            "fast-exp K cache too small"
+        );
         ensure!(
             value_cache.len() >= cache_required,
             "fast-exp V cache too small"

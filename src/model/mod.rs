@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod argmax_production_tests;
 mod calibration;
 mod evaluation;
 mod fp8_analysis;

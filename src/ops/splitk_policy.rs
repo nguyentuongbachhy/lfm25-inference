@@ -87,8 +87,7 @@ fn splitk_decode_splits_ps32_legacy(num_tokens: usize, context_tokens: usize) ->
         .div_ceil(base_blocks)
         .clamp(1, SPLITK_MAX_SPLITS);
     let context_pages = context_tokens.div_ceil(32);
-    let page_splits = (context_pages / LEGACY_MIN_PAGES_PER_SPLIT)
-        .clamp(1, SPLITK_MAX_SPLITS);
+    let page_splits = (context_pages / LEGACY_MIN_PAGES_PER_SPLIT).clamp(1, SPLITK_MAX_SPLITS);
     occupancy_splits.min(page_splits).max(1)
 }
 
