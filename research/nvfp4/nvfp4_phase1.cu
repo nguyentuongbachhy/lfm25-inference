@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -22,8 +23,6 @@
 #define NVFP4_TILE_N 8
 #endif
 
-using namespace cute;
-
 using ElementA = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
 using ElementB = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
 using Scale = typename ElementA::ScaleFactorType;
@@ -32,8 +31,8 @@ using ElementD = cutlass::bfloat16_t;
 using Accumulator = float;
 using Arch = cutlass::arch::Sm120;
 using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-using Tile = Shape<_128, Int<NVFP4_TILE_N>, _128>;
-using Cluster = Shape<_1, _1, _1>;
+using ThreadBlockShape = cute::Shape<cute::_128, cute::Int<NVFP4_TILE_N>, cute::_128>;
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
 
 constexpr int kAlignmentA = 32;
 constexpr int kAlignmentB = 32;
@@ -45,8 +44,8 @@ constexpr size_t kL2FlushBytes = 128ull * 1024ull * 1024ull;
 using Epilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     Arch,
     OperatorClass,
-    Tile,
-    Cluster,
+    ThreadBlockShape,
+    ClusterShape,
     cutlass::epilogue::collective::EpilogueTileAuto,
     Accumulator,
     Accumulator,
@@ -68,14 +67,14 @@ using Mainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     cutlass::layout::ColumnMajor,
     kAlignmentB,
     Accumulator,
-    Tile,
-    Cluster,
+    ThreadBlockShape,
+    ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename Epilogue::SharedStorage))>,
     cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
 
 using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,
+    cute::Shape<int, int, int, int>,
     Mainloop,
     Epilogue,
     void>;
