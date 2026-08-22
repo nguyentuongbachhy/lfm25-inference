@@ -12,6 +12,7 @@ const QUANT_BLOCK_SIZE: u32 = 256;
 const LINEAR_BLOCK_SIZE: u32 = 128;
 const WARPS_PER_LINEAR_BLOCK: usize = 4;
 pub(crate) const INT8_TINY_M_LIMIT: usize = 8;
+pub(crate) const W8A16_TINY_M_LIMIT: usize = 2;
 
 pub(crate) struct QuantizeS8RowsLaunch<'a> {
     pub(crate) input: &'a CudaSlice<bf16>,
@@ -32,9 +33,20 @@ pub(crate) struct TinyMInt8LinearLaunch<'a> {
     pub(crate) k: usize,
 }
 
+pub(crate) struct TinyMW8A16LinearLaunch<'a> {
+    pub(crate) input: &'a CudaSlice<bf16>,
+    pub(crate) weight: &'a CudaSlice<i8>,
+    pub(crate) weight_scales: &'a CudaSlice<f32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) m: usize,
+    pub(crate) n: usize,
+    pub(crate) k: usize,
+}
+
 pub(crate) struct Int8TinyMKernels {
     quantize_rows: KernelLaunch,
     linear: KernelLaunch,
+    weight_only_linear: KernelLaunch,
 }
 
 impl KernelSet for Int8TinyMKernels {
@@ -52,6 +64,11 @@ impl KernelSet for Int8TinyMKernels {
             LINEAR_BLOCK_SIZE,
             LINEAR_BLOCK_SIZE,
         )?;
+        let weight_only_linear = KernelLaunch::new_with_multiple(
+            load_function(&module, Self::MODULE_NAME, "int8_weight_bf16_tiny_m_bf16")?,
+            LINEAR_BLOCK_SIZE,
+            LINEAR_BLOCK_SIZE,
+        )?;
         ensure!(
             quantize_rows.policy().block_size() == QUANT_BLOCK_SIZE,
             "INT8 row quantizer did not resolve to 256 threads"
@@ -60,9 +77,14 @@ impl KernelSet for Int8TinyMKernels {
             linear.policy().block_size() == LINEAR_BLOCK_SIZE,
             "INT8 tiny-M linear did not resolve to 128 threads"
         );
+        ensure!(
+            weight_only_linear.policy().block_size() == LINEAR_BLOCK_SIZE,
+            "W8A16 tiny-M linear did not resolve to 128 threads"
+        );
         Ok(Self {
             quantize_rows,
             linear,
+            weight_only_linear,
         })
     }
 }
@@ -95,7 +117,9 @@ impl Int8TinyMKernels {
             .arg(scales)
             .arg(&rows)
             .arg(&cols);
-        unsafe { args.launch(config)?; }
+        unsafe {
+            args.launch(config)?;
+        }
         Ok(())
     }
 
@@ -140,7 +164,53 @@ impl Int8TinyMKernels {
             .arg(&m)
             .arg(&n)
             .arg(&k);
-        unsafe { args.launch(config)?; }
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_weight_only_linear(
+        &self,
+        stream: &CudaStream,
+        launch: TinyMW8A16LinearLaunch<'_>,
+    ) -> Result<()> {
+        let TinyMW8A16LinearLaunch {
+            input,
+            weight,
+            weight_scales,
+            output,
+            m,
+            n,
+            k,
+        } = launch;
+        ensure!(
+            (1..=W8A16_TINY_M_LIMIT).contains(&m),
+            "W8A16 tiny-M linear supports M=1..={W8A16_TINY_M_LIMIT}, got {m}"
+        );
+        ensure!(n > 0 && k > 0, "W8A16 tiny-M linear requires non-empty N/K");
+        ensure!(k.is_multiple_of(4), "W8A16 tiny-M linear requires K divisible by 4");
+        let input_elements = m.checked_mul(k).context("W8A16 input size overflow")?;
+        let weight_elements = n.checked_mul(k).context("W8A16 weight size overflow")?;
+        let output_elements = m.checked_mul(n).context("W8A16 output size overflow")?;
+        ensure!(input.len() >= input_elements, "W8A16 tiny-M input buffer too small");
+        ensure!(weight.len() >= weight_elements, "W8A16 tiny-M weight buffer too small");
+        ensure!(weight_scales.len() >= n, "W8A16 tiny-M weight scales too small");
+        ensure!(output.len() >= output_elements, "W8A16 tiny-M output buffer too small");
+
+        let blocks = n.div_ceil(WARPS_PER_LINEAR_BLOCK);
+        let config = self.weight_only_linear.policy().exact_blocks(blocks)?;
+        let mut args = stream.launch_builder(self.weight_only_linear.function());
+        args.arg(input)
+            .arg(weight)
+            .arg(weight_scales)
+            .arg(output)
+            .arg(&m)
+            .arg(&n)
+            .arg(&k);
+        unsafe {
+            args.launch(config)?;
+        }
         Ok(())
     }
 }
