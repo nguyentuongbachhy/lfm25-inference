@@ -141,7 +141,7 @@ impl SamplingKernels {
 
     pub(crate) unsafe fn launch_argmax_rows_bf16_atomic(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         input: &CudaSlice<bf16>,
         output: &mut CudaSlice<u32>,
         rows: usize,
