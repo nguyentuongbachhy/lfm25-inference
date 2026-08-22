@@ -2,11 +2,7 @@ use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
 
-use crate::{
-    cache::KvPageSize,
-    cuda::CudaRuntime,
-    ops::set_atomic_argmax_test_override,
-};
+use crate::{cache::KvPageSize, cuda::CudaRuntime, ops::set_atomic_argmax_test_override};
 
 use super::{Fp8PrecisionPolicy, Lfm2Model, RaggedBatchInput};
 
