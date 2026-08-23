@@ -31,13 +31,29 @@ fn exported_weights() -> &'static Mutex<HashSet<String>> {
     EXPORTED_WEIGHTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Installs the set of policy sites that should be intercepted by the exact
+/// NVFP4 replay backend. Phase 2B leaves `NVFP4_REPLAY_ALLOWLIST` unset, so
+/// every enabled research-policy site is replayed. Phase 2C installs the full
+/// production E4M3 policy and uses the allowlist to replay only the proposed
+/// NVFP4 replacement sites while all other enabled sites stay E4M3.
 pub(crate) fn set_active_sites(sites: Vec<String>) {
+    let allowlist = env::var("NVFP4_REPLAY_ALLOWLIST").ok().map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|site| !site.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<HashSet<_>>()
+    });
+
     let mut active = match active_sites().lock() {
         Ok(active) => active,
         Err(poisoned) => poisoned.into_inner(),
     };
     active.clear();
-    active.extend(sites);
+    match allowlist {
+        Some(allowlist) => active.extend(sites.into_iter().filter(|site| allowlist.contains(site))),
+        None => active.extend(sites),
+    }
 }
 
 pub(crate) fn is_active_site(site: &str) -> bool {
@@ -134,7 +150,7 @@ fn ensure_weight_exported(
 
 /// Exact, deliberately slow quality-only replay through the validated CUTLASS
 /// SM120 NVFP4 kernel. This function must never be used for performance timing.
-/// Phase 2B invokes it only at sampled M=1 decode positions.
+/// Research phases invoke it only at sampled M=1 decode positions.
 pub(crate) fn linear_nvfp4_replay(
     runtime: &CudaRuntime,
     input: &Tensor<bf16>,
@@ -146,7 +162,7 @@ pub(crate) fn linear_nvfp4_replay(
     let k = input.dims()[input.rank() - 1];
     let n = weight.dims()[0];
     ensure!(weight.dims()[1] == k, "NVFP4 replay K mismatch");
-    ensure!(input.numel() == k, "NVFP4 replay is Phase-2B M=1 only");
+    ensure!(input.numel() == k, "NVFP4 replay is research M=1 only");
     ensure!(k.is_multiple_of(128), "NVFP4 replay K must be divisible by 128");
     ensure!(n.is_multiple_of(128), "NVFP4 replay N must be divisible by 128");
 
