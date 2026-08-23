@@ -302,8 +302,8 @@ Start with these files:
   profiling, serving, and FP8 commands.
 - [`docs/optimization.md`](docs/optimization.md) — historical implemented
   optimizations and measured bottlenecks.
-- [`docs/benchmarks/fp8/fp8_report.md`](docs/benchmarks/fp8/fp8_report.md) —
-  selective E4M3 calibration, quality, and E2E evidence.
+- [`docs/fp8_report.md`](docs/fp8_report.md) — selective E4M3 calibration,
+  quality, and E2E evidence.
 - [`docs/benchmarks/validated-runtime-v2.md`](docs/benchmarks/validated-runtime-v2.md)
   — validated atomic argmax production delta.
 - [`docs/research/nvfp4_rejection.md`](docs/research/nvfp4_rejection.md) — why
