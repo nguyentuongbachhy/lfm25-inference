@@ -49,9 +49,11 @@ if ! grep -Fq "${EXPECTED_GPU_SUBSTRING}" <<<"${GPU_NAMES}"; then
   exit 1
 fi
 
-CUDA_VERSION="$(nvcc --version | tail -n 1)"
-if ! grep -Fq "release 12.8" <<<"${CUDA_VERSION}"; then
-  echo "[nvfp4-phase2b] expected CUDA 12.8.x, got: ${CUDA_VERSION}" >&2
+NVCC_VERSION_OUTPUT="$(nvcc --version)"
+CUDA_VERSION="$(printf '%s\n' "${NVCC_VERSION_OUTPUT}" | tail -n 1)"
+if ! grep -Eq 'release[[:space:]]+12\.8([,[:space:]]|$)|cuda_12\.8([._/[:space:]]|$)' <<<"${NVCC_VERSION_OUTPUT}"; then
+  echo "[nvfp4-phase2b] expected CUDA 12.8.x; nvcc reported:" >&2
+  printf '%s\n' "${NVCC_VERSION_OUTPUT}" >&2
   exit 1
 fi
 
