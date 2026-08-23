@@ -94,7 +94,11 @@ fn replay_binary() -> Result<PathBuf> {
     let path = PathBuf::from(
         env::var("NVFP4_REPLAY_BIN").context("NVFP4_REPLAY_BIN is required for nvfp4-research")?,
     );
-    ensure!(path.is_file(), "NVFP4 replay binary does not exist: {}", path.display());
+    ensure!(
+        path.is_file(),
+        "NVFP4 replay binary does not exist: {}",
+        path.display()
+    );
     Ok(path)
 }
 
@@ -170,18 +174,20 @@ pub(crate) fn linear_nvfp4_replay(
         .output()
         .with_context(|| format!("failed to launch NVFP4 replay for {site}"))?;
 
-    let _ = fs::remove_file(&input_path);
     if !result.status.success() {
-        let _ = fs::remove_file(&output_path);
         anyhow::bail!(
-            "NVFP4 replay failed for {site} (status={}): stdout={} stderr={}",
+            "NVFP4 replay failed for {site} (status={}): stdout={} stderr={} weight={} input={} output={}",
             result.status,
             String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
+            String::from_utf8_lossy(&result.stderr),
+            weight_path.display(),
+            input_path.display(),
+            output_path.display(),
         );
     }
 
     let output_host = read_bf16_file(&output_path, n)?;
+    let _ = fs::remove_file(&input_path);
     let _ = fs::remove_file(&output_path);
     runtime.upload(&output_host, Shape::new([1, n]))
 }
