@@ -132,22 +132,46 @@ LLM_CUDA_ARCH=compute_120 cargo run --release -- \
 
 ## Serving
 
-Generate a hardware cost model for the selected page size:
+A validated PS16 scheduler cost model for the measured RTX 5060 Laptop GPU is
+already committed at:
+
+```text
+docs/serving/fp8-splitk-hardware-ps16.cost-model.json
+```
+
+Start the validated selective-E4M3 server with the matching precision policy:
 
 ```bash
 LLM_CUDA_ARCH=compute_120 cargo run --release -- \
+  --model models/LFM2.5-1.2B-Instruct \
+  --serve 127.0.0.1:8080 \
+  --fp8-policy docs/benchmarks/fp8/selected-policy.json \
+  --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json \
+  --page-size 16
+```
+
+The scheduler profile and runtime precision must match. Do not use the
+selective-E4M3 cost model with a BF16-only server.
+
+To generate a fresh profile on the active GPU, run:
+
+```bash
+LLM_CUDA_ARCH=compute_120 cargo run --release -- \
+  --model models/LFM2.5-1.2B-Instruct \
+  --fp8-policy docs/benchmarks/fp8/selected-policy.json \
   --benchmark-hardware docs/serving/rtx5060-ps16-hardware.json \
   --page-size 16
 ```
 
-Start the server:
+This command writes both:
 
-```bash
-LLM_CUDA_ARCH=compute_120 cargo run --release -- \
-  --serve 127.0.0.1:8080 \
-  --hardware-profile docs/serving/rtx5060-ps16-hardware.cost-model.json \
-  --page-size 16
+```text
+docs/serving/rtx5060-ps16-hardware.json
+docs/serving/rtx5060-ps16-hardware.cost-model.json
 ```
+
+For a BF16-only server, generate a separate hardware profile without
+`--fp8-policy` and serve with that BF16-generated cost model.
 
 Health check:
 
@@ -212,12 +236,14 @@ LLM_CUDA_ARCH=compute_120 cargo run --release -- \
   --page-size 16
 ```
 
-Load/goodput benchmark:
+Load/goodput benchmark using the validated selective-E4M3 scheduler profile:
 
 ```bash
 LLM_CUDA_ARCH=compute_120 cargo run --release -- \
+  --model models/LFM2.5-1.2B-Instruct \
+  --fp8-policy docs/benchmarks/fp8/selected-policy.json \
   --benchmark-load docs/serving/ps16-load.json \
-  --hardware-profile docs/serving/rtx5060-ps16-hardware.cost-model.json \
+  --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json \
   --page-size 16
 ```
 
