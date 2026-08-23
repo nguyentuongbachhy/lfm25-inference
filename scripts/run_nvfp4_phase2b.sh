@@ -19,6 +19,7 @@ MODEL="${NVFP4_MODEL:-${ROOT}/models/LFM2.5-1.2B-Instruct}"
 SEQUENCES="${NVFP4_PHASE2B_SEQUENCES:-8}"
 MAX_TOKENS="${NVFP4_PHASE2B_MAX_TOKENS:-128}"
 EXPECTED_GPU_SUBSTRING="${NVFP4_EXPECTED_GPU_SUBSTRING:-RTX 5060 Laptop}"
+EXPECTED_VALIDATION_SHA256="${NVFP4_PHASE2B_EXPECTED_VALIDATION_SHA256:-f0737ed31fc1329026e95cb8b98e19c2a182c39c240ab909dc31abf2f8af58e8}"
 
 if [[ $# -ne 1 ]]; then
   echo "usage: bash scripts/run_nvfp4_phase2b.sh VALIDATION_CORPUS" >&2
@@ -29,12 +30,32 @@ VALIDATION_CORPUS="$(realpath "$1")"
 MODEL="$(realpath "${MODEL}")"
 POLICY_SOURCE="$(realpath "${POLICY_SOURCE}")"
 
-for tool in git nvcc cargo python3 realpath nvidia-smi; do
+for tool in git nvcc cargo python3 realpath nvidia-smi sha256sum wc; do
   command -v "${tool}" >/dev/null 2>&1 || {
     echo "[nvfp4-phase2b] missing required host tool: ${tool}" >&2
     exit 1
   }
 done
+
+if [[ ! -s "${VALIDATION_CORPUS}" ]]; then
+  echo "[nvfp4-phase2b] validation corpus is missing or empty: ${VALIDATION_CORPUS}" >&2
+  exit 1
+fi
+
+VALIDATION_SHA256="$(sha256sum "${VALIDATION_CORPUS}" | awk '{print $1}')"
+VALIDATION_BYTES="$(wc -c < "${VALIDATION_CORPUS}" | tr -d '[:space:]')"
+VALIDATION_LINES="$(wc -l < "${VALIDATION_CORPUS}" | tr -d '[:space:]')"
+if [[ "${VALIDATION_SHA256}" != "${EXPECTED_VALIDATION_SHA256}" && "${NVFP4_ALLOW_CORPUS_HASH_MISMATCH:-0}" != "1" ]]; then
+  echo "[nvfp4-phase2b] refusing a validation corpus different from the Phase 2A disjoint split" >&2
+  echo "[nvfp4-phase2b] path:     ${VALIDATION_CORPUS}" >&2
+  echo "[nvfp4-phase2b] bytes:    ${VALIDATION_BYTES}" >&2
+  echo "[nvfp4-phase2b] lines:    ${VALIDATION_LINES}" >&2
+  echo "[nvfp4-phase2b] expected: ${EXPECTED_VALIDATION_SHA256}" >&2
+  echo "[nvfp4-phase2b] actual:   ${VALIDATION_SHA256}" >&2
+  echo "[nvfp4-phase2b] use the same WikiText-2 validation file as Phase 2A." >&2
+  echo "[nvfp4-phase2b] NVFP4_ALLOW_CORPUS_HASH_MISMATCH=1 is only for an intentional new study, not to bypass this gate." >&2
+  exit 1
+fi
 
 if [[ "${ROOT}" != "/home/hyy4hc/source/lfm25-inference" && "${NVFP4_ALLOW_ALT_HOST_PATH:-0}" != "1" ]]; then
   echo "[nvfp4-phase2b] refusing to run outside canonical host workspace: ${ROOT}" >&2
@@ -79,6 +100,7 @@ echo "[nvfp4-phase2b] GPU: ${GPU_NAMES//$'\n'/; }"
 echo "[nvfp4-phase2b] nvcc: ${CUDA_VERSION}"
 echo "[nvfp4-phase2b] model: ${MODEL}"
 echo "[nvfp4-phase2b] validation corpus: ${VALIDATION_CORPUS}"
+echo "[nvfp4-phase2b] corpus sha256: ${VALIDATION_SHA256} (${VALIDATION_BYTES} bytes, ${VALIDATION_LINES} lines)"
 echo "[nvfp4-phase2b] scope: sampled quality/propagation only; replay wall time is NOT performance evidence"
 
 if [[ ! -d "${CUTLASS_DIR}/.git" ]]; then
