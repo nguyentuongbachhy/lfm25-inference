@@ -14,6 +14,7 @@ POLICY_SOURCE="${NVFP4_PHASE2B_FP8_POLICY:-${ROOT}/docs/benchmarks/fp8/selected-
 POLICY_JSON="${WORK_DIR}/nvfp4-phase2b-candidates.json"
 REPORT_JSON="${WORK_DIR}/nvfp4-phase2b.json"
 SUMMARY_TXT="${WORK_DIR}/nvfp4-phase2b-summary.txt"
+TEST_LOG="${WORK_DIR}/nvfp4-phase2b-test.log"
 MODEL="${NVFP4_MODEL:-${ROOT}/models/LFM2.5-1.2B-Instruct}"
 SEQUENCES="${NVFP4_PHASE2B_SEQUENCES:-8}"
 MAX_TOKENS="${NVFP4_PHASE2B_MAX_TOKENS:-128}"
@@ -70,7 +71,7 @@ if ! git -C "${ROOT}" merge-base --is-ancestor 117c4a66828970344cd757d1e977bd729
 fi
 
 mkdir -p "${REPLAY_DATA}"
-rm -f "${REPORT_JSON}" "${SUMMARY_TXT}"
+rm -f "${REPORT_JSON}" "${SUMMARY_TXT}" "${TEST_LOG}"
 
 echo "[nvfp4-phase2b] host workspace: ${ROOT}"
 echo "[nvfp4-phase2b] branch/head: ${BRANCH} ${HEAD}"
@@ -116,10 +117,6 @@ nvcc \
   -o "${REPLAY_BIN}"
 git -C "${CUTLASS_DIR}" reset --hard HEAD >/dev/null
 
-# The policy is a carrier for the already-validated FP8 evaluation machinery.
-# E4M3 scales are retained only so install_fp8_policy can initialize its normal
-# toggle path; selected GEMMs are intercepted by the exact CUTLASS NVFP4 replay.
-# High-risk Phase-2A sites down{6,8,10} are excluded entirely.
 python3 - "${POLICY_SOURCE}" "${POLICY_JSON}" <<'PY'
 import json
 import sys
@@ -184,8 +181,6 @@ trap cleanup EXIT
 git -C "${ROOT}" worktree add --detach "${WORKTREE}" HEAD >/dev/null
 python3 "${ROOT}/research/nvfp4/patch_phase2b_worktree.py" "${WORKTREE}" "${ROOT}"
 
-# Format/check only the temporary research worktree. No production source is
-# committed by this script.
 (
   cd "${WORKTREE}"
   cargo fmt
@@ -202,12 +197,26 @@ export NVFP4_PHASE2B_SEQUENCES="${SEQUENCES}"
 export NVFP4_PHASE2B_MAX_TOKENS="${MAX_TOKENS}"
 
 echo "[nvfp4-phase2b] running sampled single-site propagation + bounded policy search"
+set +e
 (
   cd "${WORKTREE}"
-  LLM_CUDA_ARCH=compute_120 cargo test --release --features nvfp4-research \
+  RUST_BACKTRACE=1 LLM_CUDA_ARCH=compute_120 cargo test --release --features nvfp4-research \
     nvfp4_phase2b_sampled_propagation_and_policy_search \
     -- --ignored --nocapture --test-threads=1
-)
+) 2>&1 | tee "${TEST_LOG}"
+TEST_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [[ ${TEST_STATUS} -ne 0 ]]; then
+  echo >&2
+  echo "[nvfp4-phase2b] Phase 2B test failed with status ${TEST_STATUS}" >&2
+  echo "[nvfp4-phase2b] persistent log: ${TEST_LOG}" >&2
+  echo "[nvfp4-phase2b] extracted failure context:" >&2
+  grep -nE 'Error:|Caused by:|NVFP4 replay failed|CUDA error|CUTLASS error|panicked at|failed to|out of memory|invalid' "${TEST_LOG}" | tail -n 80 >&2 || true
+  echo "[nvfp4-phase2b] last 120 log lines:" >&2
+  tail -n 120 "${TEST_LOG}" >&2 || true
+  exit "${TEST_STATUS}"
+fi
 
 python3 - "${REPORT_JSON}" "${SUMMARY_TXT}" <<'PY'
 import json
@@ -221,10 +230,8 @@ if not report_path.is_file():
 report = json.loads(report_path.read_text())
 sites = report["sensitivity"]["sites"]
 
-# Phase-2B one-site screen. LM-head is special: final hidden must remain exact
-# because the changed projection occurs after final_rms_norm.
 def screen(site):
-    finite = True  # non-finites already fail the underlying evaluator.
+    finite = True
     if site["site"] == "lm_head":
         hidden_ok = site["final_hidden_nrmse"] <= 1e-7 and site["final_hidden_cosine"] >= 0.999999
     else:
@@ -275,4 +282,5 @@ PY
 
 echo "[nvfp4-phase2b] report: ${REPORT_JSON}"
 echo "[nvfp4-phase2b] summary: ${SUMMARY_TXT}"
+echo "[nvfp4-phase2b] test log: ${TEST_LOG}"
 echo "[nvfp4-phase2b] no production src/ changes were committed or merged"
