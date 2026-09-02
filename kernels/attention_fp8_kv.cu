@@ -1,4 +1,5 @@
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
 #include <math.h>
@@ -12,14 +13,9 @@ constexpr uint32_t HEAD_DIM = 64U;
 constexpr uint32_t Q_PER_KV = 4U;
 constexpr int PAGE_SIZE = 16;
 constexpr size_t PAGE_HEAD_ELEMENTS = PAGE_SIZE * HEAD_DIM;
+constexpr size_t PAGE_HEAD_PAIRS = PAGE_HEAD_ELEMENTS / 2U;
 constexpr float FP8_E4M3_MAX = 448.0f;
 constexpr float ATTN_SCALE = 0.125f;
-
-__device__ __forceinline__ float fp8_e4m3_to_float(unsigned char bits) {
-    __nv_fp8_e4m3 value;
-    value.__x = bits;
-    return static_cast<float>(value);
-}
 
 __device__ __forceinline__ void cp_async_16(void* dst, const void* src) {
 #if __CUDA_ARCH__ >= 800
@@ -117,6 +113,25 @@ __device__ __forceinline__ void stage_page_async(
     cp_async_commit();
 }
 
+__device__ __forceinline__ void decode_staged_page_fp8x2(
+    const unsigned char* __restrict__ key_fp8_stage,
+    const unsigned char* __restrict__ value_fp8_stage,
+    __half* __restrict__ key_decoded_stage,
+    __half* __restrict__ value_decoded_stage
+) {
+    for (size_t pair = threadIdx.x; pair < PAGE_HEAD_PAIRS; pair += blockDim.x) {
+        const size_t offset = pair * 2U;
+        const auto key_packed = *reinterpret_cast<const __nv_fp8x2_storage_t*>(key_fp8_stage + offset);
+        const auto value_packed = *reinterpret_cast<const __nv_fp8x2_storage_t*>(value_fp8_stage + offset);
+        const __half2 key_half2(__nv_cvt_fp8x2_to_halfraw2(key_packed, __NV_E4M3));
+        const __half2 value_half2(__nv_cvt_fp8x2_to_halfraw2(value_packed, __NV_E4M3));
+        key_decoded_stage[offset] = key_half2.x;
+        key_decoded_stage[offset + 1U] = key_half2.y;
+        value_decoded_stage[offset] = value_half2.x;
+        value_decoded_stage[offset + 1U] = value_half2.y;
+    }
+}
+
 extern "C" __global__
 __launch_bounds__(BLOCK_SIZE)
 void paged_gqa_lfm2_fp8_kv_ps16(
@@ -147,8 +162,10 @@ void paged_gqa_lfm2_fp8_kv_ps16(
         return;
     }
 
-    __shared__ __align__(16) unsigned char key_stage[2][PAGE_HEAD_ELEMENTS];
-    __shared__ __align__(16) unsigned char value_stage[2][PAGE_HEAD_ELEMENTS];
+    __shared__ __align__(16) unsigned char key_fp8_stage[2][PAGE_HEAD_ELEMENTS];
+    __shared__ __align__(16) unsigned char value_fp8_stage[2][PAGE_HEAD_ELEMENTS];
+    __shared__ __align__(16) __half key_decoded_stage[2][PAGE_HEAD_ELEMENTS];
+    __shared__ __align__(16) __half value_decoded_stage[2][PAGE_HEAD_ELEMENTS];
     __shared__ float key_scale_stage[2];
     __shared__ float value_scale_stage[2];
 
@@ -157,8 +174,22 @@ void paged_gqa_lfm2_fp8_kv_ps16(
         key_scale_stage[0] = key_scales[scale_index];
         value_scale_stage[0] = value_scales[scale_index];
     }
-    stage_page_async(key_cache, value_cache, first_physical_page, kv_head, key_stage[0], value_stage[0]);
+    stage_page_async(
+        key_cache,
+        value_cache,
+        first_physical_page,
+        kv_head,
+        key_fp8_stage[0],
+        value_fp8_stage[0]
+    );
     cp_async_wait_all();
+    __syncthreads();
+    decode_staged_page_fp8x2(
+        key_fp8_stage[0],
+        value_fp8_stage[0],
+        key_decoded_stage[0],
+        value_decoded_stage[0]
+    );
     __syncthreads();
 
     const uint32_t lane = threadIdx.x & 31U;
@@ -194,8 +225,8 @@ void paged_gqa_lfm2_fp8_kv_ps16(
                 value_cache,
                 next_physical_page,
                 kv_head,
-                key_stage[stage ^ 1U],
-                value_stage[stage ^ 1U]
+                key_fp8_stage[stage ^ 1U],
+                value_fp8_stage[stage ^ 1U]
             );
         }
 
@@ -209,8 +240,8 @@ void paged_gqa_lfm2_fp8_kv_ps16(
                 const size_t key_base = key_offset * HEAD_DIM;
                 const size_t index0 = key_base + dim0;
                 const size_t index1 = key_base + dim1;
-                float dot = q0 * fp8_e4m3_to_float(key_stage[stage][index0]) * key_scale
-                    + q1 * fp8_e4m3_to_float(key_stage[stage][index1]) * key_scale;
+                float dot = q0 * __half2float(key_decoded_stage[stage][index0]) * key_scale
+                    + q1 * __half2float(key_decoded_stage[stage][index1]) * key_scale;
                 #pragma unroll
                 for (uint32_t delta = 16U; delta > 0U; delta >>= 1U) {
                     dot += __shfl_down_sync(0xffffffffU, dot, delta);
@@ -219,8 +250,8 @@ void paged_gqa_lfm2_fp8_kv_ps16(
                 const float next_maximum = fmaxf(maximum, dot);
                 const float old_scale = __expf(maximum - next_maximum);
                 const float new_scale = __expf(dot - next_maximum);
-                const float value0 = fp8_e4m3_to_float(value_stage[stage][index0]) * value_scale;
-                const float value1 = fp8_e4m3_to_float(value_stage[stage][index1]) * value_scale;
+                const float value0 = __half2float(value_decoded_stage[stage][index0]) * value_scale;
+                const float value1 = __half2float(value_decoded_stage[stage][index1]) * value_scale;
                 accumulator0 = accumulator0 * old_scale + value0 * new_scale;
                 accumulator1 = accumulator1 * old_scale + value1 * new_scale;
                 denominator = denominator * old_scale + new_scale;
@@ -229,6 +260,13 @@ void paged_gqa_lfm2_fp8_kv_ps16(
         }
         if (has_next) {
             cp_async_wait_all();
+            __syncthreads();
+            decode_staged_page_fp8x2(
+                key_fp8_stage[stage ^ 1U],
+                value_fp8_stage[stage ^ 1U],
+                key_decoded_stage[stage ^ 1U],
+                value_decoded_stage[stage ^ 1U]
+            );
             __syncthreads();
         }
     }
