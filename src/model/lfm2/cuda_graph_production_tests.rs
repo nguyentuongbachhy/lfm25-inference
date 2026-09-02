@@ -15,7 +15,16 @@ use super::*;
 const BENCH_WARMUP_STEPS: usize = 4;
 const BENCH_MEASURED_STEPS: usize = 16;
 const CACHE_DECODE_HEADROOM: usize = 64;
-const BENCH_SHAPES: &[(usize, usize)] = &[(1, 128), (1, 2048)];
+// Cover the two validated B1 points plus three distinct serving regimes before
+// production graph-cache integration: high-batch short context, medium-batch
+// long context, and single-request very-long context.
+const BENCH_SHAPES: &[(usize, usize)] = &[
+    (1, 128),
+    (16, 128),
+    (1, 2048),
+    (8, 2048),
+    (1, 8192),
+];
 
 fn model_dir() -> PathBuf {
     env::var_os("LFM25_MODEL_DIR")
@@ -230,14 +239,12 @@ fn run_decode_pass(
                 .upload()
                 .context("failed to pre-upload full-model CUDA Graph")?;
             runtime.synchronize()?;
-
-            // Stream capture records the prepared decode step but does not make
-            // it part of the cache's executed recurrent history. Replay the
-            // captured step once so graph and direct passes both advance from
-            // the same prefill through logical decode step 0 before step 1.
+            // Stream capture records the work but does not execute it. Launch
+            // once so graph mode advances KV and recurrent convolution state
+            // through the same logical step 0 as direct mode before step 1.
             captured
                 .launch()
-                .context("failed to execute captured full-model decode step")?;
+                .context("failed to execute captured full-model step")?;
             runtime.synchronize()?;
             sampled_trace.push(runtime.download(&executor.sampled)?);
             graph = Some(captured);
