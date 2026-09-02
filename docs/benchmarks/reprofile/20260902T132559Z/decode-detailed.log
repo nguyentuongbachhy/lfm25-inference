@@ -1,0 +1,154 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/lfm25-inference --model models/LFM2.5-1.2B-Instruct --prompt 'Profile the current production decode path.' --max-new-tokens 144 --temperature 0 --fp8-policy docs/benchmarks/fp8/selected-policy.json --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json --page-size 16 --profile-decode detailed --profile-warmup-steps 8 --profile-steps 128 --profile-output docs/benchmarks/reprofile/20260902T132559Z/decode-detailed.json`
+loading model from models/LFM2.5-1.2B-Instruct
+loaded 16/148 weight tensors
+loaded 32/148 weight tensors
+loaded 48/148 weight tensors
+loaded 64/148 weight tensors
+loaded 80/148 weight tensors
+loaded 96/148 weight tensors
+loaded 112/148 weight tensors
+loaded 128/148 weight tensors
+loaded 144/148 weight tensors
+loaded 148/148 weight tensors
+installed decode-only FP8 policy docs/benchmarks/fp8/selected-policy.json with 16 enabled sites
+To profile the current production decode path, you can use a combination of tools and techniques depending on the context (e.g., software, hardware, or network processing). Below are common approaches for different scenarios:
+
+---
+
+### **1. General Profiling Tools**
+If you're referring to profiling a **software application** (e.g., a web server, API, or data pipeline), use these tools:
+
+#### **a. Application-Level Profiling**
+- **Python**: Use `cProfile` or `line_profiler` to analyze code execution.
+  ```bash
+  pip install cProfile
+ python -m cProfile -s cumulative your_script.py
+  `
+prompt_tokens=16 completion_tokens=144 finish_reason=length ttft_ms=20.501 tpot_mean_ms=6.954 total_ms=1014.981
+decode_profile={
+  "mode": "detailed",
+  "decode_steps": 128,
+  "decode_gpu_envelope_ms": 898.1250872612,
+  "sum_measured_gpu_ops_ms": 855.9487379802158,
+  "other_cuda_ms": 42.17634928098414,
+  "components": [
+    {
+      "name": "mlp_gate_up_gemm",
+      "total_gpu_ms": 317.0737921074033,
+      "mean_us_per_decode_step": 2477.139000839088,
+      "percent_of_decode_envelope": 35.3039678553361
+    },
+    {
+      "name": "mlp_silu",
+      "total_gpu_ms": 8.997471921145916,
+      "mean_us_per_decode_step": 70.29274938395247,
+      "percent_of_decode_envelope": 1.0018061012618389
+    },
+    {
+      "name": "mlp_down_gemm",
+      "total_gpu_ms": 175.22464046254754,
+      "mean_us_per_decode_step": 1368.9425036136527,
+      "percent_of_decode_envelope": 19.510048538660552
+    },
+    {
+      "name": "conv_in_proj",
+      "total_gpu_ms": 100.25116968154907,
+      "mean_us_per_decode_step": 783.2122631371021,
+      "percent_of_decode_envelope": 11.162272505632973
+    },
+    {
+      "name": "conv_kernel",
+      "total_gpu_ms": 6.3201279253698885,
+      "mean_us_per_decode_step": 49.375999416952254,
+      "percent_of_decode_envelope": 0.7037024146205392
+    },
+    {
+      "name": "conv_out_proj",
+      "total_gpu_ms": 38.229600040242076,
+      "mean_us_per_decode_step": 298.6687503143912,
+      "percent_of_decode_envelope": 4.2566008435219045
+    },
+    {
+      "name": "attn_qkv_proj",
+      "total_gpu_ms": 39.29017589986324,
+      "mean_us_per_decode_step": 306.9544992176816,
+      "percent_of_decode_envelope": 4.374688610433678
+    },
+    {
+      "name": "attn_postprocess",
+      "total_gpu_ms": 9.410336012369953,
+      "mean_us_per_decode_step": 73.51825009664026,
+      "percent_of_decode_envelope": 1.0477756546213883
+    },
+    {
+      "name": "attn_xqa",
+      "total_gpu_ms": 16.624671985395253,
+      "mean_us_per_decode_step": 129.8802498859004,
+      "percent_of_decode_envelope": 1.8510419340463575
+    },
+    {
+      "name": "attn_out_proj",
+      "total_gpu_ms": 30.581920033320785,
+      "mean_us_per_decode_step": 238.92125026031863,
+      "percent_of_decode_envelope": 3.40508471114856
+    },
+    {
+      "name": "residual_norm",
+      "total_gpu_ms": 35.881759885232896,
+      "mean_us_per_decode_step": 280.326249103382,
+      "percent_of_decode_envelope": 3.9951851244522105
+    },
+    {
+      "name": "lm_head",
+      "total_gpu_ms": 48.817600071430206,
+      "mean_us_per_decode_step": 381.3875005580485,
+      "percent_of_decode_envelope": 5.4355012195793035
+    },
+    {
+      "name": "sampling",
+      "total_gpu_ms": 29.245471954345703,
+      "mean_us_per_decode_step": 228.4802496433258,
+      "percent_of_decode_envelope": 3.256280485776064
+    }
+  ],
+  "aggregates": [
+    {
+      "name": "attention_total",
+      "total_gpu_ms": 95.90710393094923,
+      "mean_us_per_decode_step": 749.2742494605409,
+      "percent_of_decode_envelope": 10.678590910249984
+    },
+    {
+      "name": "conv_total",
+      "total_gpu_ms": 144.80089764716104,
+      "mean_us_per_decode_step": 1131.2570128684456,
+      "percent_of_decode_envelope": 16.122575763775416
+    },
+    {
+      "name": "lm_head",
+      "total_gpu_ms": 48.817600071430206,
+      "mean_us_per_decode_step": 381.3875005580485,
+      "percent_of_decode_envelope": 5.4355012195793035
+    },
+    {
+      "name": "mlp_total",
+      "total_gpu_ms": 501.29590449109674,
+      "mean_us_per_decode_step": 3916.3742538366932,
+      "percent_of_decode_envelope": 55.81582249525849
+    },
+    {
+      "name": "residual_norm",
+      "total_gpu_ms": 35.881759885232896,
+      "mean_us_per_decode_step": 280.326249103382,
+      "percent_of_decode_envelope": 3.9951851244522105
+    },
+    {
+      "name": "sampling",
+      "total_gpu_ms": 29.245471954345703,
+      "mean_us_per_decode_step": 228.4802496433258,
+      "percent_of_decode_envelope": 3.256280485776064
+    }
+  ]
+}
+wrote decode profile to docs/benchmarks/reprofile/20260902T132559Z/decode-detailed.json

@@ -26,9 +26,7 @@ struct QualityMetrics {
 }
 
 fn deterministic_bf16(index: usize, salt: u32) -> bf16 {
-    let mut value = (index as u32)
-        .wrapping_mul(747_796_405)
-        .wrapping_add(salt);
+    let mut value = (index as u32).wrapping_mul(747_796_405).wrapping_add(salt);
     value ^= value >> 16;
     value = value.wrapping_mul(2_246_822_519);
     value ^= value >> 13;
@@ -98,14 +96,8 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
     let value_host = (0..context * NUM_KV_HEADS * HEAD_DIM)
         .map(|index| deterministic_bf16(index, 0x243f_6a88))
         .collect::<Vec<_>>();
-    let key = runtime.upload(
-        &key_host,
-        Shape::new([context, NUM_KV_HEADS, HEAD_DIM]),
-    )?;
-    let value = runtime.upload(
-        &value_host,
-        Shape::new([context, NUM_KV_HEADS, HEAD_DIM]),
-    )?;
+    let key = runtime.upload(&key_host, Shape::new([context, NUM_KV_HEADS, HEAD_DIM]))?;
+    let value = runtime.upload(&value_host, Shape::new([context, NUM_KV_HEADS, HEAD_DIM]))?;
     let slots_host = (0..context)
         .map(i64::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -143,23 +135,20 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
     let mut candidate_output = runtime.alloc_bf16(Shape::new([1, NUM_Q_HEADS, HEAD_DIM]))?;
 
     unsafe {
-        runtime
-            .kernels()
-            .attention_async_fast()
-            .launch_lfm2_bf16(
-                runtime.stream(),
-                PagedAttentionLaunch {
-                    page_size: PAGE_SIZE,
-                    query: query.storage(),
-                    key_cache: cache.key().storage(),
-                    value_cache: cache.value().storage(),
-                    block_table: cache.block_table().storage(),
-                    position_ids: position.storage(),
-                    output: reference_output.storage_mut(),
-                    num_tokens: 1,
-                    num_pages,
-                },
-            )?;
+        runtime.kernels().attention_async_fast().launch_lfm2_bf16(
+            runtime.stream(),
+            PagedAttentionLaunch {
+                page_size: PAGE_SIZE,
+                query: query.storage(),
+                key_cache: cache.key().storage(),
+                value_cache: cache.value().storage(),
+                block_table: cache.block_table().storage(),
+                position_ids: position.storage(),
+                output: reference_output.storage_mut(),
+                num_tokens: 1,
+                num_pages,
+            },
+        )?;
         runtime.kernels().attention_fp8_kv().launch_attention_ps16(
             runtime.stream(),
             Fp8KvAttentionLaunch {
@@ -183,11 +172,7 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
     let quality = quality_metrics(&reference_host, &candidate_host);
     println!(
         "fp8_kv_quality context={} nrmse={:.6} cosine={:.8} max_abs={:.6} non_finite={}",
-        context,
-        quality.nrmse,
-        quality.cosine,
-        quality.max_abs_error,
-        quality.non_finite,
+        context, quality.nrmse, quality.cosine, quality.max_abs_error, quality.non_finite,
     );
     ensure!(quality.non_finite == 0, "FP8 KV produced non-finite output");
     ensure!(
@@ -208,23 +193,20 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
             config,
             || {
                 unsafe {
-                    runtime
-                        .kernels()
-                        .attention_async_fast()
-                        .launch_lfm2_bf16(
-                            runtime.stream(),
-                            PagedAttentionLaunch {
-                                page_size: PAGE_SIZE,
-                                query: query.storage(),
-                                key_cache: cache.key().storage(),
-                                value_cache: cache.value().storage(),
-                                block_table: cache.block_table().storage(),
-                                position_ids: position.storage(),
-                                output: reference_output.storage_mut(),
-                                num_tokens: 1,
-                                num_pages,
-                            },
-                        )?;
+                    runtime.kernels().attention_async_fast().launch_lfm2_bf16(
+                        runtime.stream(),
+                        PagedAttentionLaunch {
+                            page_size: PAGE_SIZE,
+                            query: query.storage(),
+                            key_cache: cache.key().storage(),
+                            value_cache: cache.value().storage(),
+                            block_table: cache.block_table().storage(),
+                            position_ids: position.storage(),
+                            output: reference_output.storage_mut(),
+                            num_tokens: 1,
+                            num_pages,
+                        },
+                    )?;
                 }
                 Ok(())
             },
@@ -254,9 +236,7 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
             .context("BF16 KV payload size overflow")?;
         let fp8_payload_bytes = context
             .checked_mul(NUM_KV_HEADS * HEAD_DIM * 2)
-            .and_then(|bytes| {
-                bytes.checked_add(num_pages * NUM_KV_HEADS * 2 * size_of::<f32>())
-            })
+            .and_then(|bytes| bytes.checked_add(num_pages * NUM_KV_HEADS * 2 * size_of::<f32>()))
             .context("FP8 KV payload size overflow")?;
         println!(
             "fp8_kv_bench context={} bf16_mean={:.3}us bf16_p50={:.3}us bf16_p95={:.3}us fp8_mean={:.3}us fp8_p50={:.3}us fp8_p95={:.3}us speedup_mean={:.4}x speedup_p50={:.4}x speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x bf16_payload_bytes={} fp8_payload_bytes={} payload_ratio={:.4}",

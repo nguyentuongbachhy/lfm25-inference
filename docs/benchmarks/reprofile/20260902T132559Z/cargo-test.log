@@ -1,0 +1,215 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling ident_case v1.0.1
+   Compiling strsim v0.11.1
+   Compiling fnv v1.0.7
+   Compiling autocfg v1.5.1
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.10
+   Compiling crossbeam-deque v0.8.7
+   Compiling libm v0.2.16
+   Compiling cc v1.4.2
+   Compiling once_cell v1.21.4
+   Compiling pkg-config v0.3.34
+   Compiling num-traits v0.2.19
+   Compiling rustversion v1.0.23
+   Compiling rayon-core v1.13.0
+   Compiling zmij v1.0.23
+   Compiling bitflags v2.13.1
+   Compiling either v1.17.0
+   Compiling rustix v1.1.4
+   Compiling version_check v0.9.5
+   Compiling serde_json v1.0.151
+   Compiling itoa v1.0.18
+   Compiling aho-corasick v1.1.5
+   Compiling thiserror v2.0.20
+   Compiling ahash v0.8.12
+   Compiling regex-syntax v0.8.11
+   Compiling paste v1.0.15
+   Compiling minimal-lexical v0.2.1
+   Compiling esaxx-rs v0.1.10
+   Compiling linux-raw-sys v0.12.1
+   Compiling nom v7.1.3
+   Compiling itertools v0.14.0
+   Compiling anyhow v1.0.104
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling castaway v0.2.4
+   Compiling static_assertions v1.1.0
+   Compiling foldhash v0.2.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling allocator-api2 v0.2.21
+   Compiling base64 v0.13.1
+   Compiling smallvec v1.15.2
+   Compiling onig_sys v69.9.3
+   Compiling rand_core v0.9.5
+   Compiling fastrand v2.5.0
+   Compiling pastey v0.2.3
+   Compiling equivalent v1.0.2
+   Compiling macro_rules_attribute-proc_macro v0.2.3
+   Compiling ryu v1.0.23
+   Compiling rayon v1.12.0
+   Compiling cudarc v0.19.8
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling macro_rules_attribute v0.2.3
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling regex-automata v0.4.18
+   Compiling hashbrown v0.16.1
+   Compiling tempfile v3.27.0
+   Compiling libloading v0.9.0
+   Compiling pin-project-lite v0.2.17
+   Compiling bytes v1.12.1
+   Compiling daachorse v1.0.1
+   Compiling unicode_categories v0.1.1
+   Compiling log v0.4.33
+   Compiling lfm25-inference v0.1.0 (/home/hyy4hc/source/lfm25-inference)
+   Compiling memmap2 v0.9.11
+   Compiling darling_core v0.20.11
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling tokio-macros v2.7.2
+   Compiling rayon-cond v0.4.0
+   Compiling zerocopy-derive v0.8.56
+   Compiling monostate-impl v0.1.18
+   Compiling tokio v1.53.1
+   Compiling regex v1.13.1
+   Compiling monostate v0.1.18
+   Compiling darling_macro v0.20.11
+   Compiling darling v0.20.11
+   Compiling derive_builder_core v0.20.2
+   Compiling derive_builder_macro v0.20.2
+   Compiling derive_builder v0.20.2
+   Compiling compact_str v0.9.1
+   Compiling dary_heap v0.3.9
+   Compiling spm_precompiled v0.1.4
+   Compiling safetensors v0.8.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling onig v6.5.3
+   Compiling half v2.7.1
+   Compiling tokenizers v0.23.1
+    Finished `release` profile [optimized] target(s) in 21.83s
+     Running unittests src/main.rs (target/release/deps/lfm25_inference-a5e18988440823d4)
+
+running 105 tests
+test benchmark::arrival::tests::burst_arrivals_share_timestamp_then_advance ... ok
+test benchmark::arrival::tests::poisson_arrivals_are_deterministic_and_strictly_increasing ... ok
+test benchmark::report::tests::goodput_excludes_slo_violations_and_rejections ... ok
+test cache::allocator::tests::allocator_grows_incrementally_and_reclaims_pages ... ok
+test cache::allocator::tests::cached_page_survives_request_release_and_can_be_shared ... ok
+test cache::allocator::tests::cached_pages_reduce_future_private_reservation_capacity ... ok
+test cache::allocator::tests::reservation_prevents_collective_growth_oom ... ok
+test cache::block_table::tests::tables_have_stable_disjoint_slot_ranges ... ok
+test cache::kv_cache::tests::paged_kv_write_ps16_preserves_bits_and_layout ... ok
+test cache::kv_cache::tests::paged_kv_write_ps32_preserves_bits_and_layout ... ok
+test cache::radix::tests::longest_match_stops_at_deepest_checkpoint ... ok
+test cache::radix::tests::page_budget_counts_only_new_radix_nodes ... ok
+test cache::radix::tests::refresh_probe_does_not_change_admission_statistics ... ok
+test cuda::blaslt::fp8::tests::block32_scale_padding_is_zero ... ok
+test cuda::blaslt::fp8::tests::block32_scale_storage_is_tiled_and_padded ... ok
+test cuda::kernels::tests::embedding::bench_embedding_bf16 ... ignored, GPU benchmark
+test cuda::kernels::tests::embedding::embedding_bf16_correctness ... ok
+test cuda::kernels::tests::embedding::embedding_bf16_invalid_token_is_zero ... ok
+test cuda::kernels::tests::embedding::embedding_bf16_repeated_tokens ... ok
+test cuda::kernels::tests::kv_cache::bench_kv_cache_write_lfm2_bf16 ... ignored, GPU benchmark
+test cuda::kernels::tests::kv_cache::kv_cache_raw_correctness_ps16 ... ok
+test cuda::kernels::tests::kv_cache::kv_cache_raw_correctness_ps32 ... ok
+test cuda::kernels::tests::rms_norm::bench_rms_norm_bf16 ... ignored, GPU benchmark
+test cuda::kernels::tests::rms_norm::rms_norm_bf16_correctness ... ok
+test cuda::kernels::tests::rope::bench_rope_qk_bf16 ... ignored, GPU benchmark
+test cuda::kernels::tests::rope::rope_position_zero_is_identity ... ok
+test cuda::kernels::tests::rope::rope_qk_bf16_correctness ... ok
+test cuda::kernels::tests::rope::rope_qk_bf16_long_positions ... ok
+test cuda::runtime::tests::allocate_zero_tensor ... ignored, requires a CUDA-capable GPU
+test cuda::runtime::tests::upload_tensor ... ignored, requires a CUDA-capable GPU
+test cuda::tests::blaslt_fp8::bench_lfm_narrow_precision_gemms ... ignored, GPU benchmark: exhaustive LFM BF16/FP8/MXFP8 matrix
+test cuda::tests::blaslt_fp8::linear_fp8_e4m3_correctness ... ok
+test cuda::tests::blaslt_fp8::quantize_bf16_to_e4m3_correctness ... ok
+test cuda::tests::blaslt_fp8::tensorwide_fp8_numerical_error_is_bounded ... ok
+test cuda::tests::cublaslt::bench_linear_bf16 ... ignored, GPU benchmark
+test cuda::tests::cublaslt::linear_bf16_caches_per_shape ... ok
+test cuda::tests::cublaslt::linear_bf16_layout_correctness ... ok
+test cuda::tests::cublaslt::linear_bf16_reuses_cached_plan ... ok
+test cuda::tests::cublaslt::linear_bf16_various_shapes ... ok
+test engine::runner::tests::calibration_corpus_supports_text_and_jsonl ... ok
+test engine::runner::tests::distribution_metrics_handle_empty_and_ordered_samples ... ok
+test generation::sampler::tests::sampling_config_rejects_invalid_values ... ok
+test generation::sampler::tests::xorshift_is_deterministic_for_a_seed ... ok
+test model::argmax_production_tests::bench_production_atomic_argmax_abba ... ignored, real checkpoint full-model atomic argmax ABBA benchmark
+test model::calibration::tests::bf16_histogram_percentiles_are_exact ... ok
+test model::evaluation::tests::vector_metric_identity ... ok
+test model::fp8_analysis::tests::exact_match_has_identity_metrics ... ok
+test model::quantization::tests::scalar_scale_round_trips ... ok
+test model::quantization::tests::zero_scale_is_identity ... ok
+test ops::attention_async_fast::tests::splitk_workspace_is_bounded_for_serving_capacity ... ok
+test ops::attention_async_fast_tests::async_w8_fast_exp_ps16_matches_reference ... ok
+test ops::attention_async_fast_tests::async_w8_fast_exp_ps32_matches_reference ... ok
+test ops::attention_async_fast_tests::async_w8_fast_exp_ragged_ps16_matches_reference ... ok
+test ops::attention_async_fast_tests::async_w8_fast_exp_ragged_ps32_matches_reference ... ok
+test ops::attention_regression_tests::hybrid_attention_uses_paged_prefix_and_contiguous_current_chunk ... ok
+test ops::attention_regression_tests::paged_attention_matches_prefill_across_page_boundaries ... ok
+test ops::attention_regression_tests::ragged_attention_selects_each_request_block_table ... ok
+test ops::attention_splitk_bench_tests::bench_splitk_decode_high_batch_sweep_paired ... ignored, GPU benchmark
+test ops::attention_splitk_bench_tests::bench_splitk_decode_sweep_paired ... ignored, GPU benchmark
+test ops::attention_splitk_tests::splitk_ragged_attention_matches_reference_ps16 ... ok
+test ops::attention_splitk_tests::splitk_ragged_attention_matches_reference_ps32 ... ok
+test ops::embedding::tests::embedding_bf16_preserves_token_shape ... ok
+test ops::embedding::tests::embedding_bf16_rank1 ... ok
+test ops::embedding::tests::embedding_rejects_invalid_weight_rank ... ok
+test ops::linear::tests::linear_bf16_preserves_prefix_shape ... ok
+test ops::linear::tests::linear_last_row_uses_input_storage_without_copy ... ok
+test ops::linear::tests::linear_rejects_k_mismatch ... ok
+test ops::mok_dispatch::tests::ps16_dispatch_boundaries_match_measured_policy ... ok
+test ops::mok_dispatch::tests::ps32_dispatch_boundaries_match_measured_policy ... ok
+test ops::mok_dispatch::tests::unsupported_or_empty_inputs_use_two_kernel_path ... ok
+test ops::mok_dispatch_bench_tests::bench_mok_short_dispatch_ragged_paired_ab ... ignored, GPU benchmark
+test ops::mok_fast_exp_bench_tests::bench_mok_async_w8_fast_exp_paired_ab ... ignored, GPU benchmark
+test ops::mok_fused_bench_tests::bench_mok_one_kernel_decode_attention_paired_ab ... ignored, GPU benchmark
+test ops::qk_postprocess::tests::bench_qk_postprocess_fused_vs_reference_bf16 ... ignored, GPU benchmark
+test ops::qk_postprocess::tests::fused_qk_postprocess_ps16_matches_reference_across_page_boundary ... ok
+test ops::qk_postprocess::tests::fused_qk_postprocess_ps32_matches_reference_across_page_boundary ... ok
+test ops::rms_norm::fused_tests::fused_residual_rms_norm_matches_cpu_reference ... ok
+test ops::rope::tests::rope_accepts_batched_prefix ... ok
+test ops::rope::tests::rope_rejects_inv_freq_mismatch ... ok
+test ops::rope::tests::rope_rejects_qk_prefix_mismatch ... ok
+test ops::sampling::tests::atomic_argmax_matches_legacy_for_lfm_vocab ... ok
+test ops::sampling::tests::atomic_argmax_matches_legacy_tie_and_special_value_semantics ... ok
+test ops::sampling::tests::atomic_argmax_rejects_columns_above_packing_limit ... ok
+test ops::sampling::tests::batched_sampling_selects_argmax_per_row ... ok
+test ops::sampling::tests::sampling_kernel_selects_argmax ... ok
+test ops::sampling_dispatch::tests::production_policy_falls_back_outside_packing_domain_or_when_disabled ... ok
+test ops::sampling_dispatch::tests::production_policy_is_atomic_only_through_batch_16 ... ok
+test ops::short_conv::tests::ragged_short_conv_updates_independent_slot_states ... ok
+test ops::short_conv::tests::short_conv_matches_causal_reference_and_updates_state ... ok
+test ops::silu_mul::tests::fused_silu_mul_fp8_matches_unfused_pipeline_byte_for_byte ... ok
+test ops::silu_mul::tests::packed_silu_mul_handles_multiple_rows ... ok
+test ops::splitk_policy::tests::ps16_dispatch_matches_measured_buckets ... ok
+test ops::splitk_policy::tests::ps32_retains_legacy_policy_until_measured ... ok
+test ops::splitk_policy::tests::unsupported_or_empty_inputs_stay_unsplit ... ok
+test scheduler::cost_model::tests::decode_interpolation_extrapolates_conservatively_outside_grid ... ok
+test scheduler::cost_model::tests::decode_interpolation_preserves_measurements_and_removes_batch_cliffs ... ok
+test scheduler::cost_model::tests::measured_points_are_exact_and_unmeasured_interior_is_conservative ... ok
+test scheduler::planner::tests::decode_is_scheduled_before_aged_prefill_without_reallocation ... ok
+test scheduler::planner::tests::large_long_context_tail_burst_is_decode_only ... ok
+test scheduler::planner::tests::long_tail_pressure_forces_short_cached_tails_to_singletons_too ... ok
+test scheduler::planner::tests::packs_multiple_short_prefills_into_one_step ... ok
+test scheduler::planner::tests::small_long_context_tail_batch_keeps_chunked_prefill ... ok
+test scheduler::slots::tests::slots_reuse_preallocated_token_capacity ... ok
+test tensor::shape::tests::shape_metadata ... ok
+test tensor::tests::pool_uses_bounded_power_of_two_size_classes ... ok
+
+test result: ok. 90 passed; 0 failed; 15 ignored; 0 measured; 0 filtered out; finished in 3.64s
+

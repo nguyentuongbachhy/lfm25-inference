@@ -51,11 +51,8 @@ impl KernelSet for Fp8KvKernels {
             Self::MODULE_NAME,
             "quantize_paged_kv_lfm2_e4m3_ps16",
         )?;
-        let attention_ps16 = load_function(
-            &module,
-            Self::MODULE_NAME,
-            "paged_gqa_lfm2_fp8_kv_ps16",
-        )?;
+        let attention_ps16 =
+            load_function(&module, Self::MODULE_NAME, "paged_gqa_lfm2_fp8_kv_ps16")?;
         for (name, function) in [
             ("quantize_ps16", &quantize_ps16),
             ("attention_ps16", &attention_ps16),
@@ -106,7 +103,10 @@ impl Fp8KvKernels {
             .checked_mul(NUM_KV_HEADS)
             .context("FP8 KV scale size overflow")?;
         ensure!(key_cache.len() >= cache_elements, "BF16 K cache too small");
-        ensure!(value_cache.len() >= cache_elements, "BF16 V cache too small");
+        ensure!(
+            value_cache.len() >= cache_elements,
+            "BF16 V cache too small"
+        );
         ensure!(key_fp8.len() >= cache_elements, "FP8 K cache too small");
         ensure!(value_fp8.len() >= cache_elements, "FP8 V cache too small");
         ensure!(key_scales.len() >= scale_elements, "FP8 K scales too small");
@@ -161,9 +161,18 @@ impl Fp8KvKernels {
         let scale_elements = num_pages
             .checked_mul(NUM_KV_HEADS)
             .context("FP8 KV scale size overflow")?;
-        ensure!(query.len() >= query_elements, "FP8 KV query storage too small");
-        ensure!(output.len() >= query_elements, "FP8 KV output storage too small");
-        ensure!(key_cache.len() >= cache_elements, "FP8 K cache storage too small");
+        ensure!(
+            query.len() >= query_elements,
+            "FP8 KV query storage too small"
+        );
+        ensure!(
+            output.len() >= query_elements,
+            "FP8 KV output storage too small"
+        );
+        ensure!(
+            key_cache.len() >= cache_elements,
+            "FP8 K cache storage too small"
+        );
         ensure!(
             value_cache.len() >= cache_elements,
             "FP8 V cache storage too small"

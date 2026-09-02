@@ -1,0 +1,20 @@
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running `target/release/lfm25-inference --model models/LFM2.5-1.2B-Instruct --benchmark-fp8 docs/benchmarks/fp8/selected-policy.json --benchmark-output docs/benchmarks/reprofile/20260902T132559Z/fp8-abba.json --benchmark-pairs 20 --page-size 16`
+loading model from models/LFM2.5-1.2B-Instruct
+loaded 16/148 weight tensors
+loaded 32/148 weight tensors
+loaded 48/148 weight tensors
+loaded 64/148 weight tensors
+loaded 80/148 weight tensors
+loaded 96/148 weight tensors
+loaded 112/148 weight tensors
+loaded 128/148 weight tensors
+loaded 144/148 weight tensors
+loaded 148/148 weight tensors
+installed benchmark FP8 policy docs/benchmarks/fp8/selected-policy.json with 16 enabled sites
+benchmarking BF16/FP8 context requested=16 actual=40 pairs=20
+benchmarking BF16/FP8 context requested=128 actual=138 pairs=20
+benchmarking BF16/FP8 context requested=512 actual=516 pairs=20
+benchmarking BF16/FP8 context requested=2048 actual=2056 pairs=20
+benchmarking BF16/FP8 context requested=8192 actual=8202 pairs=20
+wrote interleaved FP8 benchmark to docs/benchmarks/reprofile/20260902T132559Z/fp8-abba.json

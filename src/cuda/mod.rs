@@ -15,7 +15,7 @@ pub(crate) mod testing;
 
 pub(crate) use blaslt::{Fp8LinearConfig, fp8::Fp8ScaleMode};
 pub(crate) use kernels::{
-    EmbeddingLaunch, FastRaggedAttentionLaunch, Fp8KvAttentionLaunch, Fp8KvQuantizeLaunch,
+    EmbeddingLaunch, FastRaggedAttentionLaunch,
     FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch, GatherLaunch,
     HybridAttentionLaunch, KvCacheWriteLaunch, PagedAttentionLaunch, QkPostprocessLaunch,
     ResidualRmsNormLaunch, RmsNormLaunch, RopeLaunch, SegmentedShortConvLaunch, ShortConvLaunch,
