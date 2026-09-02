@@ -106,7 +106,7 @@ fn bench_cuda_graph_decode_shaped_launch_chain() -> Result<()> {
         .context("failed to begin CUDA Graph stream capture")?;
     launch_decode_shaped_chain(&blaslt, &input, &linear_weight, &mut graph_output)?;
     let graph = stream
-        .end_capture(sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_NONE)
+        .end_capture(sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY)
         .context("failed to end CUDA Graph stream capture")?
         .context("CUDA Graph capture returned no graph")?;
     graph.upload().context("failed to upload CUDA Graph")?;
