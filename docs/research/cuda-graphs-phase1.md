@@ -59,18 +59,40 @@ production dispatch.
 The ignored test `bench_cuda_graph_decode_shaped_launch_chain` uses:
 
 - LFM2 hidden width 2048;
-- persistent preallocated BF16 tensors;
+- persistent preallocated BF16 device buffers;
 - a warm cuBLASLt plan;
-- 32 repeated RMSNorm + BF16 cuBLASLt GEMM pairs;
-- 64 captured GPU submissions in one graph;
+- 32 repeated BF16 cuBLASLt GEMMs;
+- 32 captured GPU submissions in one graph;
 - thread-local stream capture;
 - same-process balanced direct/graph benchmarking;
 - separate host submission-time measurement;
 - exact BF16 output equality after replay.
 
-The chain intentionally combines a custom CUDA kernel and cuBLASLt. It tests the
-two launch mechanisms that dominate the persistent decode path without adding
-model-loading or dynamic metadata effects.
+The probe focuses on cuBLASLt because GEMM submissions dominate the decode launch
+sequence. Full-model Phase 2 will add the custom CUDA kernels if this primitive
+gate passes.
+
+## Compatibility attempt 0 — cudarc event-tracking isolation
+
+The first probe failed before graph instantiation with:
+
+`CUDA_ERROR_STREAM_CAPTURE_ISOLATION: dependency created on uncaptured work in another stream`
+
+This was not evidence that cuBLASLt cannot be captured. `CudaRuntime` creates a
+non-default stream, which makes cudarc manage `CudaSlice` access with CUDA events.
+`DevicePtr` and `DevicePtrMut` then insert waits on previously recorded events.
+During stream capture, those waits cross the capture boundary and CUDA correctly
+rejects the dependency.
+
+The compatibility fix does not modify production `CudaRuntime`. The Phase 1 probe
+now creates a dedicated CUDA context/stream, disables cudarc event tracking before
+creating the stream or any device allocation, and uses explicit single-stream
+synchronization. This is safe for the isolated test topology because no second
+stream can access the probe allocations.
+
+If capture still fails after this event-tracking fix, treat the new error as the
+actual CUDA/cuBLASLt compatibility result and apply at most one further fix if it
+has a distinct root cause.
 
 ## Phase 1 gates
 
@@ -107,8 +129,8 @@ change affects numerical execution rather than only replay.
 
 ## Stop condition
 
-Reject CUDA Graphs if mixed custom-kernel + cuBLASLt capture is unsupported after
-one reasonable compatibility fix.
+Reject CUDA Graphs if capture is unsupported after the bounded compatibility
+attempts.
 
 If Phase 1 shows little launch/submission benefit, do not build a production graph
 cache.
