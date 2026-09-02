@@ -230,6 +230,15 @@ fn run_decode_pass(
                 .upload()
                 .context("failed to pre-upload full-model CUDA Graph")?;
             runtime.synchronize()?;
+
+            // Stream capture records the prepared decode step but does not make
+            // it part of the cache's executed recurrent history. Replay the
+            // captured step once so graph and direct passes both advance from
+            // the same prefill through logical decode step 0 before step 1.
+            captured
+                .launch()
+                .context("failed to execute captured full-model decode step")?;
+            runtime.synchronize()?;
             sampled_trace.push(runtime.download(&executor.sampled)?);
             graph = Some(captured);
             continue;
