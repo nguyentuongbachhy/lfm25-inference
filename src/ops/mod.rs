@@ -2,6 +2,8 @@ mod attention;
 mod attention_async_fast;
 #[cfg(test)]
 mod attention_async_fast_tests;
+#[cfg(test)]
+mod attention_fp8_kv_tests;
 mod attention_fused;
 #[cfg(test)]
 mod attention_regression_tests;
