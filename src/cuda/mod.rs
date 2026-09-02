@@ -22,6 +22,8 @@ pub(crate) use kernels::{
     SplitKRaggedAttentionLaunch,
 };
 #[cfg(test)]
-pub(crate) use kernels::{RaggedAttentionLaunch, RaggedShortConvLaunch};
+pub(crate) use kernels::{
+    Fp8KvAttentionLaunch, Fp8KvQuantizeLaunch, RaggedAttentionLaunch, RaggedShortConvLaunch,
+};
 pub use runtime::CudaRuntime;
 pub(crate) use runtime::TimingEvent;
