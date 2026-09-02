@@ -69,6 +69,54 @@ Phase 1 is promising only if:
 A short-context regression is acceptable only if a later bounded dispatch can
 exclude that domain.
 
+## Attempt A — scalar inner-loop FP8 dequantization
+
+Attempt A staged compact FP8 K/V pages in shared memory and converted FP8 values
+to float inside the attention inner loop.
+
+Measured results on the RTX 5060 Laptop GPU:
+
+| Context | NRMSE | Cosine | BF16 mean | FP8 mean | Mean speedup |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 0.024080 | 0.99971028 | 26.175 us | 28.323 us | 0.9336x |
+| 512 | 0.023755 | 0.99971780 | 55.758 us | 62.114 us | 0.8977x |
+| 2048 | 0.028125 | 0.99960466 | 211.274 us | 238.088 us | 0.8874x |
+| 8192 | 0.024298 | 0.99970500 | 919.744 us | 1037.875 us | 0.8864x |
+
+The primitive numerical gate passes at every measured context. The FP8 payload
+is 50.2% of BF16 including scale metadata. However, performance fails at every
+context and context 8192 is below the 1.10x stop threshold.
+
+The main implementation issue is repeated dequantization. LFM2 GQA has four Q
+heads per KV head. Attempt A makes each active Q-head warp convert the same K/V
+FP8 data independently while traversing a page. The saved global-memory traffic
+therefore does not compensate for the repeated scalar conversion work.
+
+## Attempt B — cooperative FP8x2 page decode
+
+The one allowed materially different implementation changes the dequantization
+placement instead of tuning minor launch parameters.
+
+Attempt B:
+
+- still transfers compact FP8 K/V from global memory;
+- keeps the same per-page/per-KV-head scales and numerical format;
+- uses CUDA packed FP8x2-to-half2 conversion;
+- cooperatively decodes each staged physical page once;
+- stores the decoded page in shared half precision;
+- reuses that decoded page across all four Q-head warps;
+- keeps global FP8 staging double-buffered so the next compact page transfer can
+  overlap current-page attention work.
+
+This removes repeated E4M3 conversion from the attention token loop. FP8 values
+are exactly representable in FP16 before applying the float scale, so this
+change is not expected to add meaningful quantization error relative to Attempt
+A. The numerical gate remains unchanged and must still be measured.
+
+Attempt B is the final bounded dequantization/staging attempt for this direction.
+If it does not reach at least 1.10x mean speedup at context 8192, reject FP8 KV
+for this runtime instead of continuing local kernel tuning.
+
 ## Model-quality gate before production promotion
 
 Production integration still requires the existing hard gate:
@@ -99,6 +147,8 @@ If quality passes but context 8192 primitive speedup is below 1.10x, allow at
 most one materially different dequantization/staging implementation. Reject the
 direction if both implementations fail for the same dequantization-overhead
 root cause.
+
+Attempt B is that final allowed implementation.
 
 Do not tune small parameters indefinitely.
 
