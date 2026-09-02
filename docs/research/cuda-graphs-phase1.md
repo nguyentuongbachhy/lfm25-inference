@@ -69,7 +69,7 @@ The ignored test `bench_cuda_graph_decode_shaped_launch_chain` uses:
 - exact BF16 output equality after replay.
 
 The probe focuses on cuBLASLt because GEMM submissions dominate the decode launch
-sequence. Full-model Phase 2 will add the custom CUDA kernels if this primitive
+sequence. Full-model Phase 2 adds the custom CUDA kernels after this primitive
 gate passes.
 
 ## Compatibility attempt 0 — cudarc event-tracking isolation
@@ -85,37 +85,46 @@ During stream capture, those waits cross the capture boundary and CUDA correctly
 rejects the dependency.
 
 The compatibility fix does not modify production `CudaRuntime`. The Phase 1 probe
-now creates a dedicated CUDA context/stream, disables cudarc event tracking before
+creates a dedicated CUDA context/stream, disables cudarc event tracking before
 creating the stream or any device allocation, and uses explicit single-stream
 synchronization. This is safe for the isolated test topology because no second
 stream can access the probe allocations.
 
-If capture still fails after this event-tracking fix, treat the new error as the
-actual CUDA/cuBLASLt compatibility result and apply at most one further fix if it
-has a distinct root cause.
+## Phase 1 result — PASS
 
-## Phase 1 gates
+Measured on the target RTX 5060 Laptop GPU:
 
-The probe must satisfy all of the following before full-model integration:
+- direct GPU mean: 622.682 us;
+- graph GPU mean: 499.727 us;
+- mean GPU speedup: 1.2464x;
+- direct p50: 597.424 us;
+- graph p50: 480.536 us;
+- direct p95: 769.912 us;
+- graph p95: 529.938 us;
+- direct host submission: 376.253 us;
+- graph host submission: 11.217 us;
+- host submission speedup: 33.5440x;
+- exact BF16 output equality: true.
 
-1. Stream capture and graph instantiation succeed on the target CUDA 12.8 / SM120
-   environment.
-2. Graph replay produces exactly the same BF16 output as the direct launch chain.
-3. The paired benchmark shows at least 1.10x mean speedup for this deliberately
-   launch-heavy chain, or host submission time improves by at least 3x with no GPU
-   regression.
-
-This is only a go/no-go gate. Passing it does not promote CUDA Graphs to
-production.
+The result passes both Phase 1 performance signals by a large margin. The graph
+path improves mean GPU time by about 19.7% for this deliberately launch-heavy
+chain and almost removes host submission cost. This does not imply a 19.7%
+full-model TPOT gain because the real decode step contains much more kernel work.
+It is sufficient evidence to proceed to the full-model gate.
 
 ## Phase 2 full-model gate
 
-If Phase 1 passes, integrate capture around `DecodeExecutor::forward_prepared`
-while leaving `prepare_ragged` outside capture. Cache graph instances only for
-stable decode topology keys.
+Phase 2 captures `DecodeExecutor::forward_prepared` while leaving
+`BatchModelCache::prepare_ragged` outside capture. The first benchmark uses the
+selected weight-E4M3 checkpoint path and fixed topology buckets at B1/C128 and
+B1/C2048.
 
-Before production promotion, require same-process order-balanced full-model
-measurements with the selected weight-E4M3 policy:
+Each direct/graph pass starts from a fresh deterministic prefill. Graph capture
+executes the first decode step once, then later steps update persistent metadata
+outside the graph and replay the captured forward topology. The benchmark uses
+ABBA order across complete passes and requires identical sampled-token traces.
+
+Before production promotion, require:
 
 - exact sampled-token trace agreement for deterministic decode;
 - no model-quality change, because graph replay must be numerically identical;
@@ -129,15 +138,11 @@ change affects numerical execution rather than only replay.
 
 ## Stop condition
 
-Reject CUDA Graphs if capture is unsupported after the bounded compatibility
-attempts.
+If full-model B1/C128 speedup is below 1.02x in the paired test, reject the
+direction because graph-cache complexity is not justified by the measured gain.
 
-If Phase 1 shows little launch/submission benefit, do not build a production graph
-cache.
-
-If Phase 1 passes but full-model B1/C128 speedup is below 1.02x in a paired test,
-reject the direction because graph-cache complexity is not justified by the
-measured gain.
+If B1/C128 passes but B1/C2048 regresses materially, do not use a universal graph
+policy. Continue only if a bounded short-context dispatch can preserve the gain.
 
 Do not change attention math, precision, or quality thresholds to make this
 direction pass.
@@ -151,5 +156,9 @@ LLM_CUDA_ARCH=compute_120 cargo test --release -- --test-threads=1
 
 LLM_CUDA_ARCH=compute_120 cargo test --release \
   bench_cuda_graph_decode_shaped_launch_chain -- \
+  --ignored --nocapture --test-threads=1
+
+LLM_CUDA_ARCH=compute_120 cargo test --release \
+  bench_cuda_graph_full_model_abba -- \
   --ignored --nocapture --test-threads=1
 ```
