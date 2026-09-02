@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use anyhow::{Context as _, Result, ensure};
 use half::bf16;
 
@@ -115,10 +117,7 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
         .map(|index| deterministic_bf16(index, 0xb7e1_5163))
         .collect::<Vec<_>>();
     let query = runtime.upload(&query_host, Shape::new([1, NUM_Q_HEADS, HEAD_DIM]))?;
-    let position = runtime.upload(
-        &[u32::try_from(context - 1)?],
-        Shape::new([1]),
-    )?;
+    let position = runtime.upload(&[u32::try_from(context - 1)?], Shape::new([1]))?;
 
     let mut key_fp8 = runtime.zeros::<u8>(Shape::new([cache_elements]))?;
     let mut value_fp8 = runtime.zeros::<u8>(Shape::new([cache_elements]))?;
@@ -255,7 +254,9 @@ fn run_case(runtime: &CudaRuntime, context: usize, benchmark: Option<BenchConfig
             .context("BF16 KV payload size overflow")?;
         let fp8_payload_bytes = context
             .checked_mul(NUM_KV_HEADS * HEAD_DIM * 2)
-            .and_then(|bytes| bytes.checked_add(num_pages * NUM_KV_HEADS * 2 * size_of::<f32>()))
+            .and_then(|bytes| {
+                bytes.checked_add(num_pages * NUM_KV_HEADS * 2 * size_of::<f32>())
+            })
             .context("FP8 KV payload size overflow")?;
         println!(
             "fp8_kv_bench context={} bf16_mean={:.3}us bf16_p50={:.3}us bf16_p95={:.3}us fp8_mean={:.3}us fp8_p50={:.3}us fp8_p95={:.3}us speedup_mean={:.4}x speedup_p50={:.4}x speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x bf16_payload_bytes={} fp8_payload_bytes={} payload_ratio={:.4}",
