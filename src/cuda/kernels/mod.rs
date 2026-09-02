@@ -1,5 +1,6 @@
 mod attention;
 mod attention_async_fast;
+mod attention_fp8_kv;
 mod attention_fused;
 mod embedding;
 mod fp8_quantize;
@@ -25,6 +26,8 @@ pub(crate) use attention::RaggedAttentionLaunch;
 pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
 use attention_async_fast::AsyncAttentionFastKernels;
 pub(crate) use attention_async_fast::{FastRaggedAttentionLaunch, SplitKRaggedAttentionLaunch};
+use attention_fp8_kv::Fp8KvKernels;
+pub(crate) use attention_fp8_kv::{Fp8KvAttentionLaunch, Fp8KvQuantizeLaunch};
 use attention_fused::FusedAttentionKernels;
 pub(crate) use attention_fused::{
     FusedAttentionCommon, FusedDecodeLaunch, FusedRaggedDecodeLaunch,
@@ -59,6 +62,7 @@ pub(crate) struct Kernels {
     kv_cache: KvCacheKernels,
     attention: AttentionKernels,
     attention_async_fast: AsyncAttentionFastKernels,
+    attention_fp8_kv: Fp8KvKernels,
     attention_fused: FusedAttentionKernels,
     qk_postprocess: QkPostprocessKernels,
     short_conv: ShortConvKernels,
@@ -78,6 +82,7 @@ impl Kernels {
             kv_cache: KvCacheKernels::load(context)?,
             attention: AttentionKernels::load(context)?,
             attention_async_fast: AsyncAttentionFastKernels::load(context)?,
+            attention_fp8_kv: Fp8KvKernels::load(context)?,
             attention_fused: FusedAttentionKernels::load(context)?,
             qk_postprocess: QkPostprocessKernels::load(context)?,
             short_conv: ShortConvKernels::load(context)?,
@@ -114,6 +119,10 @@ impl Kernels {
 
     pub(crate) fn attention_async_fast(&self) -> &AsyncAttentionFastKernels {
         &self.attention_async_fast
+    }
+
+    pub(crate) fn attention_fp8_kv(&self) -> &Fp8KvKernels {
+        &self.attention_fp8_kv
     }
 
     pub(crate) fn attention_fused(&self) -> &FusedAttentionKernels {
