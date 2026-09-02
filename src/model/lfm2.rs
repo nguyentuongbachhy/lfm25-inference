@@ -267,3 +267,6 @@ impl BatchModelCache {
 }
 
 include!("decode_executor.rs");
+
+#[cfg(test)]
+mod cuda_graph_production_tests;
