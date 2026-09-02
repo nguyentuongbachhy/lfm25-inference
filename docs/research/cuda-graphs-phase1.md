@@ -115,9 +115,8 @@ It is sufficient evidence to proceed to the full-model gate.
 ## Phase 2 full-model gate
 
 Phase 2 captures `DecodeExecutor::forward_prepared` while leaving
-`BatchModelCache::prepare_ragged` outside capture. The first benchmark uses the
-selected weight-E4M3 checkpoint path and fixed topology buckets at B1/C128 and
-B1/C2048.
+`BatchModelCache::prepare_ragged` outside capture. The benchmark uses the selected
+weight-E4M3 checkpoint path and fixed topology buckets.
 
 Each direct/graph pass starts from a fresh deterministic prefill. The graph pass
 prepares logical decode step 0, captures the stable forward topology, then launches
@@ -150,6 +149,33 @@ and upload. This executes logical step 0 before its sampled token is recorded an
 before step 1 metadata is prepared. Direct and graph passes now advance from the
 same prefill through the same logical decode history.
 
+### Phase 2 initial B1 result — PASS
+
+After the state-equivalence fix, the first two full-model points pass all local
+gates with exact sampled-token agreement:
+
+| Shape | Direct mean | Graph mean | Mean speedup | Direct p95 | Graph p95 | P95 speedup | Submit speedup |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| B1/C128 | 6.155974 ms | 5.758067 ms | 1.0691x | 6.644352 ms | 6.045792 ms | 1.0990x | 13.8944x |
+| B1/C2048 | 6.226502 ms | 5.906835 ms | 1.0541x | 6.505504 ms | 6.027872 ms | 1.0792x | 10.0477x |
+
+Both rows report `top1_agreement=true`. The B1/C128 mean gain is about 6.5%, and
+the B1/C2048 mean gain is about 5.1%. These exceed the predefined 3% and 2%
+full-model gates.
+
+This is not yet a production promotion. The remaining requirement is to rule out
+regressions in other serving regimes. The benchmark matrix is therefore expanded
+to:
+
+- B1/C128 — validated short-context low-batch point;
+- B16/C128 — high-batch short-context point;
+- B1/C2048 — validated long-context low-batch point;
+- B8/C2048 — medium-batch long-context point;
+- B1/C8192 — very-long-context low-batch point.
+
+Production graph-cache integration can start only if these added points preserve
+exact token agreement and show no material regression.
+
 Before production promotion, require:
 
 - exact sampled-token trace agreement for deterministic decode;
@@ -167,8 +193,9 @@ change affects numerical execution rather than only replay.
 If full-model B1/C128 speedup is below 1.02x in the paired test, reject the
 direction because graph-cache complexity is not justified by the measured gain.
 
-If B1/C128 passes but B1/C2048 regresses materially, do not use a universal graph
-policy. Continue only if a bounded short-context dispatch can preserve the gain.
+If B1/C128 passes but another serving regime regresses materially, do not use a
+universal graph policy. Continue only if a bounded topology-specific dispatch can
+preserve the measured gain.
 
 Do not change attention math, precision, or quality thresholds to make this
 direction pass.
