@@ -63,10 +63,7 @@ fn bench_cuda_graph_decode_shaped_launch_chain() -> Result<()> {
 
     let input = runtime.upload(&input_host, Shape::new([1, HIDDEN_SIZE]))?;
     let norm_weight = runtime.upload(&norm_host, Shape::new([HIDDEN_SIZE]))?;
-    let linear_weight = runtime.upload(
-        &linear_host,
-        Shape::new([HIDDEN_SIZE, HIDDEN_SIZE]),
-    )?;
+    let linear_weight = runtime.upload(&linear_host, Shape::new([HIDDEN_SIZE, HIDDEN_SIZE]))?;
 
     let mut direct_normalized = runtime.alloc_uninit::<bf16>(Shape::new([1, HIDDEN_SIZE]))?;
     let mut direct_projected = runtime.alloc_uninit::<bf16>(Shape::new([1, HIDDEN_SIZE]))?;
@@ -98,9 +95,10 @@ fn bench_cuda_graph_decode_shaped_launch_chain() -> Result<()> {
         &mut graph_projected,
     )?;
     let graph = stream
-        .end_capture(sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD)
+        .end_capture(sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY)
         .context("failed to end CUDA Graph stream capture")?
         .context("CUDA Graph capture returned no graph")?;
+    graph.upload().context("failed to pre-upload CUDA Graph")?;
     runtime.synchronize()?;
 
     graph.launch().context("failed to launch captured CUDA Graph")?;
