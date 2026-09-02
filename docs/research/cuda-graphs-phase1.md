@@ -119,10 +119,36 @@ Phase 2 captures `DecodeExecutor::forward_prepared` while leaving
 selected weight-E4M3 checkpoint path and fixed topology buckets at B1/C128 and
 B1/C2048.
 
-Each direct/graph pass starts from a fresh deterministic prefill. Graph capture
-executes the first decode step once, then later steps update persistent metadata
-outside the graph and replay the captured forward topology. The benchmark uses
-ABBA order across complete passes and requires identical sampled-token traces.
+Each direct/graph pass starts from a fresh deterministic prefill. The graph pass
+prepares logical decode step 0, captures the stable forward topology, then launches
+the captured graph once to execute that step and advance KV plus recurrent
+convolution state. Later steps update persistent metadata outside the graph and
+replay the captured forward topology. The benchmark uses ABBA order across
+complete passes and requires identical sampled-token traces.
+
+Paged ragged attention reads the current position from device `position_ids`; the
+context length is not frozen as a host launch scalar. The graph therefore remains
+valid while the context grows inside one MOK/unsplit/Split-K topology bucket. The
+Split-K count itself is fixed in the captured graph and must not cross a dispatch
+boundary.
+
+### Phase 2 compatibility attempt 0 — capture did not execute step 0
+
+The first full-model run failed with:
+
+`CUDA Graph sampled-token trace mismatch at B=1 C=128`
+
+This was a benchmark-state bug, not a numerical CUDA Graph result. The harness
+captured `forward_prepared` for logical step 0 and immediately read `sampled`, then
+continued to logical step 1. Stream capture records the work into a graph; it does
+not establish that captured work as executed recurrent history. The graph pass
+therefore entered step 1 with KV and convolution state still at the prefill
+boundary, while the direct pass had already executed step 0.
+
+The fix explicitly launches the freshly captured graph once after instantiation
+and upload. This executes logical step 0 before its sampled token is recorded and
+before step 1 metadata is prepared. Direct and graph passes now advance from the
+same prefill through the same logical decode history.
 
 Before production promotion, require:
 
