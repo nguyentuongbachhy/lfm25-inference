@@ -11,6 +11,9 @@ mod graph_tests;
 mod tests;
 
 #[cfg(test)]
+mod prefill_fast_exp_tests;
+
+#[cfg(test)]
 pub(crate) mod benchmark;
 
 #[cfg(test)]
