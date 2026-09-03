@@ -1,5 +1,15 @@
 # Packed QKV Phase 1 — operator-group fusion entry point
 
+## Final status
+
+**REJECT.**
+
+The full-model Attempt B gate failed at the primary B1 serving shapes. See
+`docs/research/packed-qkv-decision.md` for the final measurements and decision.
+
+The direction is closed under the current research policy. Do not add a third
+packed-QKV local implementation and do not integrate this branch into production.
+
 ## Baseline
 
 This branch starts from validated `main` at
@@ -153,7 +163,7 @@ cuBLASLt GEMM can use a different algorithm or accumulation order than separate
 2048/512/512 GEMMs. Small BF16 differences can therefore change an argmax even
 when the numerical quality remains acceptable.
 
-To isolate the source, the branch now contains:
+To isolate the source, the branch contains:
 
 `packed_qk_postprocess_matches_unpacked_path_exactly`
 
@@ -162,14 +172,11 @@ This test feeds the same packed QKV tensor into two paths:
 1. unpack Q/K/V, then run the existing QK/RoPE/KV-write kernel;
 2. run the packed QK/RoPE/KV-write kernel directly.
 
-It compares rotated Q, paged K cache, and paged V cache exactly. If this test
-passes, the Attempt B postprocess is not the source of any later full-model
-trace difference.
+It compares rotated Q, paged K cache, and paged V cache exactly.
 
-The full-model ABBA benchmark now reports `top1_match_ratio` and
-`first_divergence` instead of aborting before performance measurements. Greedy
-trace agreement is a diagnostic for this direction, not a replacement for the
-model-quality gate.
+The full-model ABBA benchmark reports `top1_match_ratio` and `first_divergence`
+instead of aborting before performance measurements. Greedy trace agreement is a
+diagnostic for this direction, not a replacement for the model-quality gate.
 
 ## Model-quality gate
 
@@ -202,9 +209,6 @@ Shapes:
 - B8/C2048;
 - B1/C8192.
 
-The benchmark reports greedy agreement, but performance acceptance is evaluated
-separately from floating-point quality.
-
 Minimum continuation targets:
 
 - B1/C128 mean TPOT speedup >= 1.02x;
@@ -215,33 +219,28 @@ Minimum continuation targets:
 - B1/C8192 may become neutral as attention dominates, but must not regress by
   more than 1% for a universal B1 policy.
 
-If full-model B1 gains survive, the next research stage may fuse the packed QKV
-projection boundary with a larger attention operator group. If the full-model
-result is below these gates, stop the packed-QKV direction even though the local
-primitive is faster.
+## Attempt B full-model result — FAIL
+
+| Shape | Mean speedup | p95 speedup | Top-1 match |
+|---|---:|---:|---:|
+| B1/C128 | 1.0001x | 0.9368x | 95.8333% |
+| B16/C128 | 1.0288x | 1.0531x | 93.4896% |
+| B1/C2048 | 0.9987x | 0.9901x | 91.6667% |
+| B8/C2048 | 1.0093x | 1.0040x | 95.8333% |
+| B1/C8192 | 1.0291x | 1.0945x | 100.0000% |
+
+The B1/C128 mean gate fails and its p95 regresses materially. B1/C2048 also
+fails the mean continuation gate. These performance failures are sufficient to
+reject the direction; a separate model-quality run is not needed for promotion.
 
 ## Stop condition and iteration budget
 
-Attempt A is packed GEMM plus unpack and has passed.
+Attempt A passed locally. Attempt B failed end-to-end.
 
-Attempt B is the one allowed materially different local implementation: packed
-QKV is consumed directly by QK-normalization/RoPE/KV-write on the paged path.
+The predefined stop condition now applies:
 
-No third local packed-QKV implementation is allowed before reassessing the larger
-megakernel strategy.
+- no third local packed-QKV implementation;
+- no production integration;
+- no merge to main.
 
-## Commands
-
-```bash
-LLM_CUDA_ARCH=compute_120 cargo fmt --check
-LLM_CUDA_ARCH=compute_120 cargo check --all-features
-LLM_CUDA_ARCH=compute_120 cargo test --release -- --test-threads=1
-
-LLM_CUDA_ARCH=compute_120 cargo test --release \
-  bench_packed_qkv_bf16 -- \
-  --ignored --nocapture --test-threads=1
-
-LLM_CUDA_ARCH=compute_120 cargo test --release \
-  bench_packed_qkv_full_model_abba -- \
-  --ignored --nocapture --test-threads=1
-```
+See `docs/research/packed-qkv-decision.md` for the final decision record.
