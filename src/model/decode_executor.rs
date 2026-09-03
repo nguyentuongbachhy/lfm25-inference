@@ -244,7 +244,7 @@ impl DecodeExecutor {
         }
         match ops::splitk_decode_splits(num_tokens, context_tokens, page_size) {
             1 => Some(DecodeGraphBucket::Unsplit),
-            4 => Some(DecodeGraphBucket::Split4),
+            4 => None,
             8 => Some(DecodeGraphBucket::Split8),
             _ => None,
         }
