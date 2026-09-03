@@ -40,7 +40,7 @@ use kv_cache::KvCacheKernels;
 pub(crate) use kv_cache::KvCacheWriteLaunch;
 use metadata::MetadataKernels;
 use qk_postprocess::QkPostprocessKernels;
-pub(crate) use qk_postprocess::QkPostprocessLaunch;
+pub(crate) use qk_postprocess::{QkPackedPostprocessLaunch, QkPostprocessLaunch};
 use qkv_unpack::QkvUnpackKernels;
 pub(crate) use qkv_unpack::QkvUnpackLaunch;
 use rms_norm::RmsNormKernels;
