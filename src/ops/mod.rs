@@ -20,9 +20,9 @@ mod mok_fast_exp_bench_tests;
 #[cfg(test)]
 mod mok_fused_bench_tests;
 mod qk_postprocess;
-mod rms_norm;
 #[cfg(test)]
 mod rms_fp8_bench_tests;
+mod rms_norm;
 mod rope;
 mod sampling;
 mod sampling_dispatch;
@@ -56,9 +56,9 @@ pub(crate) use qk_postprocess::{
     QkPostprocessInput, qk_norm_rope_kv_write_arena_decode_bf16, qk_norm_rope_kv_write_decode_bf16,
 };
 pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
-pub(crate) use rms_norm::{
-    residual_rms_norm_bf16_into, residual_rms_norm_bf16_to_e4m3_into, rms_norm_bf16_into,
-};
+pub(crate) use rms_norm::{residual_rms_norm_bf16_into, rms_norm_bf16_into};
+#[cfg(test)]
+pub(crate) use rms_norm::residual_rms_norm_bf16_to_e4m3_into;
 pub use rope::rope_qk_bf16_inplace;
 pub use sampling::{argmax_bf16, argmax_rows_bf16};
 pub(crate) use sampling_dispatch::argmax_rows_bf16_into;
