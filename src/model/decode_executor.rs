@@ -4,14 +4,12 @@ const CUDA_GRAPH_MAX_CONTEXT_TOKENS_EXCLUSIVE: usize = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecodeGraphBucket {
     Unsplit,
-    // Split4,
     Split8,
 }
 
 struct DecodeGraphCache {
     enabled: bool,
     unsplit: Option<cudarc::driver::CudaGraph>,
-    // split4: Option<cudarc::driver::CudaGraph>,
     split8: Option<cudarc::driver::CudaGraph>,
 }
 
@@ -20,7 +18,6 @@ impl DecodeGraphCache {
         Self {
             enabled: runtime.graph_capture_compatible(),
             unsplit: None,
-            // split4: None,
             split8: None,
         }
     }
@@ -28,7 +25,6 @@ impl DecodeGraphCache {
     fn get(&self, bucket: DecodeGraphBucket) -> Option<&cudarc::driver::CudaGraph> {
         match bucket {
             DecodeGraphBucket::Unsplit => self.unsplit.as_ref(),
-            // DecodeGraphBucket::Split4 => self.split4.as_ref(),
             DecodeGraphBucket::Split8 => self.split8.as_ref(),
         }
     }
@@ -36,7 +32,6 @@ impl DecodeGraphCache {
     fn insert(&mut self, bucket: DecodeGraphBucket, graph: cudarc::driver::CudaGraph) {
         match bucket {
             DecodeGraphBucket::Unsplit => self.unsplit = Some(graph),
-            // DecodeGraphBucket::Split4 => self.split4 = Some(graph),
             DecodeGraphBucket::Split8 => self.split8 = Some(graph),
         }
     }
@@ -63,6 +58,7 @@ pub(crate) struct DecodeExecutor {
     attention_splitk_partials: Tensor<f32>,
     sampled: Tensor<u32>,
     splitk_attention_enabled: bool,
+    rms_fp8_fusion_enabled: bool,
     cuda_graphs: DecodeGraphCache,
 }
 
@@ -75,6 +71,17 @@ fn splitk_attention_enabled_from_env() -> bool {
             )
         })
         .unwrap_or(true)
+}
+
+fn rms_fp8_fusion_enabled_from_env() -> bool {
+    std::env::var("LFM25_RMS_FP8_FUSION")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn linear_decode_prequantized_fp8_into(
@@ -196,6 +203,7 @@ impl DecodeExecutor {
             ]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
             splitk_attention_enabled: splitk_attention_enabled_from_env(),
+            rms_fp8_fusion_enabled: rms_fp8_fusion_enabled_from_env(),
             cuda_graphs: DecodeGraphCache::new(runtime),
         })
     }
@@ -304,6 +312,11 @@ impl DecodeExecutor {
         self.cuda_graphs.enabled = enabled;
     }
 
+    #[cfg(test)]
+    fn set_rms_fp8_fusion_enabled_for_test(&mut self, enabled: bool) {
+        self.rms_fp8_fusion_enabled = enabled;
+    }
+
     fn forward_prepared(
         &mut self,
         model: &Lfm2Model,
@@ -321,6 +334,8 @@ impl DecodeExecutor {
         );
         let use_fp8 = model.decode_fp8_enabled;
         let splitk_attention_enabled = self.splitk_attention_enabled;
+        let rms_fp8_fusion_enabled = self.rms_fp8_fusion_enabled;
+        let mut lm_head_input_prequantized = false;
 
         let Self {
             hidden,
@@ -489,24 +504,44 @@ impl DecodeExecutor {
                 _ => anyhow::bail!("model/batch cache layer type mismatch at layer {layer}"),
             }
 
-            ops::residual_rms_norm_bf16_into(
-                runtime,
-                hidden,
-                operator_output,
-                &weights.ffn_norm,
-                model.config.norm_eps,
-                post_operator,
-                normalized,
-            )?;
+            if let Some(fp8) = weights
+                .feed_forward
+                .gate_up
+                .fp8
+                .as_ref()
+                .filter(|_| use_fp8 && rms_fp8_fusion_enabled)
+            {
+                ops::residual_rms_norm_bf16_to_e4m3_into(
+                    runtime,
+                    hidden,
+                    operator_output,
+                    &weights.ffn_norm,
+                    model.config.norm_eps,
+                    fp8.activation_scale.quantize_multiplier,
+                    post_operator,
+                    fp8_input,
+                )?;
+                linear_decode_prequantized_fp8_into(runtime, fp8_input, fp8, wide)?;
+            } else {
+                ops::residual_rms_norm_bf16_into(
+                    runtime,
+                    hidden,
+                    operator_output,
+                    &weights.ffn_norm,
+                    model.config.norm_eps,
+                    post_operator,
+                    normalized,
+                )?;
+                linear_decode_into(
+                    runtime,
+                    normalized,
+                    &weights.feed_forward.gate_up,
+                    use_fp8,
+                    fp8_input,
+                    wide,
+                )?;
+            }
 
-            linear_decode_into(
-                runtime,
-                normalized,
-                &weights.feed_forward.gate_up,
-                use_fp8,
-                fp8_input,
-                wide,
-            )?;
             if let Some(fp8) = weights.feed_forward.down.fp8.as_ref().filter(|_| use_fp8) {
                 ops::silu_mul_packed_bf16_to_e4m3_into(
                     runtime,
@@ -525,20 +560,47 @@ impl DecodeExecutor {
                 )?;
             }
 
-            let next_norm = if layer + 1 < model.config.num_hidden_layers {
-                &model.weights.layers[layer + 1].operator_norm
-            } else {
+            let is_last_layer = layer + 1 == model.config.num_hidden_layers;
+            let next_norm = if is_last_layer {
                 &model.weights.final_norm
+            } else {
+                &model.weights.layers[layer + 1].operator_norm
             };
-            ops::residual_rms_norm_bf16_into(
-                runtime,
-                post_operator,
-                operator_output,
-                next_norm,
-                model.config.norm_eps,
-                hidden,
-                normalized,
-            )?;
+            if is_last_layer && rms_fp8_fusion_enabled {
+                if let Some(fp8) = model.weights.lm_head_fp8.as_ref().filter(|_| use_fp8) {
+                    ops::residual_rms_norm_bf16_to_e4m3_into(
+                        runtime,
+                        post_operator,
+                        operator_output,
+                        next_norm,
+                        model.config.norm_eps,
+                        fp8.activation_scale.quantize_multiplier,
+                        hidden,
+                        fp8_input,
+                    )?;
+                    lm_head_input_prequantized = true;
+                } else {
+                    ops::residual_rms_norm_bf16_into(
+                        runtime,
+                        post_operator,
+                        operator_output,
+                        next_norm,
+                        model.config.norm_eps,
+                        hidden,
+                        normalized,
+                    )?;
+                }
+            } else {
+                ops::residual_rms_norm_bf16_into(
+                    runtime,
+                    post_operator,
+                    operator_output,
+                    next_norm,
+                    model.config.norm_eps,
+                    hidden,
+                    normalized,
+                )?;
+            }
         }
 
         // Pure decode has exactly one output row per token, in row order, so
@@ -548,16 +610,17 @@ impl DecodeExecutor {
                 fp8.data.dims() == model.weights.embedding.dims(),
                 "FP8 LM head shape must match tied embedding"
             );
-            fp8_input.set_logical_shape(Shape::new([num_tokens, model.config.hidden_size]))?;
-            logits.set_logical_shape(Shape::new([num_tokens, model.config.vocab_size]))?;
-            unsafe {
-                runtime.kernels().fp8_quantize().launch_bf16_e4m3(
-                    runtime.stream(),
-                    normalized.storage(),
-                    fp8_input.storage_mut(),
-                    normalized.numel(),
-                    fp8.activation_scale.quantize_multiplier,
-                )?;
+            if !lm_head_input_prequantized {
+                fp8_input.set_logical_shape(Shape::new([num_tokens, model.config.hidden_size]))?;
+                unsafe {
+                    runtime.kernels().fp8_quantize().launch_bf16_e4m3(
+                        runtime.stream(),
+                        normalized.storage(),
+                        fp8_input.storage_mut(),
+                        normalized.numel(),
+                        fp8.activation_scale.quantize_multiplier,
+                    )?;
+                }
             }
             linear_decode_prequantized_fp8_into(runtime, fp8_input, fp8, logits)?;
         } else {
