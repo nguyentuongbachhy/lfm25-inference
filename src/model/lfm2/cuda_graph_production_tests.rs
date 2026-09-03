@@ -10,10 +10,16 @@ use super::*;
 const BENCH_WARMUP_STEPS: usize = 4;
 const BENCH_MEASURED_STEPS: usize = 16;
 const CACHE_DECODE_HEADROOM: usize = 64;
-// The broad serving sweep found graph replay useful only for B1 at moderate
-// context. Measure the three remaining B1 boundaries needed to define a bounded
-// production policy without repeating already-closed batch regimes.
-const BENCH_SHAPES: &[(usize, usize)] = &[(1, 512), (1, 1024), (1, 4096)];
+// B1/C4096 previously showed a strong graph win while B1/C8192 regressed.
+// All points below remain in the same PS16 Split-K=8 topology, so this sweep
+// isolates only the context-dependent graph crossover without reopening Split-K.
+const BENCH_SHAPES: &[(usize, usize)] = &[
+    (1, 4096),
+    (1, 5120),
+    (1, 6144),
+    (1, 7168),
+    (1, 8192),
+];
 
 fn model_dir() -> PathBuf {
     env::var_os("LFM25_MODEL_DIR")
@@ -231,9 +237,6 @@ fn run_decode_pass(
                 .upload()
                 .context("failed to pre-upload full-model CUDA Graph")?;
             runtime.synchronize()?;
-            // Stream capture records the work but does not execute it. Launch
-            // once so graph mode advances KV and recurrent convolution state
-            // through the same logical step 0 as direct mode before step 1.
             captured
                 .launch()
                 .context("failed to execute captured full-model step")?;
@@ -292,9 +295,6 @@ fn percentile(values: &[f64], quantile: f64) -> f64 {
 fn bench_cuda_graph_full_model_abba() -> Result<()> {
     let runtime = CudaRuntime::new(0)?;
 
-    // CudaRuntime owns one compute stream. Disable cudarc's cross-stream event
-    // tracking for this graph-compatible benchmark before model allocations are
-    // created. Production runtime behavior remains unchanged until Phase 2 wins.
     unsafe {
         runtime.context().disable_event_tracking();
     }
