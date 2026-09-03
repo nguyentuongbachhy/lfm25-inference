@@ -4,14 +4,14 @@ const CUDA_GRAPH_MAX_CONTEXT_TOKENS_EXCLUSIVE: usize = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecodeGraphBucket {
     Unsplit,
-    Split4,
+    // Split4,
     Split8,
 }
 
 struct DecodeGraphCache {
     enabled: bool,
     unsplit: Option<cudarc::driver::CudaGraph>,
-    split4: Option<cudarc::driver::CudaGraph>,
+    // split4: Option<cudarc::driver::CudaGraph>,
     split8: Option<cudarc::driver::CudaGraph>,
 }
 
@@ -20,7 +20,7 @@ impl DecodeGraphCache {
         Self {
             enabled: runtime.graph_capture_compatible(),
             unsplit: None,
-            split4: None,
+            // split4: None,
             split8: None,
         }
     }
@@ -28,7 +28,7 @@ impl DecodeGraphCache {
     fn get(&self, bucket: DecodeGraphBucket) -> Option<&cudarc::driver::CudaGraph> {
         match bucket {
             DecodeGraphBucket::Unsplit => self.unsplit.as_ref(),
-            DecodeGraphBucket::Split4 => self.split4.as_ref(),
+            // DecodeGraphBucket::Split4 => self.split4.as_ref(),
             DecodeGraphBucket::Split8 => self.split8.as_ref(),
         }
     }
@@ -36,7 +36,7 @@ impl DecodeGraphCache {
     fn insert(&mut self, bucket: DecodeGraphBucket, graph: cudarc::driver::CudaGraph) {
         match bucket {
             DecodeGraphBucket::Unsplit => self.unsplit = Some(graph),
-            DecodeGraphBucket::Split4 => self.split4 = Some(graph),
+            // DecodeGraphBucket::Split4 => self.split4 = Some(graph),
             DecodeGraphBucket::Split8 => self.split8 = Some(graph),
         }
     }

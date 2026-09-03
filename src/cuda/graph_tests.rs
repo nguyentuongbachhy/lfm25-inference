@@ -20,14 +20,7 @@ fn launch_decode_shaped_chain(
 ) -> Result<()> {
     for _ in 0..CHAIN_REPETITIONS {
         unsafe {
-            blaslt.linear_bf16(
-                input,
-                linear_weight,
-                output,
-                1,
-                HIDDEN_SIZE,
-                HIDDEN_SIZE,
-            )?;
+            blaslt.linear_bf16(input, linear_weight, output, 1, HIDDEN_SIZE, HIDDEN_SIZE)?;
         }
     }
     Ok(())
@@ -112,7 +105,9 @@ fn bench_cuda_graph_decode_shaped_launch_chain() -> Result<()> {
     graph.upload().context("failed to upload CUDA Graph")?;
     stream.synchronize()?;
 
-    graph.launch().context("failed to launch captured CUDA Graph")?;
+    graph
+        .launch()
+        .context("failed to launch captured CUDA Graph")?;
     stream.synchronize()?;
     let direct_host = stream
         .clone_dtoh(&direct_output)
