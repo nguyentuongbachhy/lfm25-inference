@@ -1,3 +1,47 @@
+const CUDA_GRAPH_MIN_CONTEXT_TOKENS: usize = 128;
+const CUDA_GRAPH_MAX_CONTEXT_TOKENS_EXCLUSIVE: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeGraphBucket {
+    Unsplit,
+    Split4,
+    Split8,
+}
+
+struct DecodeGraphCache {
+    enabled: bool,
+    unsplit: Option<cudarc::driver::CudaGraph>,
+    split4: Option<cudarc::driver::CudaGraph>,
+    split8: Option<cudarc::driver::CudaGraph>,
+}
+
+impl DecodeGraphCache {
+    fn new(runtime: &CudaRuntime) -> Self {
+        Self {
+            enabled: runtime.graph_capture_compatible(),
+            unsplit: None,
+            split4: None,
+            split8: None,
+        }
+    }
+
+    fn get(&self, bucket: DecodeGraphBucket) -> Option<&cudarc::driver::CudaGraph> {
+        match bucket {
+            DecodeGraphBucket::Unsplit => self.unsplit.as_ref(),
+            DecodeGraphBucket::Split4 => self.split4.as_ref(),
+            DecodeGraphBucket::Split8 => self.split8.as_ref(),
+        }
+    }
+
+    fn insert(&mut self, bucket: DecodeGraphBucket, graph: cudarc::driver::CudaGraph) {
+        match bucket {
+            DecodeGraphBucket::Unsplit => self.unsplit = Some(graph),
+            DecodeGraphBucket::Split4 => self.split4 = Some(graph),
+            DecodeGraphBucket::Split8 => self.split8 = Some(graph),
+        }
+    }
+}
+
 /// Persistent fixed-address scratch for the single-token-per-segment serving
 /// topology. All transformer layers reuse the same buffers sequentially; no
 /// workspace is allocated per layer or per decode step. Selective FP8 sites
@@ -19,6 +63,7 @@ pub(crate) struct DecodeExecutor {
     attention_splitk_partials: Tensor<f32>,
     sampled: Tensor<u32>,
     splitk_attention_enabled: bool,
+    cuda_graphs: DecodeGraphCache,
 }
 
 fn splitk_attention_enabled_from_env() -> bool {
@@ -151,6 +196,7 @@ impl DecodeExecutor {
             ]))?,
             sampled: runtime.alloc_uninit::<u32>(Shape::new([maximum_tokens]))?,
             splitk_attention_enabled: splitk_attention_enabled_from_env(),
+            cuda_graphs: DecodeGraphCache::new(runtime),
         })
     }
 
@@ -178,6 +224,84 @@ impl DecodeExecutor {
                 .iter()
                 .enumerate()
                 .all(|(index, &row)| usize::try_from(row).ok() == Some(index))
+    }
+
+    fn cuda_graph_bucket(&self, cache: &BatchModelCache) -> Option<DecodeGraphBucket> {
+        if !self.cuda_graphs.enabled || !self.splitk_attention_enabled {
+            return None;
+        }
+        let metadata = &cache.gpu_batch;
+        let num_tokens = metadata.token_ids().numel();
+        let context_tokens = metadata.max_context_tokens();
+        let page_size = cache.page_size.value();
+        if num_tokens != 1
+            || page_size != 16
+            || !(CUDA_GRAPH_MIN_CONTEXT_TOKENS..CUDA_GRAPH_MAX_CONTEXT_TOKENS_EXCLUSIVE)
+                .contains(&context_tokens)
+            || ops::should_use_mok_one_kernel(page_size, context_tokens, num_tokens)
+        {
+            return None;
+        }
+        match ops::splitk_decode_splits(num_tokens, context_tokens, page_size) {
+            1 => Some(DecodeGraphBucket::Unsplit),
+            4 => Some(DecodeGraphBucket::Split4),
+            8 => Some(DecodeGraphBucket::Split8),
+            _ => None,
+        }
+    }
+
+    fn forward_prepared_dispatch(
+        &mut self,
+        model: &Lfm2Model,
+        runtime: &CudaRuntime,
+        cache: &mut BatchModelCache,
+    ) -> Result<()> {
+        let Some(bucket) = self.cuda_graph_bucket(cache) else {
+            return self.forward_prepared(model, runtime, cache);
+        };
+
+        // Graph replay executes fixed B1 kernel arguments against persistent
+        // storage. A prior direct larger-batch step can leave the host-side
+        // logical shape of `sampled` larger than one, so restore the externally
+        // observed shape before replay.
+        self.sampled.set_logical_shape(Shape::new([1]))?;
+        if let Some(graph) = self.cuda_graphs.get(bucket) {
+            graph
+                .launch()
+                .context("bounded CUDA Graph decode replay failed")?;
+            return Ok(());
+        }
+
+        // First use of each measured-safe topology is captured lazily. Metadata
+        // preparation has already completed outside capture. Synchronize once so
+        // capture cannot inherit an uncaptured dependency, then execute the new
+        // graph once because stream capture records work without running it.
+        runtime.synchronize()?;
+        let stream = runtime.stream();
+        stream
+            .begin_capture(cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+            .context("failed to begin bounded CUDA Graph decode capture")?;
+        self.forward_prepared(model, runtime, cache)?;
+        let graph = stream
+            .end_capture(
+                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY,
+            )
+            .context("failed to end bounded CUDA Graph decode capture")?
+            .context("bounded CUDA Graph decode capture returned no graph")?;
+        graph
+            .upload()
+            .context("failed to upload bounded CUDA Graph decode")?;
+        runtime.synchronize()?;
+        graph
+            .launch()
+            .context("failed to execute newly captured CUDA Graph decode")?;
+        self.cuda_graphs.insert(bucket, graph);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn set_cuda_graphs_enabled_for_test(&mut self, enabled: bool) {
+        self.cuda_graphs.enabled = enabled;
     }
 
     fn forward_prepared(
@@ -528,7 +652,7 @@ impl Lfm2Model {
             return Ok(None);
         }
         cache.prepare_ragged(runtime, input)?;
-        executor.forward_prepared(self, runtime, cache)?;
+        executor.forward_prepared_dispatch(self, runtime, cache)?;
         Ok(Some(&executor.sampled))
     }
 }
