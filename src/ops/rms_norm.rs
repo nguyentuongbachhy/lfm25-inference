@@ -2,11 +2,9 @@ use anyhow::{Result, ensure};
 use half::bf16;
 
 use crate::{
-    cuda::{CudaRuntime, ResidualRmsNormLaunch, RmsNormLaunch},
+    cuda::{CudaRuntime, ResidualRmsNormFp8Launch, ResidualRmsNormLaunch, RmsNormLaunch},
     tensor::Tensor,
 };
-#[cfg(test)]
-use crate::cuda::ResidualRmsNormFp8Launch;
 
 pub fn rms_norm_bf16(
     runtime: &CudaRuntime,
@@ -145,7 +143,6 @@ pub(crate) fn residual_rms_norm_bf16_into(
     Ok(())
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn residual_rms_norm_bf16_to_e4m3_into(
     runtime: &CudaRuntime,
