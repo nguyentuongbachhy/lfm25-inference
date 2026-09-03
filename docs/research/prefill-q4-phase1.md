@@ -86,18 +86,31 @@ If Q4 fails the long-context gates, reject this query-reuse factor and do not ch
 
 If Q4 passes but N=512 regresses, a later production policy may restrict Q4 to sufficiently long prompts.
 
-## Later E2E gate
+## Phase 1 result
 
-Only after the kernel gate passes, integrate Q4 behind a controlled prefill dispatch and run whole-model prompt benchmarks using the selected E4M3 policy.
+RTX 5060 Laptop GPU, same-process balanced AB/BA timing:
 
-Primary prompt lengths:
+| Tokens | Q2 mean | Q4 mean | Mean speedup | Q2 p95 | Q4 p95 | Exact |
+|---:|---:|---:|---:|---:|---:|---|
+| 512 | 1691.859 us | 1661.136 us | 1.0185x | 1697.024 us | 1669.600 us | yes |
+| 2048 | 21821.562 us | 20880.138 us | 1.0453x | 23539.295 us | 22554.079 us | yes |
+| 8192 | 353270.337 us | 337659.216 us | 1.0462x | 355641.846 us | 340025.482 us | yes |
 
-- approximately 516 tokens;
-- approximately 2056 tokens;
-- approximately 8202 tokens.
+The candidate is consistently faster and bit-exact. However, it misses both precommitted long-context performance gates:
 
-Promotion requires a material whole-prompt improvement at 2K and 8K without quality change or a meaningful short-prompt regression.
+- N=2048 required >=1.10x, observed 1.0453x;
+- N=8192 required >=1.15x, observed 1.0462x.
+
+The nearly flat ~4.5% gain from 2K through 8K is also diagnostic. Q4 approximately halves repeated K/V tile loads and halves CTA count, yet latency improves by only ~4.6%. Therefore repeated K/V global traffic is not the dominant cost of this kernel at long context. A blind Q8 sweep is not justified by these results.
+
+## Decision
+
+**REJECT for production.**
+
+Do not integrate Q4 into production dispatch. Keep the production Q2 prefill kernel unchanged.
+
+The experiment is still useful because it narrows the next optimization target: the dominant long-context cost is more likely inside the per-key compute/online-softmax loop than in repeated K/V tile loading.
 
 ## Stop condition
 
-One Q4 implementation is the initial budget. If it fails because of a specific measurable register-occupancy bottleneck, one materially different query-state layout may be attempted. Otherwise reject Q4 and do not blindly sweep query-tile sizes.
+Q4 is closed. Do not sweep larger query tiles without a new measured bottleneck that specifically predicts a benefit from additional query reuse.
