@@ -3,12 +3,7 @@ use std::{env, fs, path::PathBuf, time::Instant};
 use anyhow::{Context as _, Result, ensure};
 use cudarc::driver::sys;
 
-use crate::{
-    cache::KvPageSize,
-    cuda::CudaRuntime,
-    model::Fp8PrecisionPolicy,
-    ops,
-};
+use crate::{cache::KvPageSize, cuda::CudaRuntime, model::Fp8PrecisionPolicy, ops};
 
 use super::*;
 
@@ -175,7 +170,10 @@ fn warm_decode_path(runtime: &CudaRuntime, model: &Lfm2Model) -> Result<()> {
         segment_slots: &segment_slots,
         output_rows: &output_rows,
     };
-    ensure!(executor.eligible(&input), "warm decode input is not graph eligible");
+    ensure!(
+        executor.eligible(&input),
+        "warm decode input is not graph eligible"
+    );
     cache.prepare_ragged(runtime, &input)?;
     executor.forward_prepared(model, runtime, &mut cache)?;
     runtime.synchronize()
