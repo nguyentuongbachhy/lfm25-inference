@@ -53,6 +53,46 @@ fn bench_residual_rms_norm_fp8_fusion() -> Result<()> {
         let mut candidate_sum = runtime.alloc_bf16(Shape::new([rows, HIDDEN]))?;
         let mut candidate_fp8 = runtime.alloc_fp8(Shape::new([rows, HIDDEN]))?;
 
+        // Run each path once before creating the benchmark closures. This keeps
+        // the exactness readback outside the mutable borrows held by those
+        // closures and avoids E0502 while still validating the exact buffers
+        // that will be timed below.
+        residual_rms_norm_bf16_into(
+            &runtime,
+            &residual,
+            &update,
+            &weight,
+            1e-5,
+            &mut reference_sum,
+            &mut reference_norm,
+        )?;
+        unsafe {
+            runtime.kernels().fp8_quantize().launch_bf16_e4m3(
+                runtime.stream(),
+                reference_norm.storage(),
+                reference_fp8.storage_mut(),
+                reference_norm.numel(),
+                QUANT_SCALE,
+            )?;
+        }
+        residual_rms_norm_bf16_to_e4m3_into(
+            &runtime,
+            &residual,
+            &update,
+            &weight,
+            1e-5,
+            QUANT_SCALE,
+            &mut candidate_sum,
+            &mut candidate_fp8,
+        )?;
+        runtime.synchronize()?;
+
+        let residual_exact =
+            readback(&runtime, &reference_sum)? == readback(&runtime, &candidate_sum)?;
+        let fp8_exact = readback(&runtime, &reference_fp8)? == readback(&runtime, &candidate_fp8)?;
+        ensure!(residual_exact, "fused residual output mismatch at M={rows}");
+        ensure!(fp8_exact, "fused FP8 output mismatch at M={rows}");
+
         let mut run_reference = || -> Result<()> {
             residual_rms_norm_bf16_into(
                 &runtime,
@@ -86,14 +126,6 @@ fn bench_residual_rms_norm_fp8_fusion() -> Result<()> {
                 &mut candidate_fp8,
             )
         };
-
-        run_reference()?;
-        run_candidate()?;
-        runtime.synchronize()?;
-        let residual_exact = readback(&runtime, &reference_sum)? == readback(&runtime, &candidate_sum)?;
-        let fp8_exact = readback(&runtime, &reference_fp8)? == readback(&runtime, &candidate_fp8)?;
-        ensure!(residual_exact, "fused residual output mismatch at M={rows}");
-        ensure!(fp8_exact, "fused FP8 output mismatch at M={rows}");
 
         let stats = benchmark_gpu_paired(
             runtime.context(),
