@@ -3,9 +3,13 @@ use half::bf16;
 
 use crate::{
     cache::{PagedKvArena, PagedKvCache},
-    cuda::{CudaRuntime, QkPostprocessLaunch},
+    cuda::{CudaRuntime, QkPackedPostprocessLaunch, QkPostprocessLaunch},
     tensor::Tensor,
 };
+
+const Q_WIDTH: usize = 32 * 64;
+const KV_WIDTH: usize = 8 * 64;
+const PACKED_QKV_WIDTH: usize = Q_WIDTH + 2 * KV_WIDTH;
 
 pub(crate) struct QkPostprocessInput<'a> {
     pub(crate) query: &'a mut Tensor<bf16>,
@@ -17,6 +21,48 @@ pub(crate) struct QkPostprocessInput<'a> {
     pub(crate) position_ids: &'a Tensor<u32>,
     pub(crate) slot_mapping: &'a Tensor<i64>,
     pub(crate) eps: f32,
+}
+
+pub(crate) struct QkPackedPostprocessInput<'a> {
+    pub(crate) packed_qkv: &'a Tensor<bf16>,
+    pub(crate) query: &'a mut Tensor<bf16>,
+    pub(crate) query_norm: &'a Tensor<bf16>,
+    pub(crate) key_norm: &'a Tensor<bf16>,
+    pub(crate) inv_freq: &'a Tensor<f32>,
+    pub(crate) position_ids: &'a Tensor<u32>,
+    pub(crate) slot_mapping: &'a Tensor<i64>,
+    pub(crate) eps: f32,
+}
+
+fn validate_common(
+    query_norm: &Tensor<bf16>,
+    key_norm: &Tensor<bf16>,
+    inv_freq: &Tensor<f32>,
+    position_ids: &Tensor<u32>,
+    slot_mapping: &Tensor<i64>,
+    num_tokens: usize,
+) -> Result<()> {
+    ensure!(
+        query_norm.numel() == 64,
+        "query norm weight must have 64 elements"
+    );
+    ensure!(
+        key_norm.numel() == 64,
+        "key norm weight must have 64 elements"
+    );
+    ensure!(
+        inv_freq.numel() == 32,
+        "RoPE inv_freq must have 32 elements"
+    );
+    ensure!(
+        position_ids.numel() == num_tokens,
+        "position count mismatch"
+    );
+    ensure!(
+        slot_mapping.numel() == num_tokens,
+        "slot mapping count mismatch"
+    );
+    Ok(())
 }
 
 fn launch_qk_postprocess(
@@ -48,26 +94,14 @@ fn launch_qk_postprocess(
         "fused key must have shape [N,8,64]"
     );
     ensure!(value.shape() == key.shape(), "fused K/V shape mismatch");
-    ensure!(
-        query_norm.numel() == 64,
-        "query norm weight must have 64 elements"
-    );
-    ensure!(
-        key_norm.numel() == 64,
-        "key norm weight must have 64 elements"
-    );
-    ensure!(
-        inv_freq.numel() == 32,
-        "RoPE inv_freq must have 32 elements"
-    );
-    ensure!(
-        position_ids.numel() == num_tokens,
-        "position count mismatch"
-    );
-    ensure!(
-        slot_mapping.numel() == num_tokens,
-        "slot mapping count mismatch"
-    );
+    validate_common(
+        query_norm,
+        key_norm,
+        inv_freq,
+        position_ids,
+        slot_mapping,
+        num_tokens,
+    )?;
 
     unsafe {
         runtime.kernels().qk_postprocess().launch_decode(
@@ -77,6 +111,65 @@ fn launch_qk_postprocess(
                 query: query.storage_mut(),
                 key: key.storage(),
                 value: value.storage(),
+                query_norm: query_norm.storage(),
+                key_norm: key_norm.storage(),
+                inv_freq: inv_freq.storage(),
+                position_ids: position_ids.storage(),
+                slot_mapping: slot_mapping.storage(),
+                key_cache: key_cache.storage_mut(),
+                value_cache: value_cache.storage_mut(),
+                num_tokens,
+                num_pages,
+                eps,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn launch_packed_qk_postprocess(
+    runtime: &CudaRuntime,
+    input: QkPackedPostprocessInput<'_>,
+    key_cache: &mut Tensor<bf16>,
+    value_cache: &mut Tensor<bf16>,
+    page_size: usize,
+    num_pages: usize,
+) -> Result<()> {
+    let QkPackedPostprocessInput {
+        packed_qkv,
+        query,
+        query_norm,
+        key_norm,
+        inv_freq,
+        position_ids,
+        slot_mapping,
+        eps,
+    } = input;
+    ensure!(
+        packed_qkv.rank() == 2 && packed_qkv.dims()[1] == PACKED_QKV_WIDTH,
+        "packed QKV must have shape [N,{PACKED_QKV_WIDTH}]"
+    );
+    let num_tokens = packed_qkv.dims()[0];
+    ensure!(
+        query.dims() == [num_tokens, 32, 64],
+        "packed Q output must have shape [N,32,64]"
+    );
+    validate_common(
+        query_norm,
+        key_norm,
+        inv_freq,
+        position_ids,
+        slot_mapping,
+        num_tokens,
+    )?;
+
+    unsafe {
+        runtime.kernels().qk_postprocess().launch_packed_decode(
+            runtime.stream(),
+            QkPackedPostprocessLaunch {
+                page_size,
+                packed_qkv: packed_qkv.storage(),
+                query: query.storage_mut(),
                 query_norm: query_norm.storage(),
                 key_norm: key_norm.storage(),
                 inv_freq: inv_freq.storage(),
@@ -113,6 +206,17 @@ pub(crate) fn qk_norm_rope_kv_write_arena_decode_bf16(
     let num_pages = arena.num_pages();
     let (key_cache, value_cache) = arena.kv_mut();
     launch_qk_postprocess(runtime, input, key_cache, value_cache, page_size, num_pages)
+}
+
+pub(crate) fn qk_norm_rope_kv_write_packed_arena_decode_bf16(
+    runtime: &CudaRuntime,
+    input: QkPackedPostprocessInput<'_>,
+    arena: &mut PagedKvArena,
+) -> Result<()> {
+    let page_size = arena.page_size().value();
+    let num_pages = arena.num_pages();
+    let (key_cache, value_cache) = arena.kv_mut();
+    launch_packed_qk_postprocess(runtime, input, key_cache, value_cache, page_size, num_pages)
 }
 
 #[cfg(test)]
@@ -190,9 +294,9 @@ mod tests {
         let runtime = CudaRuntime::new(0)?;
         let size = page_size.value();
         let tokens = 2usize;
-        let query_host = bf16_values(tokens * 32 * 64, 17, 101, 50.0, 64.0);
-        let key_host = bf16_values(tokens * 8 * 64, 13, 89, 44.0, 64.0);
-        let value_host = bf16_values(tokens * 8 * 64, 7, 79, 39.0, 32.0);
+        let query_host = bf16_values(tokens * Q_WIDTH, 17, 101, 50.0, 64.0);
+        let key_host = bf16_values(tokens * KV_WIDTH, 13, 89, 44.0, 64.0);
+        let value_host = bf16_values(tokens * KV_WIDTH, 7, 79, 39.0, 32.0);
         let query_norm_host = norm_values(64, 3);
         let key_norm_host = norm_values(64, 5);
         let inv_freq_host = inv_freq_values();
@@ -277,12 +381,12 @@ mod tests {
     #[ignore = "GPU benchmark"]
     fn bench_qk_postprocess_fused_vs_reference_bf16() -> Result<()> {
         let runtime = CudaRuntime::new(0)?;
-        let query_host = bf16_values(32 * 64, 17, 101, 50.0, 64.0);
-        let key_host = bf16_values(8 * 64, 13, 89, 44.0, 64.0);
-        let value_host = bf16_values(8 * 64, 7, 79, 39.0, 32.0);
+        let query_host = bf16_values(Q_WIDTH, 17, 101, 50.0, 64.0);
+        let key_host = bf16_values(KV_WIDTH, 13, 89, 44.0, 64.0);
+        let value_host = bf16_values(KV_WIDTH, 7, 79, 39.0, 32.0);
         let query_raw = runtime.upload(&query_host, Shape::new([1, 32, 64]))?;
         let key_raw = runtime.upload(&key_host, Shape::new([1, 8, 64]))?;
-        let value = runtime.upload(&value_host, Shape::new([1, 8, 64]))?;
+        let value_raw = runtime.upload(&value_host, Shape::new([1, 8, 64]))?;
         let query_norm = runtime.upload(&norm_values(64, 3), Shape::new([64]))?;
         let key_norm = runtime.upload(&norm_values(64, 5), Shape::new([64]))?;
         let inv_freq = runtime.upload(&inv_freq_values(), Shape::new([32]))?;
@@ -305,7 +409,7 @@ mod tests {
                 ReferenceInput {
                     query_raw: &query_raw,
                     key_raw: &key_raw,
-                    value: &value,
+                    value: &value_raw,
                     query_norm: &query_norm,
                     key_norm: &key_norm,
                     inv_freq: &inv_freq,
@@ -322,7 +426,7 @@ mod tests {
                     ReferenceInput {
                         query_raw: &query_raw,
                         key_raw: &key_raw,
-                        value: &value,
+                        value: &value_raw,
                         query_norm: &query_norm,
                         key_norm: &key_norm,
                         inv_freq: &inv_freq,
@@ -340,7 +444,7 @@ mod tests {
                     QkPostprocessInput {
                         query: &mut fused_query,
                         key: &key_raw,
-                        value: &value,
+                        value: &value_raw,
                         query_norm: &query_norm,
                         key_norm: &key_norm,
                         inv_freq: &inv_freq,
