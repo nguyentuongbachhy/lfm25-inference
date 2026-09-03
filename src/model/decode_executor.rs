@@ -1,5 +1,5 @@
 const CUDA_GRAPH_MIN_CONTEXT_TOKENS: usize = 128;
-const CUDA_GRAPH_MAX_CONTEXT_TOKENS_EXCLUSIVE: usize = 4096;
+const CUDA_GRAPH_MAX_CONTEXT_TOKENS_EXCLUSIVE: usize = 4117;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecodeGraphBucket {
