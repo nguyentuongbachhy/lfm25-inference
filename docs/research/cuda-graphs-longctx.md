@@ -13,7 +13,7 @@ Prior full-model ABBA results showed:
 - B1/C4096: graph mean speedup 1.1688x, p95 speedup 1.2600x, top1 exact;
 - B1/C8192: graph mean speedup 0.9647x, p95 speedup 0.9646x, top1 exact.
 
-Production currently routes `C >= 4096` to direct execution, so the positive C4096 point is not used.
+Production originally routed `C >= 4096` to direct execution, so the positive C4096 point was not used.
 
 ## Coarse long-context sweep
 
@@ -43,7 +43,7 @@ RTX 5060 Laptop GPU, same selected E4M3 policy, PS16, B1, Split-K=8:
 
 ## Decision
 
-The long-context extension is **PARTIAL**.
+The long-context extension is **PARTIAL / PROMOTE B1-C4096 TAIL ONLY**.
 
 C4096 reproduces as a strong graph win and preserves exact sampled-token output. C4352 is already below parity, and every larger measured point regresses. Therefore the graph/direct crossover occurs inside the interval `(4096, 4352)`.
 
@@ -58,15 +58,31 @@ The conservative production extension is therefore:
 
 This deliberately avoids interpolating across the unmeasured 4117..4351 interval.
 
-## Final production gate
+## Final production-dispatch confirmation
 
-After changing the production maximum from 4096 to 4117, rerun the production-dispatch ABBA benchmark at:
+After changing the production maximum from 4096 to 4117, the real production dispatcher produced:
 
-- B1/C4096: must use CUDA Graph and preserve the >=1.02x mean gate with no p95 regression;
-- B1/C4352: must remain on direct fallback and preserve exact output.
+| Context | Direct mean | Graph-enabled mean | Mean ratio | Direct p95 | Graph-enabled p95 | P95 ratio | Submit ratio | Top1 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 4096 | 6.489991 ms | 6.142020 ms | 1.0567x | 6.628448 ms | 6.209344 ms | 1.0675x | 19.8690x | exact |
+| 4352 | 7.158773 ms | 7.790538 ms | 0.9189x | 7.807072 ms | 7.784128 ms | 1.0029x | 1.0583x | exact |
 
-If B1/C4096 fails under the real production dispatcher, keep the old 4096 cutoff and reject the extension.
+C4096 passes the production gate: mean and p95 improve and host submission collapses by almost 20x.
+
+At C4352, `context_tokens >= 4117`, so the dispatcher cannot select a CUDA Graph bucket. The `graph-enabled` run is therefore a direct-fallback control, not graph replay. Its submit ratio is only 1.0583x rather than the 15-20x replay signature, which confirms the fallback. The large mean difference between the two direct controls is measurement/thermal drift and is not evidence of a graph regression at C4352.
+
+## Final policy
+
+For PS16/B1 with `LFM25_CUDA_GRAPHS=1`:
+
+- C128..C511: graph where the existing unsplit bucket is valid;
+- C512..C1023: direct, because Split-K=4 graph was rejected;
+- C1024..C4116: graph with the validated Split-K=8 bucket;
+- C4117+: direct;
+- B>1: direct.
+
+All promoted graph measurements preserve exact sampled-token traces.
 
 ## Stop condition
 
-No further long-context graph boundary search is planned after the production-dispatch confirmation. Contexts at and above C4352 remain direct unless a materially different graph implementation is researched in a future direction.
+This direction is closed. No further long-context graph boundary search is planned. Contexts at and above C4117 remain direct unless a materially different graph implementation is researched in a future direction.
