@@ -34,8 +34,6 @@ Use the exact production shape and dtypes with deterministic nonzero synthetic E
 - BF16 logits
 - production scratchless atomic argmax
 
-The values and scale do not affect kernel geometry or memory traffic, so model loading is intentionally excluded from this primitive feasibility screen.
-
 The decision measurement is a balanced paired AB/BA comparison between:
 
 Reference:
@@ -54,8 +52,6 @@ Both paths use separate output buffers but the same stream, weight, shape, dtype
 
 Quantization-only and argmax-only timing remain diagnostic outputs. They are not used to derive the continuation decision independently.
 
-Verify the complete path returns a stable token.
-
 ## Invalid initial sequential run
 
 The first sequential Phase-0 run reported:
@@ -67,34 +63,45 @@ The first sequential Phase-0 run reported:
 
 The complete boundary cannot be faster than the identical LM-head projection it contains when measured under comparable GPU state. The negative `removable_us=-10.859` and `fusion_ceiling=0.9724x` therefore identify measurement-order / power-state drift, not a real architectural result.
 
-That run is invalid for promotion or rejection. The branch now requires paired boundary-versus-LM-head timing.
+That run is invalid for promotion or rejection.
 
-## Feasibility metric
+## Valid paired result
 
-Define from the paired means:
+RTX 5060 Laptop GPU, balanced same-process AB/BA:
 
-```text
-fusion_ceiling = paired_boundary_mean / paired_lm_head_mean
-removable_us   = paired_boundary_mean - paired_lm_head_mean
-```
+| Metric | Result |
+|---|---:|
+| complete boundary mean | 408.086 us |
+| complete boundary p95 | 411.725 us |
+| LM-head-only mean | 394.454 us |
+| LM-head-only p95 | 398.547 us |
+| optimistic fusion ceiling | 1.0346x |
+| paired mean ratio | 1.0347x |
+| paired p50 ratio | 1.0344x |
+| paired p95 ratio | 1.0483x |
+| removable mean latency | 13.632 us |
+| quantize mean, diagnostic | 9.001 us |
+| argmax mean, diagnostic | 33.182 us |
+| complete boundary / 6 ms step | 6.80% |
+| deterministic token | 0 |
 
-This is an optimistic ceiling that assumes a fused kernel can make quantization, logits materialization and argmax free while matching the current cuBLASLt projection time. Real fused performance will be lower.
+The paired result is internally consistent. The complete boundary is slower than the LM-head-only lower bound, but only by 13.632 us on mean.
 
-## Phase 0 continuation gate
+## Decision
 
-Continue to a custom fused FP8 LM-head/argmax prototype only if all are true:
+**REJECT** the fused FP8 LM-head + greedy argmax direction.
 
-- the benchmark returns a deterministic token;
-- paired `fusion_ceiling >= 1.08x`;
-- paired non-GEMM removable mean latency is at least 30 us;
-- the paired complete boundary is at least 5% of the current B1 decode step, so the E2E ceiling is material.
+The predefined continuation gate required both:
 
-If the paired optimistic ceiling is below 1.08x, reject the fused-LM-head direction before custom Tensor Core implementation.
+- optimistic `fusion_ceiling >= 1.08x`;
+- removable mean latency >= 30 us.
 
-## Later gate if Phase 0 passes
+Measured values are only `1.0346x` and `13.632 us`. Both fail by a large margin.
 
-A custom fused kernel must compare against the complete current boundary, not against argmax alone.
+Although the complete boundary is about 6.8% of a 6 ms B1 step, approximately 96.7% of that boundary is already the vendor FP8 LM-head projection itself. Even a hypothetical fusion that makes activation quantization, logits materialization and greedy reduction free while preserving cuBLASLt projection time has only about a 3.35% local ceiling. The practical gain would be smaller because a custom fused projection would also need to match cuBLASLt throughput.
 
-It must preserve the exact greedy token for the deterministic primitive test and then pass the existing teacher-forced model-quality gate before production consideration.
+Do not implement a custom Tensor Core LM-head GEMV/argmax kernel from this direction. Do not reopen it unless the LM-head implementation or serving semantics change materially.
 
-E2E promotion requires at least 1.01x B1 TPOT improvement at C128 and C2048 with no material p95 or batch regression.
+## Stop condition
+
+Phase 0 ends this direction. No production code is changed and this branch is not merged.
