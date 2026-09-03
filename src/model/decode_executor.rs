@@ -310,6 +310,11 @@ impl DecodeExecutor {
                     )?;
                 }
                 (OperatorWeights::Attention(attention), BatchLayerCache::Attention(arena)) => {
+                    let one_kernel_decode = ops::should_use_mok_one_kernel(
+                        arena.page_size().value(),
+                        metadata.max_context_tokens(),
+                        num_tokens,
+                    );
                     let packed_weight = packed_qkv_weights
                         .get(layer)
                         .and_then(Option::as_ref)
@@ -318,22 +323,94 @@ impl DecodeExecutor {
                                 && attention.key.fp8.is_none()
                                 && attention.value.fp8.is_none()
                         });
+
                     if let Some(packed_weight) = packed_weight {
                         ops::linear_bf16_into(runtime, normalized, packed_weight, qkv_packed)?;
                         query.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
-                        key.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
-                        value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
-                        unsafe {
-                            runtime.kernels().qkv_unpack().launch_bf16(
-                                runtime.stream(),
-                                crate::cuda::QkvUnpackLaunch {
-                                    packed: qkv_packed.storage(),
-                                    query: query.storage_mut(),
-                                    key: key.storage_mut(),
-                                    value: value.storage_mut(),
-                                    num_tokens,
+
+                        if one_kernel_decode {
+                            key.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                            value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                            unsafe {
+                                runtime.kernels().qkv_unpack().launch_bf16(
+                                    runtime.stream(),
+                                    crate::cuda::QkvUnpackLaunch {
+                                        packed: qkv_packed.storage(),
+                                        query: query.storage_mut(),
+                                        key: key.storage_mut(),
+                                        value: value.storage_mut(),
+                                        num_tokens,
+                                    },
+                                )?;
+                            }
+                            ops::fused_ragged_paged_attention_decode_lfm2_bf16_into(
+                                runtime,
+                                ops::FusedRaggedAttentionInput {
+                                    attention: ops::FusedAttentionInput {
+                                        query_raw: query,
+                                        key_raw: key,
+                                        value_raw: value,
+                                        query_norm: &attention.query_norm,
+                                        key_norm: &attention.key_norm,
+                                        inv_freq: &model.inv_freq,
+                                        position_ids: metadata.positions(),
+                                        slot_mapping: metadata.physical_slots(),
+                                        eps: model.config.norm_eps,
+                                    },
+                                    arena,
+                                    block_tables: metadata.block_tables(),
+                                    block_table_stride: metadata.block_table_stride(),
+                                    request_slots: metadata.request_slots(),
                                 },
+                                post_operator,
                             )?;
+                        } else {
+                            ops::qk_norm_rope_kv_write_packed_arena_decode_bf16(
+                                runtime,
+                                ops::QkPackedPostprocessInput {
+                                    packed_qkv: qkv_packed,
+                                    query,
+                                    query_norm: &attention.query_norm,
+                                    key_norm: &attention.key_norm,
+                                    inv_freq: &model.inv_freq,
+                                    position_ids: metadata.positions(),
+                                    slot_mapping: metadata.physical_slots(),
+                                    eps: model.config.norm_eps,
+                                },
+                                arena,
+                            )?;
+                            let input = ops::FastRaggedAttentionInput {
+                                query,
+                                arena,
+                                block_tables: metadata.block_tables(),
+                                block_table_stride: metadata.block_table_stride(),
+                                request_slots: metadata.request_slots(),
+                                position_ids: metadata.positions(),
+                            };
+                            let splits = if splitk_attention_enabled {
+                                ops::splitk_decode_splits(
+                                    num_tokens,
+                                    metadata.max_context_tokens(),
+                                    arena.page_size().value(),
+                                )
+                            } else {
+                                1
+                            };
+                            if splits > 1 {
+                                ops::paged_ragged_attention_splitk_lfm2_bf16_into(
+                                    runtime,
+                                    input,
+                                    attention_splitk_partials,
+                                    splits,
+                                    post_operator,
+                                )?;
+                            } else {
+                                ops::paged_ragged_attention_fast_lfm2_bf16_into(
+                                    runtime,
+                                    input,
+                                    post_operator,
+                                )?;
+                            }
                         }
                     } else {
                         linear_decode_into(
@@ -363,20 +440,36 @@ impl DecodeExecutor {
                             value,
                         )?;
                         value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
-                    }
 
-                    if ops::should_use_mok_one_kernel(
-                        arena.page_size().value(),
-                        metadata.max_context_tokens(),
-                        num_tokens,
-                    ) {
-                        ops::fused_ragged_paged_attention_decode_lfm2_bf16_into(
-                            runtime,
-                            ops::FusedRaggedAttentionInput {
-                                attention: ops::FusedAttentionInput {
-                                    query_raw: query,
-                                    key_raw: key,
-                                    value_raw: value,
+                        if one_kernel_decode {
+                            ops::fused_ragged_paged_attention_decode_lfm2_bf16_into(
+                                runtime,
+                                ops::FusedRaggedAttentionInput {
+                                    attention: ops::FusedAttentionInput {
+                                        query_raw: query,
+                                        key_raw: key,
+                                        value_raw: value,
+                                        query_norm: &attention.query_norm,
+                                        key_norm: &attention.key_norm,
+                                        inv_freq: &model.inv_freq,
+                                        position_ids: metadata.positions(),
+                                        slot_mapping: metadata.physical_slots(),
+                                        eps: model.config.norm_eps,
+                                    },
+                                    arena,
+                                    block_tables: metadata.block_tables(),
+                                    block_table_stride: metadata.block_table_stride(),
+                                    request_slots: metadata.request_slots(),
+                                },
+                                post_operator,
+                            )?;
+                        } else {
+                            ops::qk_norm_rope_kv_write_arena_decode_bf16(
+                                runtime,
+                                ops::QkPostprocessInput {
+                                    query,
+                                    key,
+                                    value,
                                     query_norm: &attention.query_norm,
                                     key_norm: &attention.key_norm,
                                     inv_freq: &model.inv_freq,
@@ -385,61 +478,42 @@ impl DecodeExecutor {
                                     eps: model.config.norm_eps,
                                 },
                                 arena,
+                            )?;
+                            let input = ops::FastRaggedAttentionInput {
+                                query,
+                                arena,
                                 block_tables: metadata.block_tables(),
                                 block_table_stride: metadata.block_table_stride(),
                                 request_slots: metadata.request_slots(),
-                            },
-                            post_operator,
-                        )?;
-                    } else {
-                        ops::qk_norm_rope_kv_write_arena_decode_bf16(
-                            runtime,
-                            ops::QkPostprocessInput {
-                                query,
-                                key,
-                                value,
-                                query_norm: &attention.query_norm,
-                                key_norm: &attention.key_norm,
-                                inv_freq: &model.inv_freq,
                                 position_ids: metadata.positions(),
-                                slot_mapping: metadata.physical_slots(),
-                                eps: model.config.norm_eps,
-                            },
-                            arena,
-                        )?;
-                        let input = ops::FastRaggedAttentionInput {
-                            query,
-                            arena,
-                            block_tables: metadata.block_tables(),
-                            block_table_stride: metadata.block_table_stride(),
-                            request_slots: metadata.request_slots(),
-                            position_ids: metadata.positions(),
-                        };
-                        let splits = if splitk_attention_enabled {
-                            ops::splitk_decode_splits(
-                                num_tokens,
-                                metadata.max_context_tokens(),
-                                arena.page_size().value(),
-                            )
-                        } else {
-                            1
-                        };
-                        if splits > 1 {
-                            ops::paged_ragged_attention_splitk_lfm2_bf16_into(
-                                runtime,
-                                input,
-                                attention_splitk_partials,
-                                splits,
-                                post_operator,
-                            )?;
-                        } else {
-                            ops::paged_ragged_attention_fast_lfm2_bf16_into(
-                                runtime,
-                                input,
-                                post_operator,
-                            )?;
+                            };
+                            let splits = if splitk_attention_enabled {
+                                ops::splitk_decode_splits(
+                                    num_tokens,
+                                    metadata.max_context_tokens(),
+                                    arena.page_size().value(),
+                                )
+                            } else {
+                                1
+                            };
+                            if splits > 1 {
+                                ops::paged_ragged_attention_splitk_lfm2_bf16_into(
+                                    runtime,
+                                    input,
+                                    attention_splitk_partials,
+                                    splits,
+                                    post_operator,
+                                )?;
+                            } else {
+                                ops::paged_ragged_attention_fast_lfm2_bf16_into(
+                                    runtime,
+                                    input,
+                                    post_operator,
+                                )?;
+                            }
                         }
                     }
+
                     post_operator
                         .set_logical_shape(Shape::new([num_tokens, model.config.hidden_size]))?;
                     linear_decode_into(
