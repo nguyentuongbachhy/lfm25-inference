@@ -7,7 +7,7 @@ use crate::{
         benchmark::{BenchConfig, benchmark_gpu},
         blaslt::{Fp8LinearConfig, fp8::Fp8ScaleMode},
     },
-    ops::argmax_rows_bf16_atomic_into,
+    ops::argmax_rows_bf16_into,
     tensor::Shape,
 };
 
@@ -26,7 +26,7 @@ fn fp8_config() -> Fp8LinearConfig {
 }
 
 #[test]
-#[ignore = "GPU benchmark: production-shape FP8 LM head plus atomic greedy argmax"]
+#[ignore = "GPU benchmark: production-shape FP8 LM head plus production greedy argmax dispatch"]
 fn bench_fp8_lm_head_argmax_boundary() -> Result<()> {
     let runtime = CudaRuntime::new(0)?;
     let config = BenchConfig {
@@ -80,7 +80,7 @@ fn bench_fp8_lm_head_argmax_boundary() -> Result<()> {
             fp8_config(),
         )?;
     }
-    argmax_rows_bf16_atomic_into(&runtime, &logits, &mut sampled)?;
+    argmax_rows_bf16_into(&runtime, &logits, &mut sampled)?;
     runtime.synchronize()?;
     let token_a = runtime.download(&sampled)?[0];
 
@@ -100,7 +100,7 @@ fn bench_fp8_lm_head_argmax_boundary() -> Result<()> {
             fp8_config(),
         )?;
     }
-    argmax_rows_bf16_atomic_into(&runtime, &logits, &mut sampled)?;
+    argmax_rows_bf16_into(&runtime, &logits, &mut sampled)?;
     runtime.synchronize()?;
     let token_b = runtime.download(&sampled)?[0];
     ensure!(token_a == token_b, "LM-head boundary token is not deterministic");
@@ -125,7 +125,7 @@ fn bench_fp8_lm_head_argmax_boundary() -> Result<()> {
     })?;
 
     let argmax = benchmark_gpu(runtime.context(), runtime.stream(), config, || {
-        argmax_rows_bf16_atomic_into(&runtime, &logits, &mut sampled)
+        argmax_rows_bf16_into(&runtime, &logits, &mut sampled)
     })?;
 
     let boundary = benchmark_gpu(runtime.context(), runtime.stream(), config, || {
@@ -144,7 +144,7 @@ fn bench_fp8_lm_head_argmax_boundary() -> Result<()> {
                 fp8_config(),
             )?;
         }
-        argmax_rows_bf16_atomic_into(&runtime, &logits, &mut sampled)
+        argmax_rows_bf16_into(&runtime, &logits, &mut sampled)
     })?;
 
     let removable_us = boundary.mean_us - lm_head.mean_us;
