@@ -51,7 +51,8 @@ pub(crate) use linear::{
 };
 pub(crate) use mok_dispatch::should_use_mok_one_kernel;
 pub(crate) use qk_postprocess::{
-    QkPostprocessInput, qk_norm_rope_kv_write_arena_decode_bf16, qk_norm_rope_kv_write_decode_bf16,
+    QkPackedPostprocessInput, QkPostprocessInput, qk_norm_rope_kv_write_arena_decode_bf16,
+    qk_norm_rope_kv_write_decode_bf16, qk_norm_rope_kv_write_packed_arena_decode_bf16,
 };
 pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
 pub(crate) use rms_norm::{residual_rms_norm_bf16_into, rms_norm_bf16_into};
