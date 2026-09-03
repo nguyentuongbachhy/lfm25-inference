@@ -15,27 +15,31 @@ Prior full-model ABBA results showed:
 
 Production currently routes `C >= 4096` to direct execution, so the positive C4096 point is not used.
 
-## Hypothesis
+## Coarse long-context sweep
 
-The graph/direct crossover lies between C4096 and C8192 while the attention topology remains unchanged (PS16, B1, Split-K=8). Extending graph dispatch only through the measured-positive long-context range can improve B1 latency without changing numerical behavior or Split-K selection.
+RTX 5060 Laptop GPU, selected E4M3 policy, PS16, B1, Split-K=8, full-model ABBA:
 
-## Benchmark
+| Context | Direct mean | Graph mean | Mean speedup | Direct p95 | Graph p95 | P95 speedup | Top1 |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 4096 | 6.582971 ms | 6.123284 ms | 1.0751x | 6.800672 ms | 6.188832 ms | 1.0989x | exact |
+| 5120 | 7.825203 ms | 7.923881 ms | 0.9875x | 7.929152 ms | 7.971968 ms | 0.9946x | exact |
+| 6144 | 7.971439 ms | 8.031264 ms | 0.9926x | 7.970592 ms | 8.066656 ms | 0.9881x | exact |
+| 7168 | 8.046827 ms | 8.236858 ms | 0.9769x | 8.039264 ms | 8.367296 ms | 0.9608x | exact |
+| 8192 | 8.082230 ms | 8.205627 ms | 0.9850x | 8.084128 ms | 8.422272 ms | 0.9599x | exact |
 
-Use the existing full-model ABBA harness with exact sampled-token agreement and the selected E4M3 policy.
+The crossover therefore lies between C4096 and C5120. It is not safe to set the production cutoff to 5120 from this evidence.
 
-Test contexts:
+## Refined benchmark
+
+Keep the same topology and measure the remaining interval at 256-token spacing:
 
 - 4096
+- 4352
+- 4608
+- 4864
 - 5120
-- 6144
-- 7168
-- 8192
 
-All are B1, PS16 and expected to remain Split-K=8 for the complete measured decode window.
-
-## Gate
-
-A context point is eligible for graph dispatch only if:
+A point is eligible for graph dispatch only if:
 
 - `top1_agreement=true`;
 - mean speedup >= 1.02x;
@@ -45,6 +49,6 @@ Choose the largest contiguous positive range starting at C4096. Do not interpola
 
 ## Stop condition
 
-If C4096 fails to reproduce at >=1.02x, reject the extension and keep the existing production boundary.
+After the refined sweep, set the production maximum to the last measured-safe boundary and keep all larger contexts on direct execution.
 
-If later points regress, cap the production maximum at the last measured-safe boundary. C8192 remains direct unless it independently passes, which prior evidence says is unlikely.
+If only C4096 passes, use a conservative cutoff covering only the validated C4096 neighborhood rather than extrapolating toward C5120.
