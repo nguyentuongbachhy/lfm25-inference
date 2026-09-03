@@ -1,5 +1,9 @@
 # Residual RMSNorm -> FP8 fusion
 
+## Final decision — REJECT
+
+The primitive fusion is valid and fast, but the full-model production gate fails the precommitted B1/C2048 requirement. Do not merge this branch and do not add another implementation unless new profiling identifies a specific avoidable bottleneck.
+
 ## Baseline
 
 This branch is based on current `main` at `4bf64bb1ea993b8deed3697a6b406719210ce371`, which contains the bounded CUDA Graph promotion plus Rust formatting cleanup.
@@ -54,65 +58,28 @@ RTX 5060 Laptop GPU, SM120, same-process paired AB/BA:
 
 The precommitted M1 gate was >=1.20x mean with no p95 regression. M1 achieves 1.7748x and exact output, so Phase 1 passes decisively.
 
-## Phase 2 production integration
+## Phase 2 production result — REJECT
 
-The candidate is opt-in with `LFM25_RMS_FP8_FUSION=1`.
+Real-checkpoint selected-E4M3 production decode, CUDA Graph dispatch disabled to isolate this direction:
 
-Integration is intentionally narrow:
+| Shape | Direct mean | Fused mean | Mean speedup | Direct p95 | Fused p95 | P95 speedup | Top1 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| B1/C128 | 6.050889 ms | 5.973100 ms | 1.0130x | 6.232704 ms | 6.159936 ms | 1.0118x | exact |
+| B16/C128 | 6.074366 ms | 6.055652 ms | 1.0031x | 6.133536 ms | 6.117088 ms | 1.0027x | exact |
+| B1/C2048 | 6.158916 ms | 6.125776 ms | 1.0054x | 6.390400 ms | 6.146336 ms | 1.0397x | exact |
+| B8/C2048 | 8.593808 ms | 8.570881 ms | 1.0027x | 8.630976 ms | 8.592512 ms | 1.0045x | exact |
+| B1/C8192 | 8.106916 ms | 8.075912 ms | 1.0038x | 8.221120 ms | 8.182560 ms | 1.0047x | exact |
 
-- selected FP8 Gate/Up sites use fused `residual + RMSNorm -> E4M3` and call the existing prequantized FP8 cuBLASLt GEMM;
-- BF16 Gate/Up sites keep the existing residual/RMSNorm and linear path;
-- the final layer fuses final RMSNorm directly into the selected FP8 LM-head activation;
-- intermediate next-layer operator norms remain BF16 because subsequent attention/conv operators consume the normalized BF16 tensor;
-- CUDA Graph dispatch is disabled inside the Phase 2 ABBA harness so this direction is measured in isolation.
+The full-model gate required both B1/C128 and B1/C2048 mean speedup >=1.01x. B1/C128 passes at 1.0130x, but B1/C2048 reaches only 1.0054x. Therefore the production integration is rejected even though every token trace is exact and no measured shape materially regresses.
 
-Because the fused kernel preserves the reference BF16 rounding point before E4M3 conversion, the full-model sampled-token trace is required to remain exact.
+The result shows that removing nine small residual/RMSNorm-to-FP8 boundaries is not large enough to move whole-model TPOT consistently. The primitive optimization is real, but Amdahl's law dominates at the model level.
 
-## Expected end-to-end benefit
+## Integration attempted
 
-The selected policy contains eight FP8 Gate/Up sites plus the FP8 LM head. With roughly 10 us local saving per fused M1 boundary, the ideal aggregate saving is around 90 us per decode step before scheduling effects.
+The rejected candidate was opt-in with `LFM25_RMS_FP8_FUSION=1` and was limited to selected FP8 Gate/Up sites plus the final RMSNorm -> FP8 LM-head boundary. BF16-only sites remained unchanged.
 
-Against an approximately 6 ms decode step, a realistic expected whole-model gain is about 1-2%, not the 1.77x primitive speedup.
-
-## Phase 2 full-model gate
-
-Ignored test:
-
-`bench_rms_fp8_fusion_full_model_abba`
-
-Same-process order: Direct -> Fused -> Fused -> Direct.
-
-Shapes:
-
-- B1/C128: primary short-context gate;
-- B16/C128: batched short-context regression gate;
-- B1/C2048: primary long-context gate;
-- B8/C2048: batched long-context regression gate;
-- B1/C8192: very-long-context regression gate.
-
-Promotion requires:
-
-- `top1_agreement=true` at every shape;
-- B1/C128 mean speedup >=1.01x;
-- B1/C2048 mean speedup >=1.01x;
-- no material p95 regression at primary B1 shapes;
-- no material batched or C8192 regression;
-- existing checkpoint NLL/hidden quality gate remains unchanged.
-
-If the isolated Phase 2 gate passes, run one final combined `LFM25_CUDA_GRAPHS=1 + LFM25_RMS_FP8_FUSION=1` serving check before merging.
+Do not enable or merge this production path.
 
 ## Stop condition
 
-If full-model B1 improvement is below 1.01x or p95 regresses materially, reject the production integration. One materially different fusion implementation is allowed only if profiling identifies a specific avoidable bottleneck.
-
-## Commands
-
-```bash
-LLM_CUDA_ARCH=compute_120 cargo fmt --check
-LLM_CUDA_ARCH=compute_120 cargo check --all-features
-LLM_CUDA_ARCH=compute_120 cargo test --release -- --test-threads=1
-
-LLM_CUDA_ARCH=compute_120 cargo test --release \
-  bench_rms_fp8_fusion_full_model_abba -- \
-  --ignored --nocapture --test-threads=1
-```
+Satisfied: B1/C2048 mean improvement is below 1.01x. Close the direction. No second implementation is justified because the benchmark does not expose a specific local bottleneck; the remaining issue is insufficient whole-model weight.
