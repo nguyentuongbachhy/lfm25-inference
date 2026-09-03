@@ -9,7 +9,7 @@ use super::*;
 const WARMUP_STEPS: usize = 4;
 const MEASURED_STEPS: usize = 16;
 const CACHE_HEADROOM: usize = 64;
-const SHAPES: &[(usize, usize)] = &[(1, 128), (1, 512), (1, 1024), (1, 2048)];
+const SHAPES: &[(usize, usize)] = &[(1, 4096), (1, 4352)];
 
 fn model_dir() -> PathBuf {
     env::var_os("LFM25_MODEL_DIR")
