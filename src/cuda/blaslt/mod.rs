@@ -1,5 +1,7 @@
 pub(crate) mod fp8;
 mod plan;
+#[cfg(test)]
+mod autotune;
 
 use std::{
     collections::HashMap,
