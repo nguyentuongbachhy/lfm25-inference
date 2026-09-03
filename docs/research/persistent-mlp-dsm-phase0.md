@@ -18,9 +18,9 @@ The target operator group is:
 RMSNorm -> Gate/Up -> SwiGLU -> Down -> Residual
 ```
 
-For B1, the hidden vector is 2048 BF16 elements (4 KiB) and the activated intermediate is 8192 elements: 16 KiB in BF16 or 8 KiB in E4M3. These sizes fit comfortably inside SM120 shared-memory capacity.
+For B1, the hidden vector is 2048 BF16 elements (4 KiB) and the activated intermediate is 8192 elements: 16 KiB in BF16 or 8 KiB in E4M3. These sizes fit inside SM120 shared-memory capacity.
 
-CUDA compute capability 12.x supports Thread Block Clusters and Distributed Shared Memory (DSM). Blocks in one cluster are co-scheduled in one GPC and may access each other's shared memory. This provides a possible producer/consumer handoff for activation tiles without first materializing them to HBM.
+CUDA compute capability 12.x supports Thread Block Clusters and Distributed Shared Memory (DSM). Blocks in one cluster are co-scheduled in one GPC and may access each other's shared memory. This provided a possible producer/consumer handoff for activation tiles without first materializing them to HBM.
 
 ## Phase 0 question
 
@@ -56,12 +56,12 @@ Each consumer writes one complete copy of the source tile. The output therefore 
 
 Tile sizes:
 
-- 4096 BF16 elements = 8 KiB, representative of an E4M3/BF16-sized partial activation boundary;
+- 4096 BF16 elements = 8 KiB;
 - 8192 BF16 elements = 16 KiB, the complete BF16 activated intermediate for B1.
 
 Use balanced paired GPU timing in one process to reduce laptop clock and thermal bias.
 
-## Phase 0 gate
+## Precommitted Phase 0 gate
 
 Continue to Tensor Core / persistent-MLP Phase 1 only if:
 
@@ -73,31 +73,27 @@ Continue to Tensor Core / persistent-MLP Phase 1 only if:
 
 If DSM is neutral or slower, reject this producer/consumer architecture before implementing model math.
 
-## Phase 1 concept if Phase 0 passes
+## Measured result
 
-Do not build a standalone replacement GEMM. Use a cluster-resident operator group.
+RTX 5060 Laptop GPU / SM120:
 
-A plausible first topology is:
+| Tile | Global mean | DSM mean | Mean speedup | Global p95 | DSM p95 | Exact |
+|---:|---:|---:|---:|---:|---:|---|
+| 8 KiB / 4096 BF16 | 11.260 us | 12.068 us | 0.9527x | 15.348 us | 17.294 us | true |
+| 16 KiB / 8192 BF16 | 14.073 us | 17.599 us | 0.7999x | 16.193 us | 18.633 us | true |
 
-```text
-cluster
-  producer/compute warps:
-      load x tile
-      Gate/Up tensor-core work
-      SwiGLU
-      publish activation tile in DSM
+The 8-block cluster launches correctly and DSM is numerically exact, but it is slower than the global-scratch reference at both activation sizes. The complete 16 KiB B1 activation handoff is about 20% slower on mean latency.
 
-  Down consumer blocks:
-      read activation tile from DSM
-      accumulate disjoint output-channel tiles
+## Decision
 
-  cluster synchronization between activation tiles
-```
+**REJECT** the cluster-DSM producer/consumer persistent-MLP architecture.
 
-The key invariant is that the full 8192-wide activated vector is not written to global memory between SwiGLU and Down.
+The precommitted performance gate fails at both sizes. There is no justification for implementing Gate/Up or Down Tensor Core math on top of this handoff mechanism.
 
-Phase 1 must compare the complete MLP operator group against the current cuBLASLt + fused SwiGLU + cuBLASLt path. A custom GEMM primitive by itself is not sufficient evidence.
+The result also indicates that the existing global-memory path for a 8–16 KiB activation boundary is already cheap on this GPU, likely benefiting from cache locality. Replacing that boundary with remote shared-memory access plus cluster synchronization does not improve the economics.
 
-## Amdahl target
+This rejection is scoped to the DSM handoff architecture. It does not prove that every possible operator-group or megakernel design is slower. A future direction must use a materially different mechanism and must not simply add DSM around the same work.
 
-With the MLP region near 54% of the short-context decode envelope, a 1.10x complete-MLP speedup implies roughly a 1.05x whole-step ceiling, and a 1.20x MLP speedup implies roughly a 1.10x whole-step ceiling. This is finally large enough to justify architectural complexity if the operator-group benchmark supports it.
+## Stop condition
+
+Stop this branch here. Do not implement persistent MLP Tensor Core math on `agent/persistent-mlp-dsm`, and do not merge the experimental DSM code into `main`.
