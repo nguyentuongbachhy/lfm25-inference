@@ -15,16 +15,10 @@ use super::*;
 const BENCH_WARMUP_STEPS: usize = 4;
 const BENCH_MEASURED_STEPS: usize = 16;
 const CACHE_DECODE_HEADROOM: usize = 64;
-// Cover the two validated B1 points plus three distinct serving regimes before
-// production graph-cache integration: high-batch short context, medium-batch
-// long context, and single-request very-long context.
-const BENCH_SHAPES: &[(usize, usize)] = &[
-    (1, 128),
-    (16, 128),
-    (1, 2048),
-    (8, 2048),
-    (1, 8192),
-];
+// The broad serving sweep found graph replay useful only for B1 at moderate
+// context. Measure the three remaining B1 boundaries needed to define a bounded
+// production policy without repeating already-closed batch regimes.
+const BENCH_SHAPES: &[(usize, usize)] = &[(1, 512), (1, 1024), (1, 4096)];
 
 fn model_dir() -> PathBuf {
     env::var_os("LFM25_MODEL_DIR")
