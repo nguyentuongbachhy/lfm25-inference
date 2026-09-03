@@ -272,3 +272,5 @@ include!("decode_executor.rs");
 mod cuda_graph_dispatch_tests;
 #[cfg(test)]
 mod cuda_graph_production_tests;
+#[cfg(test)]
+mod rms_fp8_fusion_tests;
