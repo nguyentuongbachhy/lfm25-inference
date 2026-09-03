@@ -110,24 +110,73 @@ Continue the direction only if M1 mean speedup is at least 1.10x.
 M8 and M16 are diagnostic. A batch regression does not automatically reject a
 B1-only candidate, but it prevents universal dispatch.
 
+## Attempt A result — PASS
+
+Measured on the target RTX 5060 Laptop GPU:
+
+| M | Direct mean | Packed+unpack mean | Mean speedup | NRMSE | Cosine | Non-finite |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 48.074 us | 28.671 us | 1.6848x | 0.00000000 | 1.00000000 | 0 |
+| 8 | 46.923 us | 21.947 us | 2.1576x | 0.00414138 | 0.99999142 | 0 |
+| 16 | 50.617 us | 23.797 us | 2.1290x | 0.00414292 | 0.99999142 | 0 |
+
+M1 exceeds the predefined 1.10x continuation gate by a large margin and is
+bit-identical in this primitive test. M8 and M16 also pass the numerical gate and
+show larger local speedups. The direction therefore continues to Attempt B.
+
+## Attempt B — packed QKV consumed by QK/RoPE/KV-write
+
+Attempt B removes the unpack launch from the normal paged-attention path.
+
+The packed postprocess kernel consumes `[Q|K|V]` directly:
+
+1. Q is RMS-normalized and RoPE-rotated into the existing Q scratch tensor;
+2. K is RMS-normalized and RoPE-rotated directly into the paged KV cache;
+3. V is copied directly from the packed projection into the paged KV cache;
+4. separate K and V scratch tensors are not written on this path.
+
+The existing short-context MoK path still uses the unpack fallback because the
+MoK kernel consumes raw Q, K, and V in one fused launch. The original separate
+Q/K/V projection path is also retained as a fallback for layers where any of the
+Q/K/V weights use FP8.
+
+This is a bounded operator-group fusion. Attention math, Split-K policy, KV page
+layout, precision policy, and sampling are unchanged.
+
 ## Model-quality gate
 
-If the primitive gate passes, the existing production model-quality gate remains
-unchanged:
+The existing production model-quality gate remains unchanged:
 
 - relative NLL delta <= 1%;
 - no non-finite values;
 - final hidden cosine >= 0.99;
 - final hidden NRMSE <= 0.10.
 
-Because packed BF16 projection changes only GEMM grouping, deterministic greedy
-sequence agreement should also be checked before promotion.
+Because packed BF16 projection can change GEMM reduction order at M>1,
+deterministic greedy sequence agreement is required before promotion. A B1 path
+that remains bit-identical does not require a relaxed quality gate.
 
 ## End-to-end gate
 
-If the primitive gate passes, compare selected-weight-E4M3 baseline against
-selected-weight-E4M3 plus packed QKV in same-process order-balanced full-model
-benchmarks.
+Ignored test:
+
+`bench_packed_qkv_full_model_abba`
+
+The test loads the selected E4M3 policy, uses PS16, creates fresh deterministic
+prefill/cache state for every pass, and compares complete decode passes in
+D/P/P/D order.
+
+Shapes:
+
+- B1/C128;
+- B16/C128;
+- B1/C2048;
+- B8/C2048;
+- B1/C8192.
+
+Required before timing acceptance:
+
+- exact sampled-token trace agreement at every measured shape.
 
 Minimum continuation targets:
 
@@ -135,19 +184,21 @@ Minimum continuation targets:
 - no p95 regression greater than 1% at B1/C128;
 - B1/C2048 mean speedup >= 1.01x, or classify the candidate as short-context-only;
 - no material regression at measured B8/B16 serving points if universal dispatch
-  is considered.
+  is considered;
+- B1/C8192 may become neutral as attention dominates, but must not regress by
+  more than 1% for a universal B1 policy.
+
+If full-model B1 gains survive, the next research stage may fuse the packed QKV
+projection boundary with a larger attention operator group. If the full-model
+result is below these gates, stop the packed-QKV direction even though the local
+primitive is faster.
 
 ## Stop condition and iteration budget
 
-Attempt A is packed GEMM plus unpack.
+Attempt A is packed GEMM plus unpack and has passed.
 
-If M1 primitive speedup is below 1.10x, reject packed QKV and do not proceed to a
-persistent megakernel from this direction.
-
-If Attempt A passes M1 but the unpack kernel is clearly the blocker in the
-full-model result, allow one materially different Attempt B: make the fused
-QK-normalization/RoPE/KV-write path consume the packed QKV layout directly and
-remove the unpack launch plus Q/K/V copies.
+Attempt B is the one allowed materially different local implementation: packed
+QKV is consumed directly by QK-normalization/RoPE/KV-write on the paged path.
 
 No third local packed-QKV implementation is allowed before reassessing the larger
 megakernel strategy.
@@ -161,5 +212,9 @@ LLM_CUDA_ARCH=compute_120 cargo test --release -- --test-threads=1
 
 LLM_CUDA_ARCH=compute_120 cargo test --release \
   bench_packed_qkv_bf16 -- \
+  --ignored --nocapture --test-threads=1
+
+LLM_CUDA_ARCH=compute_120 cargo test --release \
+  bench_packed_qkv_full_model_abba -- \
   --ignored --nocapture --test-threads=1
 ```
