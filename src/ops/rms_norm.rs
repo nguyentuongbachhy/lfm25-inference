@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use half::bf16;
 
 use crate::{
-    cuda::{CudaRuntime, ResidualRmsNormLaunch, RmsNormLaunch},
+    cuda::{CudaRuntime, ResidualRmsNormFp8Launch, ResidualRmsNormLaunch, RmsNormLaunch},
     tensor::Tensor,
 };
 
@@ -82,16 +82,12 @@ pub fn residual_rms_norm_bf16(
     Ok((residual_out, normalized_out))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn residual_rms_norm_bf16_into(
-    runtime: &CudaRuntime,
+fn validate_residual_rms_norm(
     residual: &Tensor<bf16>,
     update: &Tensor<bf16>,
     weight: &Tensor<bf16>,
     eps: f32,
-    residual_out: &mut Tensor<bf16>,
-    normalized_out: &mut Tensor<bf16>,
-) -> Result<()> {
+) -> Result<(usize, usize)> {
     ensure!(
         residual.shape() == update.shape(),
         "fused residual RMSNorm shape mismatch: residual={:?}, update={:?}",
@@ -113,6 +109,20 @@ pub(crate) fn residual_rms_norm_bf16_into(
         weight.dims()
     );
     let rows = residual.numel() / hidden_size;
+    Ok((rows, hidden_size))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn residual_rms_norm_bf16_into(
+    runtime: &CudaRuntime,
+    residual: &Tensor<bf16>,
+    update: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    eps: f32,
+    residual_out: &mut Tensor<bf16>,
+    normalized_out: &mut Tensor<bf16>,
+) -> Result<()> {
+    let (rows, hidden_size) = validate_residual_rms_norm(residual, update, weight, eps)?;
     residual_out.set_logical_shape(residual.shape().clone())?;
     normalized_out.set_logical_shape(residual.shape().clone())?;
     unsafe {
@@ -127,6 +137,43 @@ pub(crate) fn residual_rms_norm_bf16_into(
                 rows,
                 hidden_size,
                 eps,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn residual_rms_norm_bf16_to_e4m3_into(
+    runtime: &CudaRuntime,
+    residual: &Tensor<bf16>,
+    update: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    eps: f32,
+    quant_scale: f32,
+    residual_out: &mut Tensor<bf16>,
+    normalized_fp8_out: &mut Tensor<u8>,
+) -> Result<()> {
+    let (rows, hidden_size) = validate_residual_rms_norm(residual, update, weight, eps)?;
+    ensure!(
+        quant_scale.is_finite() && quant_scale > 0.0,
+        "residual RMSNorm FP8 quantization scale must be finite and positive"
+    );
+    residual_out.set_logical_shape(residual.shape().clone())?;
+    normalized_fp8_out.set_logical_shape(residual.shape().clone())?;
+    unsafe {
+        runtime.kernels().residual_rms_fp8().launch(
+            runtime.stream(),
+            ResidualRmsNormFp8Launch {
+                residual: residual.storage(),
+                update: update.storage(),
+                weight: weight.storage(),
+                residual_out: residual_out.storage_mut(),
+                normalized_fp8_out: normalized_fp8_out.storage_mut(),
+                rows,
+                hidden_size,
+                eps,
+                quant_scale,
             },
         )?;
     }
@@ -175,6 +222,64 @@ mod fused_tests {
             0.02,
             0.02,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn residual_rms_norm_fp8_matches_two_kernel_reference_exactly() -> Result<()> {
+        let runtime = CudaRuntime::new(0)?;
+        let rows = 2usize;
+        let hidden = 2048usize;
+        let residual_host = (0..rows * hidden)
+            .map(|index| bf16::from_f32(((index * 17 % 257) as f32 - 128.0) / 64.0))
+            .collect::<Vec<_>>();
+        let update_host = (0..rows * hidden)
+            .map(|index| bf16::from_f32(((index * 23 % 251) as f32 - 125.0) / 96.0))
+            .collect::<Vec<_>>();
+        let weight_host = (0..hidden)
+            .map(|index| bf16::from_f32(0.75 + (index * 7 % 31) as f32 / 64.0))
+            .collect::<Vec<_>>();
+        let residual = runtime.upload(&residual_host, Shape::new([rows, hidden]))?;
+        let update = runtime.upload(&update_host, Shape::new([rows, hidden]))?;
+        let weight = runtime.upload(&weight_host, Shape::new([hidden]))?;
+        let mut reference_sum = runtime.alloc_bf16(Shape::new([rows, hidden]))?;
+        let mut reference_norm = runtime.alloc_bf16(Shape::new([rows, hidden]))?;
+        residual_rms_norm_bf16_into(
+            &runtime,
+            &residual,
+            &update,
+            &weight,
+            1e-5,
+            &mut reference_sum,
+            &mut reference_norm,
+        )?;
+        let quant_scale = 153.3262f32;
+        let mut reference_fp8 = runtime.alloc_fp8(Shape::new([rows, hidden]))?;
+        unsafe {
+            runtime.kernels().fp8_quantize().launch_bf16_e4m3(
+                runtime.stream(),
+                reference_norm.storage(),
+                reference_fp8.storage_mut(),
+                reference_norm.numel(),
+                quant_scale,
+            )?;
+        }
+
+        let mut fused_sum = runtime.alloc_bf16(Shape::new([rows, hidden]))?;
+        let mut fused_fp8 = runtime.alloc_fp8(Shape::new([rows, hidden]))?;
+        residual_rms_norm_bf16_to_e4m3_into(
+            &runtime,
+            &residual,
+            &update,
+            &weight,
+            1e-5,
+            quant_scale,
+            &mut fused_sum,
+            &mut fused_fp8,
+        )?;
+
+        assert_eq!(readback(&runtime, &fused_sum)?, readback(&runtime, &reference_sum)?);
+        assert_eq!(readback(&runtime, &fused_fp8)?, readback(&runtime, &reference_fp8)?);
         Ok(())
     }
 }
