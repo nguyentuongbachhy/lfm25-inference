@@ -241,6 +241,7 @@ fn bench_rms_fp8_fusion_full_model_abba() -> Result<()> {
             direct_mean / fused_mean,
             direct_p95,
             fused_p95,
+            direct_p95 / fused_p95,
             direct_submit_mean,
             fused_submit_mean,
             direct_submit_mean / fused_submit_mean,
