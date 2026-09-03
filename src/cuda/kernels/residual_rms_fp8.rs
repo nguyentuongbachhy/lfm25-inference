@@ -32,11 +32,7 @@ impl KernelSet for ResidualRmsFp8Kernels {
     const PTX: &'static str = include_str!(concat!(env!("OUT_DIR"), "/residual_rms_fp8.ptx"));
 
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
-        let function = load_function(
-            &module,
-            Self::MODULE_NAME,
-            "residual_rms_norm_bf16_to_e4m3",
-        )?;
+        let function = load_function(&module, Self::MODULE_NAME, "residual_rms_norm_bf16_to_e4m3")?;
         let kernel = KernelLaunch::new_with_multiple(function, MAX_BLOCK_SIZE, WARP_SIZE)?;
         ensure!(
             kernel.policy().block_size() >= WARP_SIZE,
@@ -66,7 +62,10 @@ impl ResidualRmsFp8Kernels {
             quant_scale,
         } = launch;
         ensure!(rows > 0, "residual RMSNorm FP8 fusion requires rows");
-        ensure!(hidden_size > 0, "residual RMSNorm FP8 hidden size must be > 0");
+        ensure!(
+            hidden_size > 0,
+            "residual RMSNorm FP8 hidden size must be > 0"
+        );
         ensure!(
             quant_scale.is_finite() && quant_scale > 0.0,
             "residual RMSNorm FP8 quantization scale must be finite and positive"
