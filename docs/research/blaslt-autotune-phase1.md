@@ -1,79 +1,46 @@
-# cuBLASLt decode algorithm autotune — Phase 1
+# cuBLASLt decode algorithm autotune — final decision
+
+## Verdict: REJECT
+
+This direction is closed. Do not change production cuBLASLt plan selection from the current first legal heuristic based on this experiment.
 
 ## Baseline
 
 This branch starts from current `main` after bounded CUDA Graph promotion and formatting cleanup.
 
-Closed directions remain closed. This experiment does not replace cuBLASLt, change model precision, or reopen custom tiny-M GEMM, packed-QKV, FP8-KV, or RMSNorm->FP8 fusion.
-
-## Observation
-
-The current BF16 and FP8 plan constructors call cuBLASLt heuristic selection once and cache the returned algorithm. They do not benchmark multiple legal algorithms on the target GPU.
-
-CUDA 12.8 `cublasLtMatmulAlgoGetHeuristic` can return multiple candidate algorithms in estimated-time order. Heuristic rank is not a measured latency guarantee for the RTX 5060 Laptop GPU.
+Closed directions remain closed. This experiment did not replace cuBLASLt, change model precision, or reopen custom tiny-M GEMM, packed-QKV, FP8-KV, or RMSNorm->FP8 fusion.
 
 ## Hypothesis
 
-For the fixed LFM2 decode GEMM shapes, especially M=1, a non-first legal cuBLASLt heuristic may run materially faster on SM120. Selecting a measured-best algorithm at initialization can reduce the dominant MLP/linear region without changing math or introducing a custom GEMM.
+The current BF16 and FP8 plan constructors ask cuBLASLt for one heuristic algorithm and cache it. The experiment tested whether another legal heuristic could materially improve the fixed M=1 LFM2 decode GEMMs on RTX 5060 Laptop GPU / SM120.
 
-## Phase 1 candidate
+## First sweep
 
-Test-only autotuner:
+A sequential sweep showed large timing drift when the same candidate was measured at different points in the run. Those results were not used for promotion. The benchmark was replaced with same-process paired reference/candidate measurement.
 
-1. construct the same descriptors/layouts/preferences as production;
-2. request up to 16 legal heuristic algorithms;
-3. reject candidates with failed status or workspace above the existing 32 MiB workspace;
-4. run warm-up launches;
-5. benchmark each candidate with CUDA events;
-6. compare against the current cached first-heuristic algorithm;
-7. verify BF16 output bytes match the current algorithm for deterministic inputs.
+## Paired confirmation
 
-No production plan-selection change is allowed in Phase 1.
+All paired candidates produced exact output.
 
-## Shapes
+| Dtype | M | N | K | Candidate | Reference mean | Candidate mean | Mean speedup | Reference p95 | Candidate p95 | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| BF16 | 1 | 2048 | 2048 | 4 | 19.458 us | 20.847 us | 0.9618x | 20.069 us | 26.635 us | reject |
+| FP8 | 1 | 16384 | 2048 | 1 | 39.198 us | 39.229 us | 0.9993x | 39.397 us | 40.091 us | reject |
+| BF16 | 1 | 6144 | 2048 | 5 | 53.479 us | 51.914 us | 1.0305x | 55.784 us | 55.192 us | below gate |
+| FP8 | 1 | 2048 | 8192 | 3 | 29.673 us | 31.532 us | 0.9396x | 38.994 us | 32.424 us | reject |
 
-Primary M=1 decode shapes:
+The precommitted continuation gate required at least one dominant M=1 shape to achieve >=1.05x mean speedup with no p95 regression.
 
-- BF16 hidden projection: M=1, N=2048, K=2048;
-- BF16 Conv input: M=1, N=6144, K=2048;
-- FP8 Gate/Up: M=1, N=16384, K=2048;
-- FP8 Down: M=1, N=2048, K=8192;
-- FP8 LM head: M=1, N=65536, K=2048.
+The best exact candidate was BF16 Conv input candidate 5 at only 1.0305x mean. FP8 Down candidate 3 was slower in mean latency despite a better p95.
 
-Secondary batch diagnostics may use M=8 and M=16 after the M=1 screen.
+## Decision
 
-## Numerical gate
+Phase 1 fails. Production plan selection remains unchanged.
 
-For the same inputs, weights, scales and alpha/beta:
-
-- candidate output must be bit-identical to the current cached algorithm when cuBLASLt produces deterministic output for the tested shape;
-- otherwise NRMSE must be zero within BF16 representation and no non-finite output is allowed;
-- model precision policy remains unchanged.
-
-Any algorithm that changes numerical implementation in a way that violates the existing model quality gate is not eligible for production.
-
-## Primitive performance gate
-
-Continue only if at least one dominant M=1 shape improves by >=1.05x mean latency versus the current first heuristic, with no p95 regression.
-
-A smaller local gain is not worth production autotune complexity.
-
-## End-to-end gate
-
-If Phase 1 passes, install measured winners only for exact matching keys and run real-checkpoint ABBA.
-
-Promotion requires:
-
-- B1/C128 mean TPOT >=1.01x;
-- B1/C2048 mean TPOT >=1.01x;
-- no material p95, batched, or C8192 regression;
-- existing NLL/hidden quality gate unchanged;
-- bounded CUDA Graph policy remains valid.
+No full-model integration is justified because no primitive candidate reaches the predefined 1.05x threshold. A roughly 3% local gain on the BF16 Conv input GEMM is too small to justify keyed production overrides and would have negligible whole-model impact.
 
 ## Stop condition
 
-If no dominant M=1 GEMM reaches 1.05x, reject the direction without changing production plan selection.
+Satisfied: no dominant M=1 GEMM reaches 1.05x under paired measurement.
 
-If local winners exist but whole-model B1 gain is below 1.01x, reject production autotuning.
-
-Maximum iteration budget: one candidate-enumeration implementation plus one bounded production-selection implementation if Phase 1 passes.
+Do not iterate further on cuBLASLt heuristic autotuning unless the GPU, CUDA/cuBLASLt version, model shapes, or measurement policy changes materially.
