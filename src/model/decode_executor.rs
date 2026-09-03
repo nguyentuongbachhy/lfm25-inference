@@ -1,3 +1,7 @@
+const PACKED_QKV_Q_WIDTH: usize = 32 * 64;
+const PACKED_QKV_KV_WIDTH: usize = 8 * 64;
+const PACKED_QKV_WIDTH: usize = PACKED_QKV_Q_WIDTH + 2 * PACKED_QKV_KV_WIDTH;
+
 /// Persistent fixed-address scratch for the single-token-per-segment serving
 /// topology. All transformer layers reuse the same buffers sequentially; no
 /// workspace is allocated per layer or per decode step. Selective FP8 sites
@@ -12,6 +16,8 @@ pub(crate) struct DecodeExecutor {
     query: Tensor<bf16>,
     key: Tensor<bf16>,
     value: Tensor<bf16>,
+    qkv_packed: Tensor<bf16>,
+    packed_qkv_weights: Vec<Option<Tensor<bf16>>>,
     wide: Tensor<bf16>,
     activated: Tensor<bf16>,
     logits: Tensor<bf16>,
@@ -30,6 +36,17 @@ fn splitk_attention_enabled_from_env() -> bool {
             )
         })
         .unwrap_or(true)
+}
+
+fn packed_qkv_enabled_from_env() -> bool {
+    std::env::var("LFM25_PACKED_QKV")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn linear_decode_prequantized_fp8_into(
@@ -124,14 +141,54 @@ fn linear_decode_into(
 }
 
 impl DecodeExecutor {
-    fn new(runtime: &CudaRuntime, config: &Lfm2Config, maximum_tokens: usize) -> Result<Self> {
+    fn new(runtime: &CudaRuntime, model: &Lfm2Model, maximum_tokens: usize) -> Result<Self> {
         ensure!(maximum_tokens > 0, "decode executor requires token capacity");
+        let config = &model.config;
         let hidden = config.hidden_size;
         let intermediate = config.effective_intermediate_size();
         let kv_width = config.num_key_value_heads * config.head_dim();
         let wide_width = (intermediate * 2).max(hidden * 3);
         let fp8_input_width = intermediate.max(hidden);
         let splitk_workspace = ops::splitk_workspace_elements(maximum_tokens)?;
+        ensure!(
+            hidden == PACKED_QKV_Q_WIDTH && kv_width == PACKED_QKV_KV_WIDTH,
+            "packed QKV layout does not match LFM2 dimensions"
+        );
+
+        let packed_qkv_enabled = packed_qkv_enabled_from_env();
+        let mut packed_qkv_weights = Vec::with_capacity(config.num_hidden_layers);
+        for (layer, weights) in model.weights.layers.iter().enumerate() {
+            let packed = match &weights.operator {
+                OperatorWeights::Attention(attention)
+                    if packed_qkv_enabled
+                        && attention.query.fp8.is_none()
+                        && attention.key.fp8.is_none()
+                        && attention.value.fp8.is_none() =>
+                {
+                    let query_key = runtime
+                        .pack_rows_bf16(&attention.query.bf16, &attention.key.bf16)
+                        .with_context(|| {
+                            format!("failed to pack Q/K weights for attention layer {layer}")
+                        })?;
+                    Some(
+                        runtime
+                            .pack_rows_bf16(&query_key, &attention.value.bf16)
+                            .with_context(|| {
+                                format!("failed to pack Q/K/V weights for attention layer {layer}")
+                            })?,
+                    )
+                }
+                _ => None,
+            };
+            packed_qkv_weights.push(packed);
+        }
+        if packed_qkv_weights.iter().any(Option::is_some) {
+            for batch in 1..=maximum_tokens {
+                runtime
+                    .blaslt()
+                    .prepare_linear_bf16(batch, PACKED_QKV_WIDTH, hidden)?;
+            }
+        }
 
         Ok(Self {
             maximum_tokens,
@@ -142,6 +199,9 @@ impl DecodeExecutor {
             query: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, hidden]))?,
             key: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, kv_width]))?,
             value: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, kv_width]))?,
+            qkv_packed: runtime
+                .alloc_uninit::<bf16>(Shape::new([maximum_tokens, PACKED_QKV_WIDTH]))?,
+            packed_qkv_weights,
             wide: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, wide_width]))?,
             activated: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, intermediate]))?,
             logits: runtime.alloc_uninit::<bf16>(Shape::new([maximum_tokens, config.vocab_size]))?,
@@ -206,6 +266,8 @@ impl DecodeExecutor {
             query,
             key,
             value,
+            qkv_packed,
+            packed_qkv_weights,
             wide,
             activated,
             logits,
@@ -248,33 +310,60 @@ impl DecodeExecutor {
                     )?;
                 }
                 (OperatorWeights::Attention(attention), BatchLayerCache::Attention(arena)) => {
-                    linear_decode_into(
-                        runtime,
-                        normalized,
-                        &attention.query,
-                        use_fp8,
-                        fp8_input,
-                        query,
-                    )?;
-                    query.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
-                    linear_decode_into(
-                        runtime,
-                        normalized,
-                        &attention.key,
-                        use_fp8,
-                        fp8_input,
-                        key,
-                    )?;
-                    key.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
-                    linear_decode_into(
-                        runtime,
-                        normalized,
-                        &attention.value,
-                        use_fp8,
-                        fp8_input,
-                        value,
-                    )?;
-                    value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                    let packed_weight = packed_qkv_weights
+                        .get(layer)
+                        .and_then(Option::as_ref)
+                        .filter(|_| {
+                            attention.query.fp8.is_none()
+                                && attention.key.fp8.is_none()
+                                && attention.value.fp8.is_none()
+                        });
+                    if let Some(packed_weight) = packed_weight {
+                        ops::linear_bf16_into(runtime, normalized, packed_weight, qkv_packed)?;
+                        query.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
+                        key.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                        value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                        unsafe {
+                            runtime.kernels().qkv_unpack().launch_bf16(
+                                runtime.stream(),
+                                crate::cuda::QkvUnpackLaunch {
+                                    packed: qkv_packed.storage(),
+                                    query: query.storage_mut(),
+                                    key: key.storage_mut(),
+                                    value: value.storage_mut(),
+                                    num_tokens,
+                                },
+                            )?;
+                        }
+                    } else {
+                        linear_decode_into(
+                            runtime,
+                            normalized,
+                            &attention.query,
+                            use_fp8,
+                            fp8_input,
+                            query,
+                        )?;
+                        query.set_logical_shape(Shape::new([num_tokens, 32, 64]))?;
+                        linear_decode_into(
+                            runtime,
+                            normalized,
+                            &attention.key,
+                            use_fp8,
+                            fp8_input,
+                            key,
+                        )?;
+                        key.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                        linear_decode_into(
+                            runtime,
+                            normalized,
+                            &attention.value,
+                            use_fp8,
+                            fp8_input,
+                            value,
+                        )?;
+                        value.set_logical_shape(Shape::new([num_tokens, 8, 64]))?;
+                    }
 
                     if ops::should_use_mok_one_kernel(
                         arena.page_size().value(),
@@ -514,7 +603,7 @@ impl Lfm2Model {
         maximum_tokens: usize,
     ) -> Result<DecodeExecutor> {
         self.prepare_decode_executor_fp8(runtime, maximum_tokens)?;
-        DecodeExecutor::new(runtime, &self.config, maximum_tokens)
+        DecodeExecutor::new(runtime, self, maximum_tokens)
     }
 
     pub(crate) fn try_forward_ragged_decode<'a>(
