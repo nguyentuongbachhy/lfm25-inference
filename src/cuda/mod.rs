@@ -5,6 +5,9 @@ mod module;
 mod runtime;
 
 #[cfg(test)]
+mod dsm_tests;
+
+#[cfg(test)]
 mod graph_tests;
 
 #[cfg(test)]
