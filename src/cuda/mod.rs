@@ -8,6 +8,9 @@ mod runtime;
 mod graph_tests;
 
 #[cfg(test)]
+mod prefill_q4_tests;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
