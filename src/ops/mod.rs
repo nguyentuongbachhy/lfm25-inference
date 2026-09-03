@@ -21,6 +21,8 @@ mod mok_fast_exp_bench_tests;
 mod mok_fused_bench_tests;
 mod qk_postprocess;
 mod rms_norm;
+#[cfg(test)]
+mod rms_fp8_bench_tests;
 mod rope;
 mod sampling;
 mod sampling_dispatch;
