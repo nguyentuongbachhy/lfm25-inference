@@ -20,8 +20,9 @@ pub(crate) use blaslt::{Fp8LinearConfig, fp8::Fp8ScaleMode};
 pub(crate) use kernels::{
     EmbeddingLaunch, FastRaggedAttentionLaunch, FusedAttentionCommon, FusedDecodeLaunch,
     FusedRaggedDecodeLaunch, GatherLaunch, HybridAttentionLaunch, KvCacheWriteLaunch,
-    PagedAttentionLaunch, QkPostprocessLaunch, ResidualRmsNormLaunch, RmsNormLaunch, RopeLaunch,
-    SegmentedShortConvLaunch, ShortConvLaunch, SplitKRaggedAttentionLaunch,
+    PagedAttentionLaunch, QkPostprocessLaunch, ResidualRmsNormFp8Launch, ResidualRmsNormLaunch,
+    RmsNormLaunch, RopeLaunch, SegmentedShortConvLaunch, ShortConvLaunch,
+    SplitKRaggedAttentionLaunch,
 };
 #[cfg(test)]
 pub(crate) use kernels::{RaggedAttentionLaunch, RaggedShortConvLaunch};
