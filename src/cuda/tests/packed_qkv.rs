@@ -7,7 +7,7 @@ use crate::{
         benchmark::{BenchConfig, benchmark_gpu_paired},
         testing::readback,
     },
-    tensor::Shape,
+    tensor::{Shape, Tensor},
 };
 
 const K: usize = 2048;
@@ -81,6 +81,81 @@ fn merged_quality(parts: &[Quality]) -> Quality {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_direct(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    q_weight: &Tensor<bf16>,
+    k_weight: &Tensor<bf16>,
+    v_weight: &Tensor<bf16>,
+    q: &mut Tensor<bf16>,
+    k: &mut Tensor<bf16>,
+    v: &mut Tensor<bf16>,
+    m: usize,
+) -> Result<()> {
+    unsafe {
+        runtime.blaslt().linear_bf16(
+            input.storage(),
+            q_weight.storage(),
+            q.storage_mut(),
+            m,
+            Q,
+            K,
+        )?;
+        runtime.blaslt().linear_bf16(
+            input.storage(),
+            k_weight.storage(),
+            k.storage_mut(),
+            m,
+            KV,
+            K,
+        )?;
+        runtime.blaslt().linear_bf16(
+            input.storage(),
+            v_weight.storage(),
+            v.storage_mut(),
+            m,
+            KV,
+            K,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_candidate(
+    runtime: &CudaRuntime,
+    input: &Tensor<bf16>,
+    packed_weight: &Tensor<bf16>,
+    packed: &mut Tensor<bf16>,
+    q: &mut Tensor<bf16>,
+    k: &mut Tensor<bf16>,
+    v: &mut Tensor<bf16>,
+    m: usize,
+) -> Result<()> {
+    unsafe {
+        runtime.blaslt().linear_bf16(
+            input.storage(),
+            packed_weight.storage(),
+            packed.storage_mut(),
+            m,
+            PACKED,
+            K,
+        )?;
+        runtime.kernels().qkv_unpack().launch_bf16(
+            runtime.stream(),
+            QkvUnpackLaunch {
+                packed: packed.storage(),
+                query: q.storage_mut(),
+                key: k.storage_mut(),
+                value: v.storage_mut(),
+                num_tokens: m,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "GPU benchmark"]
 fn bench_packed_qkv_bf16() -> Result<()> {
@@ -99,7 +174,10 @@ fn bench_packed_qkv_bf16() -> Result<()> {
     )?;
     let qk_weight = runtime.pack_rows_bf16(&q_weight, &k_weight)?;
     let packed_weight = runtime.pack_rows_bf16(&qk_weight, &v_weight)?;
-    ensure!(packed_weight.dims() == [PACKED, K], "packed QKV weight shape mismatch");
+    ensure!(
+        packed_weight.dims() == [PACKED, K],
+        "packed QKV weight shape mismatch"
+    );
 
     let config = BenchConfig {
         warmup: 20,
@@ -124,69 +202,50 @@ fn bench_packed_qkv_bf16() -> Result<()> {
         let mut candidate_k = runtime.alloc_uninit::<bf16>(Shape::new([m, KV]))?;
         let mut candidate_v = runtime.alloc_uninit::<bf16>(Shape::new([m, KV]))?;
 
-        let mut direct = || -> Result<()> {
-            unsafe {
-                runtime.blaslt().linear_bf16(
-                    input.storage(),
-                    q_weight.storage(),
-                    direct_q.storage_mut(),
-                    m,
-                    Q,
-                    K,
-                )?;
-                runtime.blaslt().linear_bf16(
-                    input.storage(),
-                    k_weight.storage(),
-                    direct_k.storage_mut(),
-                    m,
-                    KV,
-                    K,
-                )?;
-                runtime.blaslt().linear_bf16(
-                    input.storage(),
-                    v_weight.storage(),
-                    direct_v.storage_mut(),
-                    m,
-                    KV,
-                    K,
-                )?;
-            }
-            Ok(())
-        };
-        let mut candidate = || -> Result<()> {
-            unsafe {
-                runtime.blaslt().linear_bf16(
-                    input.storage(),
-                    packed_weight.storage(),
-                    packed.storage_mut(),
-                    m,
-                    PACKED,
-                    K,
-                )?;
-                runtime.kernels().qkv_unpack().launch_bf16(
-                    runtime.stream(),
-                    QkvUnpackLaunch {
-                        packed: packed.storage(),
-                        query: candidate_q.storage_mut(),
-                        key: candidate_k.storage_mut(),
-                        value: candidate_v.storage_mut(),
-                        num_tokens: m,
-                    },
-                )?;
-            }
-            Ok(())
-        };
-
-        direct()?;
-        candidate()?;
+        run_direct(
+            &runtime,
+            &input,
+            &q_weight,
+            &k_weight,
+            &v_weight,
+            &mut direct_q,
+            &mut direct_k,
+            &mut direct_v,
+            m,
+        )?;
+        run_candidate(
+            &runtime,
+            &input,
+            &packed_weight,
+            &mut packed,
+            &mut candidate_q,
+            &mut candidate_k,
+            &mut candidate_v,
+            m,
+        )?;
         runtime.synchronize()?;
         let metrics = merged_quality(&[
-            quality(&readback(&runtime, &direct_q)?, &readback(&runtime, &candidate_q)?),
-            quality(&readback(&runtime, &direct_k)?, &readback(&runtime, &candidate_k)?),
-            quality(&readback(&runtime, &direct_v)?, &readback(&runtime, &candidate_v)?),
+            quality(
+                &readback(&runtime, &direct_q)?,
+                &readback(&runtime, &candidate_q)?,
+            ),
+            quality(
+                &readback(&runtime, &direct_k)?,
+                &readback(&runtime, &candidate_k)?,
+            ),
+            quality(
+                &readback(&runtime, &direct_v)?,
+                &readback(&runtime, &candidate_v)?,
+            ),
         ]);
-        ensure!(metrics.non_finite == 0, "packed QKV produced non-finite values");
-        ensure!(metrics.nrmse <= 0.01, "packed QKV NRMSE gate failed: {metrics:?}");
+        ensure!(
+            metrics.non_finite == 0,
+            "packed QKV produced non-finite values"
+        );
+        ensure!(
+            metrics.nrmse <= 0.01,
+            "packed QKV NRMSE gate failed: {metrics:?}"
+        );
         ensure!(
             metrics.cosine >= 0.9999,
             "packed QKV cosine gate failed: {metrics:?}"
@@ -196,8 +255,31 @@ fn bench_packed_qkv_bf16() -> Result<()> {
             runtime.context(),
             runtime.stream(),
             config,
-            &mut direct,
-            &mut candidate,
+            || {
+                run_direct(
+                    &runtime,
+                    &input,
+                    &q_weight,
+                    &k_weight,
+                    &v_weight,
+                    &mut direct_q,
+                    &mut direct_k,
+                    &mut direct_v,
+                    m,
+                )
+            },
+            || {
+                run_candidate(
+                    &runtime,
+                    &input,
+                    &packed_weight,
+                    &mut packed,
+                    &mut candidate_q,
+                    &mut candidate_k,
+                    &mut candidate_v,
+                    m,
+                )
+            },
         )?;
         println!(
             "packed_qkv_bench M={} nrmse={:.8} cosine={:.8} max_abs={:.6} non_finite={} direct_mean_us={:.3} direct_p50_us={:.3} direct_p95_us={:.3} candidate_mean_us={:.3} candidate_p50_us={:.3} candidate_p95_us={:.3} speedup_mean={:.4}x speedup_p50={:.4}x speedup_p95={:.4}x speedup_min={:.4}x speedup_max={:.4}x",
