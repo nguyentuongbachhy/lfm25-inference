@@ -8,6 +8,7 @@ mod kernel_set;
 mod kv_cache;
 mod metadata;
 mod qk_postprocess;
+#[cfg(test)]
 mod residual_rms_fp8;
 mod rms_norm;
 mod rope;
@@ -41,7 +42,9 @@ pub(crate) use kv_cache::KvCacheWriteLaunch;
 use metadata::MetadataKernels;
 use qk_postprocess::QkPostprocessKernels;
 pub(crate) use qk_postprocess::QkPostprocessLaunch;
+#[cfg(test)]
 use residual_rms_fp8::ResidualRmsFp8Kernels;
+#[cfg(test)]
 pub(crate) use residual_rms_fp8::ResidualRmsNormFp8Launch;
 use rms_norm::RmsNormKernels;
 pub(crate) use rms_norm::{ResidualRmsNormLaunch, RmsNormLaunch};
@@ -57,6 +60,7 @@ use silu_mul::SiluMulKernels;
 pub(crate) struct Kernels {
     embedding: EmbeddingKernels,
     rms_norm: RmsNormKernels,
+    #[cfg(test)]
     residual_rms_fp8: ResidualRmsFp8Kernels,
     silu_mul: SiluMulKernels,
     rope: RopeKernels,
@@ -77,6 +81,7 @@ impl Kernels {
         Ok(Self {
             embedding: EmbeddingKernels::load(context)?,
             rms_norm: RmsNormKernels::load(context)?,
+            #[cfg(test)]
             residual_rms_fp8: ResidualRmsFp8Kernels::load(context)?,
             silu_mul: SiluMulKernels::load(context)?,
             rope: RopeKernels::load(context)?,
@@ -101,6 +106,7 @@ impl Kernels {
         &self.rms_norm
     }
 
+    #[cfg(test)]
     pub(crate) fn residual_rms_fp8(&self) -> &ResidualRmsFp8Kernels {
         &self.residual_rms_fp8
     }
