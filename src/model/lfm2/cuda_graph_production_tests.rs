@@ -10,15 +10,15 @@ use super::*;
 const BENCH_WARMUP_STEPS: usize = 4;
 const BENCH_MEASURED_STEPS: usize = 16;
 const CACHE_DECODE_HEADROOM: usize = 64;
-// B1/C4096 previously showed a strong graph win while B1/C8192 regressed.
+// B1/C4096 is reproducibly positive while B1/C5120 is already negative.
 // All points below remain in the same PS16 Split-K=8 topology, so this sweep
-// isolates only the context-dependent graph crossover without reopening Split-K.
+// narrows only the context-dependent graph crossover without reopening Split-K.
 const BENCH_SHAPES: &[(usize, usize)] = &[
     (1, 4096),
+    (1, 4352),
+    (1, 4608),
+    (1, 4864),
     (1, 5120),
-    (1, 6144),
-    (1, 7168),
-    (1, 8192),
 ];
 
 fn model_dir() -> PathBuf {
