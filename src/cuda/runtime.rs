@@ -14,6 +14,17 @@ use crate::tensor::{BufferPool, BufferPoolStats, Shape, Tensor};
 const BF16_POOL_MAX_AVAILABLE_ELEMENTS: usize = 64 * 1024 * 1024;
 const FP8_POOL_MAX_AVAILABLE_ELEMENTS: usize = 32 * 1024 * 1024;
 
+fn cuda_graphs_enabled_from_env() -> bool {
+    std::env::var("LFM25_CUDA_GRAPHS")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub struct CudaRuntime {
     _context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -22,6 +33,7 @@ pub struct CudaRuntime {
     bf16_pool: Arc<BufferPool<bf16>>,
     fp8_pool: Arc<BufferPool<u8>>,
     u32_pool: Arc<BufferPool<u32>>,
+    graph_capture_compatible: bool,
 }
 
 pub(crate) struct TimingEvent {
@@ -32,6 +44,18 @@ impl CudaRuntime {
     pub fn new(device: usize) -> Result<Self> {
         let context = CudaContext::new(device)
             .with_context(|| format!("failed to create CUDA context on device {device}"))?;
+        let graph_capture_compatible = cuda_graphs_enabled_from_env();
+        if graph_capture_compatible {
+            // This runtime owns exactly one compute stream. cudarc's automatic
+            // cross-stream event tracking creates dependencies on pre-capture
+            // events, which CUDA Graph stream capture rejects. Disable it before
+            // any device allocation is created when graph mode is explicitly
+            // requested. Single-stream ordering remains the synchronization
+            // contract for the graph-enabled runtime.
+            unsafe {
+                context.disable_event_tracking();
+            }
+        }
 
         let stream = context
             .new_stream()
@@ -49,12 +73,17 @@ impl CudaRuntime {
             bf16_pool: Arc::new(BufferPool::new(BF16_POOL_MAX_AVAILABLE_ELEMENTS)),
             fp8_pool: Arc::new(BufferPool::new(FP8_POOL_MAX_AVAILABLE_ELEMENTS)),
             u32_pool: Arc::new(BufferPool::new(1024 * 1024)),
+            graph_capture_compatible,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn context(&self) -> &Arc<CudaContext> {
         &self._context
+    }
+
+    pub(crate) fn graph_capture_compatible(&self) -> bool {
+        self.graph_capture_compatible
     }
 
     pub(crate) fn stream(&self) -> &Arc<CudaStream> {
