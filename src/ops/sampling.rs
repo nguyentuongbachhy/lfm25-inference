@@ -6,6 +6,7 @@ use crate::{
     tensor::{Shape, Tensor},
 };
 
+#[allow(dead_code)]
 pub fn argmax_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
     ensure!(input.numel() > 0, "argmax does not support empty tensors");
     let mut output = runtime.alloc_uninit::<u32>(Shape::new([1]))?;
@@ -20,6 +21,7 @@ pub fn argmax_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor
     Ok(output)
 }
 
+#[allow(dead_code)]
 pub fn argmax_rows_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
     ensure!(input.rank() == 2, "batched argmax expects rank-2 input");
     let rows = input.dims()[0];
