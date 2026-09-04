@@ -426,6 +426,8 @@ fn finish_request(
             .internal_fragment_elements,
         detokenization_ms: 0.0,
         total_ms,
+        speculative_draft_tokens: 0,
+        speculative_accepted_tokens: 0,
     };
     if let Some(sender) = state.response.take() {
         let _ = sender.send(Ok(ServingCompletion {

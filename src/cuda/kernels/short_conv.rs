@@ -19,6 +19,16 @@ pub(crate) struct ShortConvLaunch<'a> {
     pub(crate) hidden_size: usize,
 }
 
+pub(crate) struct ShortConvWithHistoryLaunch<'a> {
+    pub(crate) projected: &'a CudaSlice<bf16>,
+    pub(crate) weight: &'a CudaSlice<bf16>,
+    pub(crate) state: &'a mut CudaSlice<bf16>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) state_history: &'a mut CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) hidden_size: usize,
+}
+
 #[cfg(test)]
 pub(crate) struct RaggedShortConvLaunch<'a> {
     pub(crate) projected: &'a CudaSlice<bf16>,
@@ -46,6 +56,7 @@ pub(crate) struct SegmentedShortConvLaunch<'a> {
 
 pub(crate) struct ShortConvKernels {
     lfm2: KernelLaunch,
+    lfm2_with_history: KernelLaunch,
     #[cfg(test)]
     ragged_lfm2: KernelLaunch,
     segmented_lfm2: KernelLaunch,
@@ -57,6 +68,11 @@ impl KernelSet for ShortConvKernels {
 
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
         let function = load_function(&module, Self::MODULE_NAME, "short_conv_lfm2_bf16")?;
+        let with_history_function = load_function(
+            &module,
+            Self::MODULE_NAME,
+            "short_conv_lfm2_bf16_with_history",
+        )?;
         #[cfg(test)]
         let ragged_function =
             load_function(&module, Self::MODULE_NAME, "short_conv_ragged_lfm2_bf16")?;
@@ -64,6 +80,7 @@ impl KernelSet for ShortConvKernels {
             load_function(&module, Self::MODULE_NAME, "short_conv_segmented_lfm2_bf16")?;
         Ok(Self {
             lfm2: KernelLaunch::new(function, MAX_BLOCK_SIZE)?,
+            lfm2_with_history: KernelLaunch::new(with_history_function, MAX_BLOCK_SIZE)?,
             #[cfg(test)]
             ragged_lfm2: KernelLaunch::new(ragged_function, MAX_BLOCK_SIZE)?,
             segmented_lfm2: KernelLaunch::new(segmented_function, MAX_BLOCK_SIZE)?,
@@ -245,6 +262,74 @@ impl ShortConvKernels {
             .arg(weight)
             .arg(state)
             .arg(output)
+            .arg(&num_tokens)
+            .arg(&hidden_size);
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_lfm2_bf16_with_history(
+        &self,
+        stream: &CudaStream,
+        launch: ShortConvWithHistoryLaunch<'_>,
+    ) -> Result<()> {
+        let ShortConvWithHistoryLaunch {
+            projected,
+            weight,
+            state,
+            output,
+            state_history,
+            num_tokens,
+            hidden_size,
+        } = launch;
+        ensure!(
+            num_tokens > 0,
+            "short convolution requires at least one token"
+        );
+        ensure!(
+            hidden_size > 0,
+            "short convolution hidden size must be positive"
+        );
+        let projected_required = num_tokens
+            .checked_mul(hidden_size)
+            .and_then(|value| value.checked_mul(3))
+            .context("short convolution projection size overflow")?;
+        let output_required = num_tokens
+            .checked_mul(hidden_size)
+            .context("short convolution output size overflow")?;
+        let history_required = num_tokens
+            .checked_mul(hidden_size)
+            .and_then(|value| value.checked_mul(2))
+            .context("short convolution state history size overflow")?;
+        ensure!(
+            projected.len() >= projected_required,
+            "short convolution projection storage too small"
+        );
+        ensure!(
+            weight.len() >= hidden_size * 3,
+            "short convolution weight storage too small"
+        );
+        ensure!(
+            state.len() >= hidden_size * 2,
+            "short convolution state storage too small"
+        );
+        ensure!(
+            output.len() >= output_required,
+            "short convolution output storage too small"
+        );
+        ensure!(
+            state_history.len() >= history_required,
+            "short convolution state history storage too small"
+        );
+        let config = self.lfm2_with_history.policy().for_work_items(hidden_size)?;
+        let mut args = stream.launch_builder(self.lfm2_with_history.function());
+        args.arg(projected)
+            .arg(weight)
+            .arg(state)
+            .arg(output)
+            .arg(state_history)
             .arg(&num_tokens)
             .arg(&hidden_size);
         unsafe {

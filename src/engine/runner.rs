@@ -12,13 +12,14 @@ use serde::Serialize;
 use crate::{
     cache::KvPageSize,
     cuda::CudaRuntime,
-    generation::{DEFAULT_SAMPLING_SEED, Sampler, SamplingConfig},
+    generation::{DEFAULT_SAMPLING_SEED, NgramDrafter, Sampler, SamplingConfig},
     model::{
         CalibrationCollector, CalibrationPhase, DecodeProfileMode, DecodeProfileReport,
         Fp8CalibrationReport, Fp8GemmErrorReport, Fp8PrecisionPolicy, HiddenCapture, Lfm2Model,
         LogitDistributionMetrics, LogitMetricAccumulator, ModelProfileRecorder, PrecisionClass,
         ProfileRegion, PropagationAccumulator, PropagationPointMetrics, RaggedBatchInput,
     },
+    ops,
     scheduler::{CostCurve, CostPoint, HardwareCostModel},
     tokenizer::Lfm2Tokenizer,
 };
@@ -27,6 +28,7 @@ use crate::{
 pub struct GenerationOptions {
     pub max_new_tokens: usize,
     pub sampling: SamplingConfig,
+    pub speculative_draft: usize,
 }
 
 impl Default for GenerationOptions {
@@ -34,6 +36,7 @@ impl Default for GenerationOptions {
         Self {
             max_new_tokens: 64,
             sampling: SamplingConfig::default(),
+            speculative_draft: 3,
         }
     }
 }
@@ -105,6 +108,8 @@ pub struct GenerationMetrics {
     pub fp8_pool_internal_fragment_elements: u64,
     pub detokenization_ms: f64,
     pub total_ms: f64,
+    pub speculative_draft_tokens: usize,
+    pub speculative_accepted_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1189,6 +1194,7 @@ impl Engine {
                 temperature: 0.0,
                 ..SamplingConfig::default()
             },
+            speculative_draft: 0,
         };
         let mut workloads = Vec::with_capacity(requested_contexts.len());
         for &requested_context_tokens in requested_contexts {
@@ -1900,6 +1906,7 @@ impl Engine {
                 repetition_penalty: 1.0,
                 seed: DEFAULT_SAMPLING_SEED,
             },
+            speculative_draft: 0,
         };
         let mut diagnostics = Vec::with_capacity(prompts.len());
         for prompt in prompts {
@@ -2035,7 +2042,18 @@ impl Engine {
         let decode_bf16_pool_started = self.runtime.bf16_pool_stats();
         let decode_fp8_pool_started = self.runtime.fp8_pool_stats();
 
-        for step in 0..options.max_new_tokens {
+        let drafter = if options.speculative_draft > 0
+            && options.sampling.temperature == 0.0
+            && decode_profile.is_none()
+        {
+            Some(NgramDrafter::new(1, 4, options.speculative_draft))
+        } else {
+            None
+        };
+        let mut speculative_draft_tokens = 0usize;
+        let mut speculative_accepted_tokens = 0usize;
+
+        while generated.len() < options.max_new_tokens {
             if token == self.model.config().eos_token_id && !ignore_eos {
                 finish_reason = "stop";
                 break;
@@ -2043,7 +2061,96 @@ impl Engine {
             generated.push(token);
             history.push(token);
 
-            if step + 1 < options.max_new_tokens {
+            if generated.len() >= options.max_new_tokens {
+                break;
+            }
+
+            let remaining = options.max_new_tokens.saturating_sub(generated.len());
+            let mut draft = if let Some(ref drafter) = drafter {
+                drafter.draft(&history)
+            } else {
+                Vec::new()
+            };
+
+            let max_draft_allowed = remaining
+                .saturating_sub(1)
+                .min(cache.capacity().saturating_sub(cache.sequence_length() + 1));
+            draft.truncate(max_draft_allowed);
+
+            if !draft.is_empty() {
+                let k = draft.len();
+                speculative_draft_tokens += k;
+
+                let mut verify_tokens = Vec::with_capacity(1 + k);
+                verify_tokens.push(token);
+                verify_tokens.extend_from_slice(&draft);
+
+                let decode_gpu_started = self.runtime.record_timing_event()?;
+                let (spec_logits, checkpoint) = self.model.forward_logits_speculative(
+                    &self.runtime,
+                    &mut cache,
+                    &verify_tokens,
+                )?;
+                let decode_gpu_finished = self.runtime.record_timing_event()?;
+
+                let sampling_started = Instant::now();
+                let predictions_gpu = ops::argmax_rows_bf16(&self.runtime, &spec_logits)?;
+                let predictions = self.runtime.download(&predictions_gpu)?;
+
+                let mut num_draft_accepted = 0;
+                while num_draft_accepted < k && predictions[num_draft_accepted] == draft[num_draft_accepted] {
+                    num_draft_accepted += 1;
+                }
+                speculative_accepted_tokens += num_draft_accepted;
+
+                self.model.rollback_speculative(
+                    &self.runtime,
+                    &mut cache,
+                    checkpoint,
+                    num_draft_accepted,
+                )?;
+
+                gpu_wait_and_sampling_total_ms += elapsed_ms(sampling_started);
+                decode_gpu_ms += self
+                    .runtime
+                    .elapsed_ms(&decode_gpu_started, &decode_gpu_finished)?;
+
+                let batch_end_time = Instant::now();
+                let total_emitted = num_draft_accepted + 1;
+                let elapsed_batch_ms = batch_end_time
+                    .duration_since(last_visible_token_ready)
+                    .as_secs_f64()
+                    * 1000.0;
+                let per_token_step_ms = elapsed_batch_ms / (total_emitted as f64);
+
+                let mut stopped = false;
+                for &accepted in &draft[..num_draft_accepted] {
+                    if accepted == self.model.config().eos_token_id && !ignore_eos {
+                        finish_reason = "stop";
+                        stopped = true;
+                        break;
+                    }
+                    generated.push(accepted);
+                    history.push(accepted);
+                    inter_token_ms.push(per_token_step_ms);
+                    if generated.len() >= options.max_new_tokens {
+                        stopped = true;
+                        break;
+                    }
+                }
+
+                let next_token = predictions[num_draft_accepted];
+                if stopped {
+                    last_visible_token_ready = batch_end_time;
+                    break;
+                }
+
+                if next_token != self.model.config().eos_token_id {
+                    inter_token_ms.push(per_token_step_ms);
+                }
+                last_visible_token_ready = batch_end_time;
+                token = next_token;
+            } else {
                 if let Some(profile) = decode_profile.as_mut() {
                     profile.start_step(&self.runtime)?;
                 }
@@ -2170,6 +2277,8 @@ impl Engine {
                     .internal_fragment_elements,
                 detokenization_ms,
                 total_ms,
+                speculative_draft_tokens,
+                speculative_accepted_tokens,
             },
         })
     }

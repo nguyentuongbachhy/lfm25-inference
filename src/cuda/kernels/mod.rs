@@ -48,7 +48,7 @@ use sampling::SamplingKernels;
 #[cfg(test)]
 pub(crate) use short_conv::RaggedShortConvLaunch;
 use short_conv::ShortConvKernels;
-pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch};
+pub(crate) use short_conv::{SegmentedShortConvLaunch, ShortConvLaunch, ShortConvWithHistoryLaunch};
 use silu_mul::SiluMulKernels;
 
 pub(crate) struct Kernels {

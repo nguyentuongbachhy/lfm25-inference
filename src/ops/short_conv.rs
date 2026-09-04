@@ -4,7 +4,7 @@ use half::bf16;
 #[cfg(test)]
 use crate::cuda::RaggedShortConvLaunch;
 use crate::{
-    cuda::{CudaRuntime, SegmentedShortConvLaunch, ShortConvLaunch},
+    cuda::{CudaRuntime, SegmentedShortConvLaunch, ShortConvLaunch, ShortConvWithHistoryLaunch},
     tensor::{Shape, Tensor},
 };
 
@@ -23,6 +23,86 @@ pub fn short_conv_lfm2_bf16(
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, hidden_size]))?;
     short_conv_lfm2_bf16_into(runtime, projected, weight, state, &mut output)?;
     Ok(output)
+}
+
+pub fn short_conv_lfm2_bf16_with_history(
+    runtime: &CudaRuntime,
+    projected: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    state: &mut Tensor<bf16>,
+    state_history: &mut Tensor<bf16>,
+) -> Result<Tensor<bf16>> {
+    ensure!(
+        projected.rank() == 2,
+        "short convolution projection must have rank 2"
+    );
+    let num_tokens = projected.dims()[0];
+    let hidden_size = projected.dims()[1] / 3;
+    let mut output = runtime.alloc_bf16(Shape::new([num_tokens, hidden_size]))?;
+    short_conv_lfm2_bf16_with_history_into(
+        runtime,
+        projected,
+        weight,
+        state,
+        &mut output,
+        state_history,
+    )?;
+    Ok(output)
+}
+
+pub fn short_conv_lfm2_bf16_with_history_into(
+    runtime: &CudaRuntime,
+    projected: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    state: &mut Tensor<bf16>,
+    output: &mut Tensor<bf16>,
+    state_history: &mut Tensor<bf16>,
+) -> Result<()> {
+    ensure!(
+        projected.rank() == 2,
+        "short convolution projection must have rank 2"
+    );
+    ensure!(
+        weight.rank() == 3,
+        "short convolution weight must have rank 3"
+    );
+    let num_tokens = projected.dims()[0];
+    let projected_width = projected.dims()[1];
+    ensure!(
+        projected_width.is_multiple_of(3),
+        "short convolution projection width must be divisible by 3"
+    );
+    let hidden_size = projected_width / 3;
+    ensure!(
+        weight.dims() == [hidden_size, 1, 3],
+        "short convolution weight mismatch: expected [{hidden_size},1,3], got {:?}",
+        weight.dims()
+    );
+    ensure!(
+        state.dims() == [hidden_size, 2],
+        "short convolution state mismatch: expected [{hidden_size},2], got {:?}",
+        state.dims()
+    );
+    output.set_logical_shape(Shape::new([num_tokens, hidden_size]))?;
+    state_history.set_logical_shape(Shape::new([num_tokens, hidden_size, 2]))?;
+    unsafe {
+        runtime
+            .kernels()
+            .short_conv()
+            .launch_lfm2_bf16_with_history(
+                runtime.stream(),
+                ShortConvWithHistoryLaunch {
+                    projected: projected.storage(),
+                    weight: weight.storage(),
+                    state: state.storage_mut(),
+                    output: output.storage_mut(),
+                    state_history: state_history.storage_mut(),
+                    num_tokens,
+                    hidden_size,
+                },
+            )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn short_conv_lfm2_bf16_into(
@@ -269,6 +349,51 @@ mod tests {
         let state = readback(&runtime, &states)?;
         let expected_state = [0.0, 8.0, 0.0, 15.0, 0.0, 91.0, 0.0, 187.0].map(bf16::from_f32);
         assert_close_bf16(&state, &expected_state, 0.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn short_conv_with_history_matches_standard_and_records_step_states() -> Result<()> {
+        let runtime = CudaRuntime::new(0)?;
+        let projected_host = [
+            1.0, 2.0, 0.5, 1.0, 3.0, 4.0, 2.0, 1.0, 1.0, 0.5, 5.0, 6.0, 1.0, 3.0, 2.0, 1.0, 7.0,
+            8.0,
+        ]
+        .map(bf16::from_f32);
+        let weights_host = [0.25, 0.5, 1.0, -0.5, 0.25, 2.0].map(bf16::from_f32);
+        let projected = runtime.upload(&projected_host, Shape::new([3, 6]))?;
+        let weights = runtime.upload(&weights_host, Shape::new([2, 1, 3]))?;
+        let mut state_standard = runtime.zeros::<bf16>(Shape::new([2, 2]))?;
+        let output_standard = short_conv_lfm2_bf16(&runtime, &projected, &weights, &mut state_standard)?;
+
+        let mut state_with_history = runtime.zeros::<bf16>(Shape::new([2, 2]))?;
+        let mut history = runtime.zeros::<bf16>(Shape::new([3, 2, 2]))?;
+        let output_with_history = short_conv_lfm2_bf16_with_history(
+            &runtime,
+            &projected,
+            &weights,
+            &mut state_with_history,
+            &mut history,
+        )?;
+
+        let actual_standard = readback(&runtime, &output_standard)?;
+        let actual_with_hist = readback(&runtime, &output_with_history)?;
+        assert_close_bf16(&actual_with_hist, &actual_standard, 0.0, 0.0);
+
+        let final_state_standard = readback(&runtime, &state_standard)?;
+        let final_state_with_hist = readback(&runtime, &state_with_history)?;
+        assert_close_bf16(&final_state_with_hist, &final_state_standard, 0.0, 0.0);
+
+        // Verify history at token 2 matches final state
+        let hist_actual = readback(&runtime, &history)?;
+        // Token 2 is at offset 2 * (2 * 2) = 8
+        assert_eq!(&hist_actual[8..12], &final_state_standard[..]);
+
+        // Verify rollback: copy token 0 state back to state_with_history
+        // Token 0 is at offset 0..4
+        runtime.copy_bf16_range(&history, 0, &mut state_with_history, 0, 4)?;
+        let rolled_back_state = readback(&runtime, &state_with_history)?;
+        assert_eq!(&rolled_back_state[..], &hist_actual[0..4]);
         Ok(())
     }
 }

@@ -151,6 +151,12 @@ impl Lfm2Weights {
     }
 }
 
+pub struct SpeculativeCheckpoint {
+    pub(crate) start_sequence_length: usize,
+    pub(crate) num_tokens: usize,
+    pub(crate) conv_histories: Vec<(usize, Tensor<bf16>)>,
+}
+
 pub struct ModelCache {
     layers: Vec<LayerCache>,
     sequence_length: usize,
@@ -531,6 +537,14 @@ impl ModelCache {
             }
         }
         Ok(())
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn sequence_length(&self) -> usize {
+        self.sequence_length
     }
 }
 
@@ -1081,6 +1095,197 @@ impl Lfm2Model {
         capture: &mut HiddenCapture,
     ) -> Result<Tensor<bf16>> {
         self.forward_logits_instrumented(runtime, cache, token_ids, None, None, Some(capture))
+    }
+
+    pub(crate) fn forward_logits_speculative(
+        &self,
+        runtime: &CudaRuntime,
+        cache: &mut ModelCache,
+        token_ids: &[u32],
+    ) -> Result<(Tensor<bf16>, SpeculativeCheckpoint)> {
+        ensure!(
+            !token_ids.is_empty(),
+            "model forward requires at least one token"
+        );
+        let num_tokens = token_ids.len();
+        let start = cache.sequence_length;
+        let next_sequence_length = start
+            .checked_add(num_tokens)
+            .context("model sequence length overflow")?;
+        ensure!(
+            next_sequence_length <= cache.capacity,
+            "request needs {} cache slots but capacity is {}",
+            next_sequence_length,
+            cache.capacity
+        );
+
+        let use_fp8_decode =
+            self.decode_fp8_enabled && start > 0 && num_tokens <= self.maximum_fp8_batch;
+        let positions_host: Vec<u32> = (start..next_sequence_length)
+            .map(|position| u32::try_from(position).context("position exceeds u32"))
+            .collect::<Result<_>>()?;
+        let slots_host: Vec<i64> = (start..next_sequence_length)
+            .map(|slot| i64::try_from(slot).context("slot exceeds i64"))
+            .collect::<Result<_>>()?;
+        let tokens = runtime.upload(token_ids, Shape::new([num_tokens]))?;
+        let positions = runtime.upload(&positions_host, Shape::new([num_tokens]))?;
+        let slots = runtime.upload(&slots_host, Shape::new([num_tokens]))?;
+
+        let mut hidden = ops::embedding_bf16(runtime, &tokens, &self.weights.embedding)?;
+        let mut normalized = ops::rms_norm_bf16(
+            runtime,
+            &hidden,
+            &self.weights.layers[0].operator_norm,
+            self.config.norm_eps,
+        )?;
+
+        let mut conv_histories = Vec::new();
+
+        for layer in 0..self.config.num_hidden_layers {
+            let weights = &self.weights.layers[layer];
+            let operator_output = match (&weights.operator, &mut cache.layers[layer]) {
+                (OperatorWeights::Attention(operator), LayerCache::Attention(kv_cache)) => {
+                    let (mut query, key, value) = (
+                        linear_dispatch(runtime, &normalized, &operator.query, use_fp8_decode)?
+                            .reshape(Shape::new([num_tokens, 32, 64]))?,
+                        linear_dispatch(runtime, &normalized, &operator.key, use_fp8_decode)?
+                            .reshape(Shape::new([num_tokens, 8, 64]))?,
+                        linear_dispatch(runtime, &normalized, &operator.value, use_fp8_decode)?
+                            .reshape(Shape::new([num_tokens, 8, 64]))?,
+                    );
+
+                    ops::qk_norm_rope_kv_write_decode_bf16(
+                        runtime,
+                        ops::QkPostprocessInput {
+                            query: &mut query,
+                            key: &key,
+                            value: &value,
+                            query_norm: &operator.query_norm,
+                            key_norm: &operator.key_norm,
+                            inv_freq: &self.inv_freq,
+                            position_ids: &positions,
+                            slot_mapping: &slots,
+                            eps: self.config.norm_eps,
+                        },
+                        kv_cache,
+                    )?;
+
+                    let attended = ops::paged_attention_fast_lfm2_bf16(
+                        runtime,
+                        &query,
+                        kv_cache,
+                        &positions,
+                    )?
+                    .reshape(Shape::new([num_tokens, self.config.hidden_size]))?;
+                    linear_dispatch(runtime, &attended, &operator.output, use_fp8_decode)?
+                }
+                (OperatorWeights::Conv(operator), LayerCache::Conv(state)) => {
+                    let projected = linear_dispatch(
+                        runtime,
+                        &normalized,
+                        &operator.input,
+                        use_fp8_decode,
+                    )?;
+                    let mut history = runtime.alloc_bf16(Shape::new([
+                        num_tokens,
+                        self.config.hidden_size,
+                        self.config.conv_l_cache - 1,
+                    ]))?;
+                    let mixed = ops::short_conv_lfm2_bf16_with_history(
+                        runtime,
+                        &projected,
+                        &operator.convolution,
+                        state,
+                        &mut history,
+                    )?;
+                    conv_histories.push((layer, history));
+                    linear_dispatch(runtime, &mixed, &operator.output, use_fp8_decode)?
+                }
+                _ => anyhow::bail!("model/cache layer type mismatch at layer {layer}"),
+            };
+
+            let (post_operator, ffn_input) = ops::residual_rms_norm_bf16(
+                runtime,
+                &hidden,
+                &operator_output,
+                &weights.ffn_norm,
+                self.config.norm_eps,
+            )?;
+            let ffn_output = self.feed_forward(
+                runtime,
+                weights,
+                &ffn_input,
+                LayerExecution {
+                    profile: None,
+                    calibration: None,
+                    layer,
+                    use_fp8: use_fp8_decode,
+                },
+            )?;
+            let next_norm = if layer + 1 < self.config.num_hidden_layers {
+                &self.weights.layers[layer + 1].operator_norm
+            } else {
+                &self.weights.final_norm
+            };
+            (hidden, normalized) = ops::residual_rms_norm_bf16(
+                runtime,
+                &post_operator,
+                &ffn_output,
+                next_norm,
+                self.config.norm_eps,
+            )?;
+        }
+
+        let logits = match (use_fp8_decode, self.weights.lm_head_fp8.as_ref()) {
+            (true, Some(fp8)) => ops::linear_fp8_e4m3(
+                runtime,
+                &normalized,
+                &fp8.data,
+                fp8.activation_scale,
+                fp8.weight_scale,
+            ),
+            _ => ops::linear_bf16(runtime, &normalized, &self.weights.embedding),
+        }?;
+
+        cache.sequence_length = next_sequence_length;
+        let checkpoint = SpeculativeCheckpoint {
+            start_sequence_length: start,
+            num_tokens,
+            conv_histories,
+        };
+        Ok((logits, checkpoint))
+    }
+
+    pub(crate) fn rollback_speculative(
+        &self,
+        runtime: &CudaRuntime,
+        cache: &mut ModelCache,
+        checkpoint: SpeculativeCheckpoint,
+        num_draft_accepted: usize,
+    ) -> Result<()> {
+        let valid_tokens = 1 + num_draft_accepted;
+        ensure!(
+            valid_tokens <= checkpoint.num_tokens,
+            "cannot accept more tokens than evaluated: valid_tokens={}, num_tokens={}",
+            valid_tokens,
+            checkpoint.num_tokens
+        );
+        cache.sequence_length = checkpoint
+            .start_sequence_length
+            .checked_add(valid_tokens)
+            .context("sequence length overflow during speculative rollback")?;
+
+        if valid_tokens < checkpoint.num_tokens {
+            let token_idx = valid_tokens - 1;
+            for (layer, history) in checkpoint.conv_histories {
+                if let LayerCache::Conv(state) = &mut cache.layers[layer] {
+                    let elements = state.numel();
+                    let source_start = token_idx * elements;
+                    runtime.copy_bf16_range(&history, source_start, state, 0, elements)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn collect_calibration_weights(

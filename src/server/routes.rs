@@ -109,6 +109,7 @@ fn options_from_request(request: &CompletionRequest) -> Result<GenerationOptions
     Ok(GenerationOptions {
         max_new_tokens,
         sampling,
+        speculative_draft: 0,
     })
 }
 

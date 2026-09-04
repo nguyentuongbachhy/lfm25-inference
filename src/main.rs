@@ -61,6 +61,7 @@ struct Args {
     decode_profile_steps: usize,
     profile_output: Option<PathBuf>,
     hardware_profile: Option<PathBuf>,
+    speculative_draft: usize,
 }
 
 impl Args {
@@ -97,6 +98,10 @@ impl Args {
         let mut decode_profile_steps = 128usize;
         let mut profile_output = None;
         let mut hardware_profile = None;
+        let mut speculative_draft = env::var("LFM25_SPECULATIVE_DRAFT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3usize);
         let mut args = env::args().skip(1);
 
         while let Some(argument) = args.next() {
@@ -257,6 +262,11 @@ impl Args {
                     hardware_profile =
                         Some(PathBuf::from(next_value(&mut args, "--hardware-profile")?));
                 }
+                "--speculative-draft" => {
+                    speculative_draft = next_value(&mut args, "--speculative-draft")?
+                        .parse()
+                        .context("invalid --speculative-draft")?;
+                }
                 "-h" | "--help" => {
                     println!("{}", usage());
                     std::process::exit(0);
@@ -340,6 +350,7 @@ impl Args {
             decode_profile_steps,
             profile_output,
             hardware_profile,
+            speculative_draft,
         })
     }
 }
@@ -361,7 +372,7 @@ fn write_json(path: &std::path::Path, value: &impl serde::Serialize, label: &str
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
+    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
 }
 
 fn main() -> Result<()> {
@@ -583,11 +594,12 @@ fn main() -> Result<()> {
             repetition_penalty: args.repetition_penalty,
             seed: args.seed,
         },
+        speculative_draft: args.speculative_draft,
     };
     let result = engine.generate(args.prompt.as_deref().context("missing prompt")?, options)?;
     println!("{}", result.text);
     eprintln!(
-        "prompt_tokens={} completion_tokens={} finish_reason={} ttft_ms={:.3} tpot_mean_ms={} total_ms={:.3}",
+        "prompt_tokens={} completion_tokens={} finish_reason={} ttft_ms={:.3} tpot_mean_ms={} total_ms={:.3} spec_accepted={}/{}",
         result.prompt_tokens,
         result.completion_tokens,
         result.finish_reason,
@@ -598,6 +610,8 @@ fn main() -> Result<()> {
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "n/a".to_string()),
         result.metrics.total_ms,
+        result.metrics.speculative_accepted_tokens,
+        result.metrics.speculative_draft_tokens,
     );
     if let Some(profile) = &result.profile {
         eprintln!("decode_profile={}", serde_json::to_string_pretty(profile)?);

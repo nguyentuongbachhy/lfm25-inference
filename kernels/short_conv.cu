@@ -49,6 +49,53 @@ void short_conv_lfm2_bf16(
 
 extern "C" __global__
 __launch_bounds__(SHORT_CONV_MAX_BLOCK_SIZE)
+void short_conv_lfm2_bf16_with_history(
+    const __nv_bfloat16* __restrict__ projected,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ state,
+    __nv_bfloat16* __restrict__ output,
+    __nv_bfloat16* __restrict__ state_history,
+    size_t num_tokens,
+    size_t hidden_size
+) {
+    const size_t thread = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = gridDim.x * blockDim.x;
+
+    for (size_t channel = thread; channel < hidden_size; channel += stride) {
+        float state0 = __bfloat162float(state[channel * 2]);
+        float state1 = __bfloat162float(state[channel * 2 + 1]);
+
+        const float weight0 = __bfloat162float(weight[channel * 3]);
+        const float weight1 = __bfloat162float(weight[channel * 3 + 1]);
+        const float weight2 = __bfloat162float(weight[channel * 3 + 2]);
+
+        for (size_t token = 0; token < num_tokens; ++token) {
+            const size_t base = token * hidden_size * 3;
+            const float b = __bfloat162float(projected[base + channel]);
+            const float c = __bfloat162float(projected[base + hidden_size + channel]);
+            const float x = __bfloat162float(projected[base + hidden_size * 2 + channel]);
+            const float gated = b * x;
+            const float convolved =
+                weight0 * state0 + weight1 * state1 + weight2 * gated;
+
+            output[token * hidden_size + channel] =
+                __float2bfloat16_rn(c * convolved);
+
+            state0 = state1;
+            state1 = gated;
+
+            const size_t hist_base = (token * hidden_size + channel) * 2;
+            state_history[hist_base] = __float2bfloat16_rn(state0);
+            state_history[hist_base + 1] = __float2bfloat16_rn(state1);
+        }
+
+        state[channel * 2] = __float2bfloat16_rn(state0);
+        state[channel * 2 + 1] = __float2bfloat16_rn(state1);
+    }
+}
+
+extern "C" __global__
+__launch_bounds__(SHORT_CONV_MAX_BLOCK_SIZE)
 void short_conv_ragged_lfm2_bf16(
     const __nv_bfloat16* __restrict__ projected,
     const __nv_bfloat16* __restrict__ weight,
