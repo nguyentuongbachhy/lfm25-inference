@@ -66,3 +66,4 @@ On NVIDIA RTX 5060 Laptop GPU ($V=65,536$):
 ## 4. Conclusion & Promotion
 
 System-wide atomic argmax routing has been verified and fully promoted into production across all public sampling entry points.
+

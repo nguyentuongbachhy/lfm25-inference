@@ -32,3 +32,4 @@ ITERATION_BUDGET: 2 iterations
 - Balanced same-process ABBA GPU timing (`benchmark_gpu_paired`).
 - Single-row ($B=1, V=65,536$), batched ($B=4, V=65,536$), ($B=16, V=65,536$).
 - Verify exact equality with legacy output under identical random logit distributions.
+
