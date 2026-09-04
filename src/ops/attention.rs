@@ -51,14 +51,28 @@ pub fn prefill_attention_lfm2_bf16(
     );
     let mut output = runtime.zeros::<bf16>(Shape::new([num_tokens, 32, 64]))?;
     unsafe {
-        runtime.kernels().attention().launch_prefill_lfm2_bf16(
-            runtime.stream(),
-            query.storage(),
-            key.storage(),
-            value.storage(),
-            output.storage_mut(),
-            num_tokens,
-        )?;
+        if super::prefill_dispatch::should_use_flash_prefill(num_tokens) {
+            runtime
+                .kernels()
+                .attention()
+                .launch_prefill_flash_lfm2_bf16(
+                    runtime.stream(),
+                    query.storage(),
+                    key.storage(),
+                    value.storage(),
+                    output.storage_mut(),
+                    num_tokens,
+                )?;
+        } else {
+            runtime.kernels().attention().launch_prefill_lfm2_bf16(
+                runtime.stream(),
+                query.storage(),
+                key.storage(),
+                value.storage(),
+                output.storage_mut(),
+                num_tokens,
+            )?;
+        }
     }
     Ok(output)
 }

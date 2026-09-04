@@ -58,6 +58,7 @@ pub(crate) struct HybridAttentionLaunch<'a> {
 
 pub(crate) struct AttentionKernels {
     prefill: KernelLaunch,
+    prefill_flash: KernelLaunch,
     #[cfg(test)]
     ps16: KernelLaunch,
     #[cfg(test)]
@@ -76,6 +77,8 @@ impl KernelSet for AttentionKernels {
 
     fn from_module(module: Arc<CudaModule>) -> Result<Self> {
         let prefill = load_function(&module, Self::MODULE_NAME, "prefill_gqa_lfm2_bf16")?;
+        let prefill_flash =
+            load_function(&module, Self::MODULE_NAME, "prefill_gqa_lfm2_bf16_flash")?;
         #[cfg(test)]
         let ps16 = load_function(&module, Self::MODULE_NAME, "paged_gqa_lfm2_bf16_ps16")?;
         #[cfg(test)]
@@ -105,6 +108,7 @@ impl KernelSet for AttentionKernels {
 
         Ok(Self {
             prefill: KernelLaunch::new_with_multiple(prefill, MAX_BLOCK_SIZE, 32)?,
+            prefill_flash: KernelLaunch::new_with_multiple(prefill_flash, 128, 32)?,
             #[cfg(test)]
             ps16: KernelLaunch::new_with_multiple(ps16, MAX_BLOCK_SIZE, 32)?,
             #[cfg(test)]
@@ -339,6 +343,58 @@ impl AttentionKernels {
             .context("prefill attention grid size overflow")?;
         let config = self.prefill.policy().exact_blocks(blocks)?;
         let mut args = stream.launch_builder(self.prefill.function());
+        args.arg(query)
+            .arg(key)
+            .arg(value)
+            .arg(output)
+            .arg(&num_tokens);
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn launch_prefill_flash_lfm2_bf16(
+        &self,
+        stream: &CudaStream,
+        query: &CudaSlice<bf16>,
+        key: &CudaSlice<bf16>,
+        value: &CudaSlice<bf16>,
+        output: &mut CudaSlice<bf16>,
+        num_tokens: usize,
+    ) -> Result<()> {
+        ensure!(
+            num_tokens > 0,
+            "flash prefill attention requires at least one token"
+        );
+        let query_required = num_tokens
+            .checked_mul(32 * 64)
+            .context("flash prefill query size overflow")?;
+        let kv_required = num_tokens
+            .checked_mul(8 * 64)
+            .context("flash prefill KV size overflow")?;
+        ensure!(
+            query.len() >= query_required,
+            "flash prefill query storage too small"
+        );
+        ensure!(
+            key.len() >= kv_required,
+            "flash prefill key storage too small"
+        );
+        ensure!(
+            value.len() >= kv_required,
+            "flash prefill value storage too small"
+        );
+        ensure!(
+            output.len() >= query_required,
+            "flash prefill output storage too small"
+        );
+        let query_tiles = num_tokens.div_ceil(16);
+        let blocks = query_tiles
+            .checked_mul(8)
+            .context("flash prefill attention grid size overflow")?;
+        let config = self.prefill_flash.policy().exact_blocks(blocks)?;
+        let mut args = stream.launch_builder(self.prefill_flash.function());
         args.arg(query)
             .arg(key)
             .arg(value)

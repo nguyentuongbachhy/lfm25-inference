@@ -122,3 +122,44 @@ Single-layer prefill attention latency at $N=8192$ dropped from 357.4 ms to 84.6
 Across 16 layers, this represents an estimated savings of 4.36 seconds per 8K prefill.
 The direction is approved to proceed to Phase 1 (model integration, quality validation, and prompt E2E benchmarking).
 
+## Phase 1 Full-Model Production ABBA Benchmark
+
+RTX 5060 Laptop GPU (Blackwell SM120), CUDA 12.8, `compute_120`.
+Real checkpoint: LFM2.5-1.2B-Instruct, FP8 selective policy (`docs/benchmarks/fp8/selected-policy.json`).
+Paired balanced same-process AB/BA benchmark (`benchmark_gpu_paired`, 10 batches, warmup 2):
+
+| Tokens | Q2 mean (ms) | Flash mean (ms) | Mean speedup | Q2 p50 (ms) | Flash p50 (ms) | P50 speedup | Q2 p95 (ms) | Flash p95 (ms) | P95 speedup | Logit Cosine | Logit NRMSE | Min Hidden Cos | Max Hidden NRMSE | Top-1 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 516 | 53.335 | 46.570 | 1.1453x | 53.372 | 46.568 | 1.1450x | 54.087 | 47.208 | 1.1567x | 0.999902 | 0.014041 | 0.999833 | 0.018296 | match |
+| 2056 | 287.787 | 190.956 | 1.5071x | 289.010 | 191.349 | 1.5125x | 290.533 | 191.847 | 1.5320x | 0.999968 | 0.008315 | 0.999893 | 0.014639 | agree |
+| 8202 | 2765.867 | 1100.465 | 2.5134x | 2767.519 | 1101.683 | 2.5125x | 2778.943 | 1107.798 | 2.5213x | 0.999954 | 0.010300 | 0.999885 | 0.015426 | match |
+
+### Model Quality & Numerical Gate Evaluation
+
+- Non-finite outputs: 0 across all layers, hidden activations, and logits. (Gate: 0 non-finite: PASS)
+- Min hidden cosine across all layers: 0.999833 (Gate $\ge 0.99$: PASS)
+- Max hidden NRMSE across all layers: 0.018296 (Gate $\le 0.10$: PASS)
+- Logit cosine: $> 0.9999$ across all prompt lengths (Gate $\ge 0.99$: PASS)
+- Logit NRMSE: $< 0.015$ across all prompt lengths (Gate $\le 0.10$: PASS)
+
+### E2E Performance Gate Evaluation
+
+- Prompt 516: 1.1453x speedup (Gate: $\le 5\%$ regression: PASS)
+- Prompt 2056: 1.5071x speedup (Gate: $\ge 1.15\times$: PASS)
+- Prompt 8202: 2.5134x speedup (Gate: $\ge 1.25\times$: PASS; latency reduced from 2.77 s to 1.10 s, saving 1.66 s per 8K prefill)
+- p95 speedups: 1.1567x (516), 1.5320x (2056), 2.5213x (8202) (Gate: no p95 regression: PASS)
+
+## Final Decision
+
+**ACCEPT FOR PRODUCTION PROMOTION.**
+
+Tiled WMMA Tensor Core FlashAttention completely eliminates inner-loop warp-shuffle serialization in contiguous prefill attention, unlocking hardware tensor-core throughput on Blackwell SM120. It achieves a 2.51x prompt TTFT speedup at 8K tokens while preserving strict numerical parity.
+
+Production policy:
+- Contiguous prefill attention uses FlashAttention by default (`ops::prefill_dispatch::should_use_flash_prefill`).
+- Opt-out fallback retained via `LFM25_FLASH_PREFILL=0`.
+
+## Stop Condition
+
+Direction complete. Target achieved. Contiguous prefill attention optimization is promoted.
+

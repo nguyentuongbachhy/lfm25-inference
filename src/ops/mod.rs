@@ -19,6 +19,7 @@ mod mok_dispatch_bench_tests;
 mod mok_fast_exp_bench_tests;
 #[cfg(test)]
 mod mok_fused_bench_tests;
+pub(crate) mod prefill_dispatch;
 mod qk_postprocess;
 mod rms_norm;
 mod rope;

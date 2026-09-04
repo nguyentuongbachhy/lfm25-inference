@@ -1,37 +1,21 @@
 use anyhow::{Context as _, Result, ensure};
-use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use half::bf16;
 
 use super::{
     CudaRuntime,
     benchmark::{BenchConfig, benchmark_gpu_paired},
-    module::{load_function, load_module},
 };
-use crate::tensor::Shape;
+use crate::{
+    ops::{self, prefill_dispatch::ScopedFlashPrefillOverride},
+    tensor::Shape,
+};
 
-const MODULE_NAME: &str = "attention_prefill_flash";
-const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/attention_prefill_flash.ptx"));
-const THREADS: u32 = 128;
 const Q_HEADS: usize = 32;
 const KV_HEADS: usize = 8;
 const HEAD_DIM: usize = 64;
-const QUERY_TILE: usize = 16;
 const TOKEN_COUNTS: &[usize] = &[512, 2048, 8192];
 const ATOL: f64 = 0.035;
 const RTOL: f64 = 0.025;
-
-struct FlashPrefillKernel {
-    function: CudaFunction,
-}
-
-impl FlashPrefillKernel {
-    fn load(runtime: &CudaRuntime) -> Result<Self> {
-        let module = load_module(runtime.context(), MODULE_NAME, PTX)?;
-        Ok(Self {
-            function: load_function(&module, MODULE_NAME, "prefill_gqa_lfm2_bf16_flash")?,
-        })
-    }
-}
 
 #[derive(Debug)]
 struct NumericalMetrics {
@@ -108,43 +92,11 @@ fn numerical_metrics(reference: &[bf16], candidate: &[bf16]) -> NumericalMetrics
     }
 }
 
-unsafe fn launch_flash(
-    runtime: &CudaRuntime,
-    kernel: &FlashPrefillKernel,
-    query: &cudarc::driver::CudaSlice<bf16>,
-    key: &cudarc::driver::CudaSlice<bf16>,
-    value: &cudarc::driver::CudaSlice<bf16>,
-    output: &mut cudarc::driver::CudaSlice<bf16>,
-    num_tokens: usize,
-) -> Result<()> {
-    let query_tiles = num_tokens.div_ceil(QUERY_TILE);
-    let blocks = query_tiles
-        .checked_mul(KV_HEADS)
-        .context("flash prefill grid size overflow")?;
-    let grid_x = u32::try_from(blocks).context("flash prefill grid exceeds u32")?;
-    let config = LaunchConfig {
-        grid_dim: (grid_x, 1, 1),
-        block_dim: (THREADS, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let mut args = runtime.stream().launch_builder(&kernel.function);
-    args.arg(query)
-        .arg(key)
-        .arg(value)
-        .arg(output)
-        .arg(&num_tokens);
-    unsafe {
-        args.launch(config)?;
-    }
-    Ok(())
-}
-
 #[test]
 fn test_prefill_flash_correctness() -> Result<()> {
     let runtime = CudaRuntime::new(0)?;
-    let flash = FlashPrefillKernel::load(&runtime)?;
 
-    for &num_tokens in &[64, 128, 512] {
+    for &num_tokens in &[1, 7, 16, 64, 128, 512] {
         let q_elements = num_tokens * Q_HEADS * HEAD_DIM;
         let kv_elements = num_tokens * KV_HEADS * HEAD_DIM;
 
@@ -172,15 +124,17 @@ fn test_prefill_flash_correctness() -> Result<()> {
                 reference.storage_mut(),
                 num_tokens,
             )?;
-            launch_flash(
-                &runtime,
-                &flash,
-                query.storage(),
-                key.storage(),
-                value.storage(),
-                candidate.storage_mut(),
-                num_tokens,
-            )?;
+            runtime
+                .kernels()
+                .attention()
+                .launch_prefill_flash_lfm2_bf16(
+                    runtime.stream(),
+                    query.storage(),
+                    key.storage(),
+                    value.storage(),
+                    candidate.storage_mut(),
+                    num_tokens,
+                )?;
         }
         runtime.synchronize()?;
         let reference_host = runtime.download(&reference)?;
@@ -199,10 +153,51 @@ fn test_prefill_flash_correctness() -> Result<()> {
 }
 
 #[test]
+fn test_prefill_attention_op_dispatch_matches_reference() -> Result<()> {
+    let runtime = CudaRuntime::new(0)?;
+    let num_tokens = 128;
+    let q_elements = num_tokens * Q_HEADS * HEAD_DIM;
+    let kv_elements = num_tokens * KV_HEADS * HEAD_DIM;
+
+    let query = runtime.upload(
+        &deterministic_bf16(q_elements, 17),
+        Shape::new([num_tokens, Q_HEADS, HEAD_DIM]),
+    )?;
+    let key = runtime.upload(
+        &deterministic_bf16(kv_elements, 29),
+        Shape::new([num_tokens, KV_HEADS, HEAD_DIM]),
+    )?;
+    let value = runtime.upload(
+        &deterministic_bf16(kv_elements, 43),
+        Shape::new([num_tokens, KV_HEADS, HEAD_DIM]),
+    )?;
+
+    // Reference (flash prefill disabled)
+    let ref_out = {
+        let _guard = ScopedFlashPrefillOverride::new(false);
+        ops::prefill_attention_lfm2_bf16(&runtime, &query, &key, &value)?
+    };
+
+    // Candidate (flash prefill enabled)
+    let cand_out = {
+        let _guard = ScopedFlashPrefillOverride::new(true);
+        ops::prefill_attention_lfm2_bf16(&runtime, &query, &key, &value)?
+    };
+
+    let ref_host = runtime.download(&ref_out)?;
+    let cand_host = runtime.download(&cand_out)?;
+    let metrics = numerical_metrics(&ref_host, &cand_host);
+    ensure!(
+        metrics.within_tolerance && metrics.non_finite == 0,
+        "prefill op dispatch mismatch: {metrics:?}"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "GPU benchmark: Tensor Core FlashAttention contiguous prefill"]
 fn bench_prefill_attention_flash_bf16() -> Result<()> {
     let runtime = CudaRuntime::new(0)?;
-    let flash = FlashPrefillKernel::load(&runtime)?;
 
     for &num_tokens in TOKEN_COUNTS {
         let q_elements = num_tokens
@@ -236,15 +231,17 @@ fn bench_prefill_attention_flash_bf16() -> Result<()> {
                 reference.storage_mut(),
                 num_tokens,
             )?;
-            launch_flash(
-                &runtime,
-                &flash,
-                query.storage(),
-                key.storage(),
-                value.storage(),
-                candidate.storage_mut(),
-                num_tokens,
-            )?;
+            runtime
+                .kernels()
+                .attention()
+                .launch_prefill_flash_lfm2_bf16(
+                    runtime.stream(),
+                    query.storage(),
+                    key.storage(),
+                    value.storage(),
+                    candidate.storage_mut(),
+                    num_tokens,
+                )?;
         }
         runtime.synchronize()?;
         let reference_host = runtime.download(&reference)?;
@@ -278,15 +275,17 @@ fn bench_prefill_attention_flash_bf16() -> Result<()> {
                 )
             },
             || unsafe {
-                launch_flash(
-                    &runtime,
-                    &flash,
-                    query.storage(),
-                    key.storage(),
-                    value.storage(),
-                    candidate.storage_mut(),
-                    num_tokens,
-                )
+                runtime
+                    .kernels()
+                    .attention()
+                    .launch_prefill_flash_lfm2_bf16(
+                        runtime.stream(),
+                        query.storage(),
+                        key.storage(),
+                        value.storage(),
+                        candidate.storage_mut(),
+                        num_tokens,
+                    )
             },
         )?;
 
@@ -314,4 +313,3 @@ fn bench_prefill_attention_flash_bf16() -> Result<()> {
 
     Ok(())
 }
-

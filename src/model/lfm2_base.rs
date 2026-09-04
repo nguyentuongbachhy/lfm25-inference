@@ -492,6 +492,17 @@ impl ModelCache {
             capacity,
         })
     }
+
+    #[allow(dead_code)]
+    pub fn reset(&mut self, runtime: &CudaRuntime) -> Result<()> {
+        self.sequence_length = 0;
+        for layer in &mut self.layers {
+            if let LayerCache::Conv(state) = layer {
+                runtime.zero_bf16_range(state, 0, state.numel())?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct Lfm2Model {
