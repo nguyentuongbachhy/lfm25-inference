@@ -62,6 +62,7 @@ struct Args {
     profile_output: Option<PathBuf>,
     hardware_profile: Option<PathBuf>,
     speculative_draft: usize,
+    fused_rms_fp8: bool,
 }
 
 impl Args {
@@ -102,6 +103,9 @@ impl Args {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3usize);
+        let mut fused_rms_fp8 = env::var("LFM25_FUSED_RMS_FP8")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true);
         let mut args = env::args().skip(1);
 
         while let Some(argument) = args.next() {
@@ -267,6 +271,12 @@ impl Args {
                         .parse()
                         .context("invalid --speculative-draft")?;
                 }
+                "--fused-rms-fp8" => {
+                    fused_rms_fp8 = true;
+                }
+                "--no-fused-rms-fp8" => {
+                    fused_rms_fp8 = false;
+                }
                 "-h" | "--help" => {
                     println!("{}", usage());
                     std::process::exit(0);
@@ -351,6 +361,7 @@ impl Args {
             profile_output,
             hardware_profile,
             speculative_draft,
+            fused_rms_fp8,
         })
     }
 }
@@ -372,7 +383,7 @@ fn write_json(path: &std::path::Path, value: &impl serde::Serialize, label: &str
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
+    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --fused-rms-fp8\n  --no-fused-rms-fp8\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
 }
 
 fn main() -> Result<()> {
@@ -386,6 +397,7 @@ fn main() -> Result<()> {
             decode_profile: args.decode_profile,
             decode_profile_warmup_steps: args.decode_profile_warmup_steps,
             decode_profile_steps: args.decode_profile_steps,
+            fused_rms_fp8: args.fused_rms_fp8,
         },
     )?;
     if let Some(policy) = &args.fp8_policy {

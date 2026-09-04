@@ -76,6 +76,46 @@ pub(crate) fn linear_fp8_e4m3(
     Ok(output)
 }
 
+pub(crate) fn linear_fp8_e4m3_from_fp8(
+    runtime: &CudaRuntime,
+    quantized_input: &Tensor<u8>,
+    weight: &Tensor<u8>,
+    activation_scale: ScalarScale,
+    weight_scale: ScalarScale,
+) -> Result<Tensor<bf16>> {
+    ensure!(quantized_input.rank() >= 1, "FP8 linear input must have rank >= 1");
+    ensure!(weight.rank() == 2, "FP8 linear weight must have rank 2");
+    ensure!(
+        quantized_input.numel() > 0 && weight.numel() > 0,
+        "FP8 linear does not support empty tensors"
+    );
+    let k = quantized_input.dims()[quantized_input.rank() - 1];
+    let n = weight.dims()[0];
+    ensure!(weight.dims()[1] == k, "FP8 linear K mismatch");
+    let m = quantized_input.numel() / k;
+    let mut output_dims = quantized_input.dims().to_vec();
+    let last = output_dims.len() - 1;
+    output_dims[last] = n;
+
+    let mut output = runtime.alloc_bf16(Shape::new(output_dims))?;
+    unsafe {
+        runtime.blaslt().linear_fp8_scaled(
+            quantized_input.storage(),
+            weight.storage(),
+            output.storage_mut(),
+            Fp8LinearConfig {
+                m,
+                n,
+                k,
+                scale_mode: Fp8ScaleMode::Tensorwide,
+                output_scale: activation_scale.dequantize_multiplier
+                    * weight_scale.dequantize_multiplier,
+            },
+        )?;
+    }
+    Ok(output)
+}
+
 pub fn linear_bf16(
     runtime: &CudaRuntime,
     x: &Tensor<bf16>,

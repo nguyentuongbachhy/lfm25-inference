@@ -47,6 +47,7 @@ pub struct EngineConfig {
     pub decode_profile: DecodeProfileMode,
     pub decode_profile_warmup_steps: usize,
     pub decode_profile_steps: usize,
+    pub fused_rms_fp8: bool,
 }
 
 impl Default for EngineConfig {
@@ -56,6 +57,7 @@ impl Default for EngineConfig {
             decode_profile: DecodeProfileMode::Off,
             decode_profile_warmup_steps: 4,
             decode_profile_steps: 128,
+            fused_rms_fp8: true,
         }
     }
 }
@@ -764,7 +766,8 @@ impl Engine {
     pub fn load(model_dir: &Path, device: usize, config: EngineConfig) -> Result<Self> {
         let runtime = CudaRuntime::new(device)?;
         let tokenizer = Lfm2Tokenizer::from_model_dir(model_dir)?;
-        let model = Lfm2Model::load(&runtime, model_dir)?;
+        let mut model = Lfm2Model::load(&runtime, model_dir)?;
+        model.set_fused_rms_fp8_enabled(config.fused_rms_fp8);
         Ok(Self {
             runtime,
             model,
@@ -774,10 +777,17 @@ impl Engine {
         })
     }
 
+    #[allow(dead_code)]
+    pub fn set_fused_rms_fp8_enabled(&mut self, enabled: bool) {
+        self.config.fused_rms_fp8 = enabled;
+        self.model.set_fused_rms_fp8_enabled(enabled);
+    }
+
     pub fn install_fp8_policy(&mut self, policy_path: &Path) -> Result<usize> {
         let policy = load_fp8_policy(policy_path)?;
         let enabled = self.model.install_fp8_policy(&self.runtime, &policy)?;
         ensure!(enabled > 0, "FP8 policy enables no runtime sites");
+        self.model.prepare_batched_fp8(&self.runtime, 8)?;
         Ok(enabled)
     }
 

@@ -553,6 +553,7 @@ pub struct Lfm2Model {
     weights: Lfm2Weights,
     inv_freq: Tensor<f32>,
     decode_fp8_enabled: bool,
+    fused_rms_fp8_enabled: bool,
     maximum_fp8_batch: usize,
 }
 
@@ -594,6 +595,39 @@ fn linear_dispatch(
             fp8.weight_scale,
         ),
         _ => ops::linear_bf16(runtime, input, &weight.bf16),
+    }
+}
+
+fn linear_dispatch_input(
+    runtime: &CudaRuntime,
+    input_bf16: Option<&Tensor<bf16>>,
+    input_fp8: Option<&Tensor<u8>>,
+    weight: &LinearWeight,
+    use_fp8: bool,
+) -> Result<Tensor<bf16>> {
+    match (use_fp8, weight.fp8.as_ref(), input_fp8) {
+        (true, Some(fp8), Some(quantized)) => ops::linear_fp8_e4m3_from_fp8(
+            runtime,
+            quantized,
+            &fp8.data,
+            fp8.activation_scale,
+            fp8.weight_scale,
+        ),
+        (true, Some(fp8), None) => {
+            let input = input_bf16
+                .context("linear_dispatch requires BF16 input when FP8 input is absent")?;
+            ops::linear_fp8_e4m3(
+                runtime,
+                input,
+                &fp8.data,
+                fp8.activation_scale,
+                fp8.weight_scale,
+            )
+        }
+        _ => {
+            let input = input_bf16.context("linear_dispatch requires BF16 input for non-FP8 GEMM")?;
+            ops::linear_bf16(runtime, input, &weight.bf16)
+        }
     }
 }
 
@@ -681,6 +715,9 @@ impl Lfm2Model {
             weights,
             inv_freq,
             decode_fp8_enabled: false,
+            fused_rms_fp8_enabled: std::env::var("LFM25_FUSED_RMS_FP8")
+                .map(|v| v != "0" && v != "false")
+                .unwrap_or(false),
             maximum_fp8_batch: 1,
         })
     }
@@ -691,6 +728,15 @@ impl Lfm2Model {
 
     pub(crate) fn decode_fp8_enabled(&self) -> bool {
         self.decode_fp8_enabled
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn fused_rms_fp8_enabled(&self) -> bool {
+        self.fused_rms_fp8_enabled
+    }
+
+    pub(crate) fn set_fused_rms_fp8_enabled(&mut self, enabled: bool) {
+        self.fused_rms_fp8_enabled = enabled;
     }
 
     pub(crate) fn maximum_fp8_batch(&self) -> usize {
@@ -1023,7 +1069,8 @@ impl Lfm2Model {
             let ffn_output = self.feed_forward(
                 runtime,
                 weights,
-                &ffn_input,
+                Some(&ffn_input),
+                None,
                 LayerExecution {
                     profile: None,
                     calibration: None,
@@ -1140,6 +1187,7 @@ impl Lfm2Model {
         )?;
 
         let mut conv_histories = Vec::new();
+        let mut final_normalized_fp8 = None;
 
         for layer in 0..self.config.num_hidden_layers {
             let weights = &self.weights.layers[layer];
@@ -1204,17 +1252,41 @@ impl Lfm2Model {
                 _ => anyhow::bail!("model/cache layer type mismatch at layer {layer}"),
             };
 
-            let (post_operator, ffn_input) = ops::residual_rms_norm_bf16(
-                runtime,
-                &hidden,
-                &operator_output,
-                &weights.ffn_norm,
-                self.config.norm_eps,
-            )?;
+            let use_fused_rms_fp8_ffn = self.fused_rms_fp8_enabled
+                && use_fp8_decode
+                && weights.feed_forward.gate_up.fp8.is_some();
+
+            let (post_operator, ffn_input_bf16, ffn_input_fp8) = if use_fused_rms_fp8_ffn {
+                let gate_up_fp8 = weights.feed_forward.gate_up.fp8.as_ref().unwrap();
+                let mut post_operator = runtime.alloc_bf16(hidden.shape().clone())?;
+                let mut ffn_input_fp8 = runtime.alloc_fp8(hidden.shape().clone())?;
+                ops::residual_rms_norm_bf16_to_e4m3_into(
+                    runtime,
+                    &hidden,
+                    &operator_output,
+                    &weights.ffn_norm,
+                    self.config.norm_eps,
+                    gate_up_fp8.activation_scale.quantize_multiplier,
+                    &mut post_operator,
+                    &mut ffn_input_fp8,
+                )?;
+                (post_operator, None, Some(ffn_input_fp8))
+            } else {
+                let (post_operator, ffn_input) = ops::residual_rms_norm_bf16(
+                    runtime,
+                    &hidden,
+                    &operator_output,
+                    &weights.ffn_norm,
+                    self.config.norm_eps,
+                )?;
+                (post_operator, Some(ffn_input), None)
+            };
+
             let ffn_output = self.feed_forward(
                 runtime,
                 weights,
-                &ffn_input,
+                ffn_input_bf16.as_ref(),
+                ffn_input_fp8.as_ref(),
                 LayerExecution {
                     profile: None,
                     calibration: None,
@@ -1222,22 +1294,59 @@ impl Lfm2Model {
                     use_fp8: use_fp8_decode,
                 },
             )?;
-            let next_norm = if layer + 1 < self.config.num_hidden_layers {
+
+            let is_last_layer = layer + 1 == self.config.num_hidden_layers;
+            let next_norm = if !is_last_layer {
                 &self.weights.layers[layer + 1].operator_norm
             } else {
                 &self.weights.final_norm
             };
-            (hidden, normalized) = ops::residual_rms_norm_bf16(
-                runtime,
-                &post_operator,
-                &ffn_output,
-                next_norm,
-                self.config.norm_eps,
-            )?;
+
+            let use_fused_rms_fp8_final = is_last_layer
+                && self.fused_rms_fp8_enabled
+                && use_fp8_decode
+                && self.weights.lm_head_fp8.is_some();
+
+            if use_fused_rms_fp8_final {
+                let lm_fp8 = self.weights.lm_head_fp8.as_ref().unwrap();
+                let mut next_hidden = runtime.alloc_bf16(post_operator.shape().clone())?;
+                let mut final_fp8 = runtime.alloc_fp8(post_operator.shape().clone())?;
+                ops::residual_rms_norm_bf16_to_e4m3_into(
+                    runtime,
+                    &post_operator,
+                    &ffn_output,
+                    next_norm,
+                    self.config.norm_eps,
+                    lm_fp8.activation_scale.quantize_multiplier,
+                    &mut next_hidden,
+                    &mut final_fp8,
+                )?;
+                hidden = next_hidden;
+                final_normalized_fp8 = Some(final_fp8);
+            } else {
+                (hidden, normalized) = ops::residual_rms_norm_bf16(
+                    runtime,
+                    &post_operator,
+                    &ffn_output,
+                    next_norm,
+                    self.config.norm_eps,
+                )?;
+            }
         }
 
-        let logits = match (use_fp8_decode, self.weights.lm_head_fp8.as_ref()) {
-            (true, Some(fp8)) => ops::linear_fp8_e4m3(
+        let logits = match (
+            use_fp8_decode,
+            self.weights.lm_head_fp8.as_ref(),
+            final_normalized_fp8.as_ref(),
+        ) {
+            (true, Some(fp8), Some(final_fp8)) => ops::linear_fp8_e4m3_from_fp8(
+                runtime,
+                final_fp8,
+                &fp8.data,
+                fp8.activation_scale,
+                fp8.weight_scale,
+            ),
+            (true, Some(fp8), None) => ops::linear_fp8_e4m3(
                 runtime,
                 &normalized,
                 &fp8.data,
@@ -1520,6 +1629,8 @@ impl Lfm2Model {
             },
         )?;
 
+        let mut final_normalized_fp8 = None;
+
         for layer in 0..self.config.num_hidden_layers {
             let weights = &self.weights.layers[layer];
 
@@ -1559,7 +1670,7 @@ impl Lfm2Model {
                                 self.attention(
                                     runtime,
                                     operator,
-                                    normalized,
+                                    &normalized,
                                     step,
                                     LayerExecution {
                                         profile: None,
@@ -1574,7 +1685,7 @@ impl Lfm2Model {
                         self.attention(
                             runtime,
                             operator,
-                            normalized,
+                            &normalized,
                             step,
                             LayerExecution {
                                 profile: profile.as_deref_mut(),
@@ -1619,20 +1730,52 @@ impl Lfm2Model {
                 _ => anyhow::bail!("model/cache layer type mismatch at layer {layer}"),
             };
 
-            let (post_operator, ffn_input) = profiled(
-                runtime,
-                profile.as_deref_mut(),
-                ProfileRegion::ResidualNorm,
-                || {
-                    ops::residual_rms_norm_bf16(
-                        runtime,
-                        &hidden,
-                        &operator_output,
-                        &weights.ffn_norm,
-                        self.config.norm_eps,
-                    )
-                },
-            )?;
+            let use_fused_rms_fp8_ffn = self.fused_rms_fp8_enabled
+                && use_fp8_decode
+                && weights.feed_forward.gate_up.fp8.is_some()
+                && calibration.is_none()
+                && capture.is_none();
+
+            let (post_operator, ffn_input_bf16, ffn_input_fp8) = if use_fused_rms_fp8_ffn {
+                let gate_up_fp8 = weights.feed_forward.gate_up.fp8.as_ref().unwrap();
+                let mut post_operator = runtime.alloc_bf16(hidden.shape().clone())?;
+                let mut ffn_input_fp8 = runtime.alloc_fp8(hidden.shape().clone())?;
+                profiled(
+                    runtime,
+                    profile.as_deref_mut(),
+                    ProfileRegion::ResidualNorm,
+                    || {
+                        ops::residual_rms_norm_bf16_to_e4m3_into(
+                            runtime,
+                            &hidden,
+                            &operator_output,
+                            &weights.ffn_norm,
+                            self.config.norm_eps,
+                            gate_up_fp8.activation_scale.quantize_multiplier,
+                            &mut post_operator,
+                            &mut ffn_input_fp8,
+                        )
+                    },
+                )?;
+                (post_operator, None, Some(ffn_input_fp8))
+            } else {
+                let (post_operator, ffn_input) = profiled(
+                    runtime,
+                    profile.as_deref_mut(),
+                    ProfileRegion::ResidualNorm,
+                    || {
+                        ops::residual_rms_norm_bf16(
+                            runtime,
+                            &hidden,
+                            &operator_output,
+                            &weights.ffn_norm,
+                            self.config.norm_eps,
+                        )
+                    },
+                )?;
+                (post_operator, Some(ffn_input), None)
+            };
+
             if let Some(capture) = capture.as_deref_mut() {
                 capture.observe_last_row(
                     runtime,
@@ -1645,7 +1788,8 @@ impl Lfm2Model {
                     self.feed_forward(
                         runtime,
                         weights,
-                        &ffn_input,
+                        ffn_input_bf16.as_ref(),
+                        ffn_input_fp8.as_ref(),
                         LayerExecution {
                             profile: None,
                             calibration: calibration.as_deref_mut(),
@@ -1658,7 +1802,8 @@ impl Lfm2Model {
                 self.feed_forward(
                     runtime,
                     weights,
-                    &ffn_input,
+                    ffn_input_bf16.as_ref(),
+                    ffn_input_fp8.as_ref(),
                     LayerExecution {
                         profile: profile.as_deref_mut(),
                         calibration: calibration.as_deref_mut(),
@@ -1667,25 +1812,59 @@ impl Lfm2Model {
                     },
                 )?
             };
-            let next_norm = if layer + 1 < self.config.num_hidden_layers {
+            let is_last_layer = layer + 1 == self.config.num_hidden_layers;
+            let next_norm = if !is_last_layer {
                 &self.weights.layers[layer + 1].operator_norm
             } else {
                 &self.weights.final_norm
             };
-            (hidden, normalized) = profiled(
-                runtime,
-                profile.as_deref_mut(),
-                ProfileRegion::ResidualNorm,
-                || {
-                    ops::residual_rms_norm_bf16(
-                        runtime,
-                        &post_operator,
-                        &ffn_output,
-                        next_norm,
-                        self.config.norm_eps,
-                    )
-                },
-            )?;
+
+            let use_fused_rms_fp8_final = is_last_layer
+                && self.fused_rms_fp8_enabled
+                && use_fp8_decode
+                && self.weights.lm_head_fp8.is_some()
+                && capture.is_none()
+                && calibration.is_none();
+
+            if use_fused_rms_fp8_final {
+                let lm_fp8 = self.weights.lm_head_fp8.as_ref().unwrap();
+                let mut next_hidden = runtime.alloc_bf16(post_operator.shape().clone())?;
+                let mut final_fp8 = runtime.alloc_fp8(post_operator.shape().clone())?;
+                profiled(
+                    runtime,
+                    profile.as_deref_mut(),
+                    ProfileRegion::ResidualNorm,
+                    || {
+                        ops::residual_rms_norm_bf16_to_e4m3_into(
+                            runtime,
+                            &post_operator,
+                            &ffn_output,
+                            next_norm,
+                            self.config.norm_eps,
+                            lm_fp8.activation_scale.quantize_multiplier,
+                            &mut next_hidden,
+                            &mut final_fp8,
+                        )
+                    },
+                )?;
+                hidden = next_hidden;
+                final_normalized_fp8 = Some(final_fp8);
+            } else {
+                (hidden, normalized) = profiled(
+                    runtime,
+                    profile.as_deref_mut(),
+                    ProfileRegion::ResidualNorm,
+                    || {
+                        ops::residual_rms_norm_bf16(
+                            runtime,
+                            &post_operator,
+                            &ffn_output,
+                            next_norm,
+                            self.config.norm_eps,
+                        )
+                    },
+                )?;
+            }
             if let Some(capture) = capture.as_deref_mut() {
                 capture.observe_last_row(
                     runtime,
@@ -1706,8 +1885,19 @@ impl Lfm2Model {
             runtime,
             profile,
             ProfileRegion::LmHead,
-            || match (use_fp8_decode, self.weights.lm_head_fp8.as_ref()) {
-                (true, Some(fp8)) => ops::linear_last_row_fp8_e4m3(
+            || match (
+                use_fp8_decode,
+                self.weights.lm_head_fp8.as_ref(),
+                final_normalized_fp8.as_ref(),
+            ) {
+                (true, Some(fp8), Some(final_fp8)) => ops::linear_fp8_e4m3_from_fp8(
+                    runtime,
+                    final_fp8,
+                    &fp8.data,
+                    fp8.activation_scale,
+                    fp8.weight_scale,
+                ),
+                (true, Some(fp8), None) => ops::linear_last_row_fp8_e4m3(
                     runtime,
                     &normalized,
                     &fp8.data,
@@ -1788,7 +1978,8 @@ impl Lfm2Model {
         &self,
         runtime: &CudaRuntime,
         weights: &LayerWeights,
-        input: &Tensor<bf16>,
+        input_bf16: Option<&Tensor<bf16>>,
+        input_fp8: Option<&Tensor<u8>>,
         execution: LayerExecution<'_>,
     ) -> Result<Tensor<bf16>> {
         let LayerExecution {
@@ -1798,18 +1989,28 @@ impl Lfm2Model {
             use_fp8,
         } = execution;
         if let Some(calibration) = calibration.as_deref_mut() {
-            calibration.observe(
-                runtime,
-                format!("layers.{layer}.mlp.gate_up.input"),
-                CalibrationTensorKind::Activation,
-                input,
-            )?;
+            if let Some(input) = input_bf16 {
+                calibration.observe(
+                    runtime,
+                    format!("layers.{layer}.mlp.gate_up.input"),
+                    CalibrationTensorKind::Activation,
+                    input,
+                )?;
+            }
         }
         let gate_up = profiled(
             runtime,
             profile.as_deref_mut(),
             ProfileRegion::MlpGateUpGemm,
-            || linear_dispatch(runtime, input, &weights.feed_forward.gate_up, use_fp8),
+            || {
+                linear_dispatch_input(
+                    runtime,
+                    input_bf16,
+                    input_fp8,
+                    &weights.feed_forward.gate_up,
+                    use_fp8,
+                )
+            },
         )?;
         let activated = profiled(
             runtime,
@@ -1837,7 +2038,7 @@ impl Lfm2Model {
         &self,
         runtime: &CudaRuntime,
         weights: &AttentionWeights,
-        normalized: Tensor<bf16>,
+        normalized: &Tensor<bf16>,
         step: AttentionStep<'_>,
         execution: LayerExecution<'_>,
     ) -> Result<Tensor<bf16>> {
@@ -1861,11 +2062,11 @@ impl Lfm2Model {
             ProfileRegion::AttnQkvProj,
             || {
                 Ok((
-                    linear_dispatch(runtime, &normalized, &weights.query, use_fp8)?
+                    linear_dispatch(runtime, normalized, &weights.query, use_fp8)?
                         .reshape(Shape::new([num_tokens, 32, 64]))?,
-                    linear_dispatch(runtime, &normalized, &weights.key, use_fp8)?
+                    linear_dispatch(runtime, normalized, &weights.key, use_fp8)?
                         .reshape(Shape::new([num_tokens, 8, 64]))?,
-                    linear_dispatch(runtime, &normalized, &weights.value, use_fp8)?
+                    linear_dispatch(runtime, normalized, &weights.value, use_fp8)?
                         .reshape(Shape::new([num_tokens, 8, 64]))?,
                 ))
             },

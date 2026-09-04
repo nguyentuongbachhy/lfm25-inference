@@ -48,14 +48,17 @@ pub(crate) use embedding::embedding_bf16_into;
 pub use gather::gather_rows_bf16;
 pub use linear::{linear_bf16, linear_last_row_bf16};
 pub(crate) use linear::{
-    linear_bf16_into, linear_fp8_e4m3, linear_last_row_fp8_e4m3, quantize_weight_e4m3,
+    linear_bf16_into, linear_fp8_e4m3, linear_fp8_e4m3_from_fp8, linear_last_row_fp8_e4m3,
+    quantize_weight_e4m3,
 };
 pub(crate) use mok_dispatch::should_use_mok_one_kernel;
 pub(crate) use qk_postprocess::{
     QkPostprocessInput, qk_norm_rope_kv_write_arena_decode_bf16, qk_norm_rope_kv_write_decode_bf16,
 };
 pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
-pub(crate) use rms_norm::{residual_rms_norm_bf16_into, rms_norm_bf16_into};
+pub(crate) use rms_norm::{
+    residual_rms_norm_bf16_into, residual_rms_norm_bf16_to_e4m3_into, rms_norm_bf16_into,
+};
 pub use rope::rope_qk_bf16_inplace;
 pub(crate) use sampling_dispatch::argmax_rows_bf16_into;
 #[cfg(test)]
