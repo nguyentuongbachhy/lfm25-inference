@@ -192,3 +192,4 @@ git merge --ff-only agent/atomic-argmax-routing
 
 > [!NOTE]
 > All commits remain strictly local in full compliance with the zero-remote-push policy.
+

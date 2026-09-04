@@ -313,3 +313,9 @@ fn bench_prefill_attention_flash_bf16() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+#[ignore = "GPU benchmark: Tensor Core FlashAttention contiguous prefill (alias)"]
+fn bench_prefill_flash_bf16() -> Result<()> {
+    bench_prefill_attention_flash_bf16()
+}
