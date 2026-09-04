@@ -200,6 +200,7 @@ pub struct BatchModelCache {
     segment_slots_host: Vec<u32>,
     output_rows_host: Vec<u32>,
     page_size: KvPageSize,
+    is_contiguous_prefill: bool,
 }
 
 impl BatchModelCache {
@@ -243,6 +244,7 @@ impl BatchModelCache {
             segment_slots_host: Vec::with_capacity(request_slots),
             output_rows_host: Vec::with_capacity(request_slots),
             page_size,
+            is_contiguous_prefill: false,
         })
     }
 
@@ -394,6 +396,7 @@ impl BatchModelCache {
         positions: &[u32],
         request_slots: &[u32],
     ) -> Result<()> {
+        self.is_contiguous_prefill = false;
         self.prepare_tokens(runtime, token_ids, positions, request_slots)?;
         self.segment_offsets_host.clear();
         self.segment_slots_host.clear();
@@ -417,6 +420,9 @@ impl BatchModelCache {
         runtime: &CudaRuntime,
         input: &RaggedBatchInput<'_>,
     ) -> Result<()> {
+        self.is_contiguous_prefill = input.segment_offsets.len() == 2
+            && input.positions.first().copied() == Some(0)
+            && input.token_ids.len() > 1;
         ensure!(
             input.segment_offsets.last().copied() == Some(u32::try_from(input.token_ids.len())?),
             "last segment offset must equal flattened token count"
@@ -954,7 +960,15 @@ impl Lfm2Model {
             let weights = &self.weights.layers[layer];
             let operator_output = match (&weights.operator, &mut cache.layers[layer]) {
                 (OperatorWeights::Attention(operator), BatchLayerCache::Attention(arena)) => {
-                    self.attention_batch(runtime, operator, normalized, arena, metadata, use_fp8)?
+                    self.attention_batch(
+                        runtime,
+                        operator,
+                        normalized,
+                        arena,
+                        metadata,
+                        cache.is_contiguous_prefill,
+                        use_fp8,
+                    )?
                 }
                 (OperatorWeights::Conv(operator), BatchLayerCache::Conv(states)) => self
                     .short_conv_batch(runtime, operator, &normalized, states, metadata, use_fp8)?,
@@ -1736,6 +1750,7 @@ impl Lfm2Model {
         normalized: Tensor<bf16>,
         arena: &mut PagedKvArena,
         metadata: &GpuBatch,
+        is_contiguous_prefill: bool,
         use_fp8: bool,
     ) -> Result<Tensor<bf16>> {
         let num_tokens = normalized.dims()[0];
@@ -1823,20 +1838,24 @@ impl Lfm2Model {
                 metadata.positions(),
             )?;
             arena.write_lfm2(runtime, &key, &value, metadata.physical_slots())?;
-            ops::hybrid_ragged_attention_lfm2_bf16(
-                runtime,
-                ops::HybridRaggedAttentionInput {
-                    query: &query,
-                    current_key: &key,
-                    current_value: &value,
-                    arena,
-                    block_tables: metadata.block_tables(),
-                    block_table_stride: metadata.block_table_stride(),
-                    request_slots: metadata.request_slots(),
-                    position_ids: metadata.positions(),
-                    segment_offsets: metadata.segment_offsets(),
-                },
-            )?
+            if is_contiguous_prefill {
+                ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)?
+            } else {
+                ops::hybrid_ragged_attention_lfm2_bf16(
+                    runtime,
+                    ops::HybridRaggedAttentionInput {
+                        query: &query,
+                        current_key: &key,
+                        current_value: &value,
+                        arena,
+                        block_tables: metadata.block_tables(),
+                        block_table_stride: metadata.block_table_stride(),
+                        request_slots: metadata.request_slots(),
+                        position_ids: metadata.positions(),
+                        segment_offsets: metadata.segment_offsets(),
+                    },
+                )?
+            }
         }
         .reshape(Shape::new([num_tokens, self.config.hidden_size]))?;
         linear_dispatch(runtime, &attended, &weights.output, use_fp8)
