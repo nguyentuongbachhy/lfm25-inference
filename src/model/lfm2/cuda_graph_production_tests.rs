@@ -13,13 +13,7 @@ const CACHE_DECODE_HEADROOM: usize = 64;
 // B1/C4096 is reproducibly positive while B1/C5120 is already negative.
 // All points below remain in the same PS16 Split-K=8 topology, so this sweep
 // narrows only the context-dependent graph crossover without reopening Split-K.
-const BENCH_SHAPES: &[(usize, usize)] = &[
-    (1, 4096),
-    (1, 4352),
-    (1, 4608),
-    (1, 4864),
-    (1, 5120),
-];
+const BENCH_SHAPES: &[(usize, usize)] = &[(1, 4096), (1, 4352), (1, 4608), (1, 4864), (1, 5120)];
 
 fn model_dir() -> PathBuf {
     env::var_os("LFM25_MODEL_DIR")
