@@ -14,6 +14,9 @@ mod tests;
 mod prefill_flash_tests;
 
 #[cfg(test)]
+mod ragged_flash_tests;
+
+#[cfg(test)]
 pub(crate) mod benchmark;
 
 #[cfg(test)]

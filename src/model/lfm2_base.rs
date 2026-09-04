@@ -201,6 +201,8 @@ pub struct BatchModelCache {
     output_rows_host: Vec<u32>,
     page_size: KvPageSize,
     is_contiguous_prefill: bool,
+    is_segmented_prefill: bool,
+    max_segment_tokens: usize,
 }
 
 impl BatchModelCache {
@@ -245,6 +247,8 @@ impl BatchModelCache {
             output_rows_host: Vec::with_capacity(request_slots),
             page_size,
             is_contiguous_prefill: false,
+            is_segmented_prefill: false,
+            max_segment_tokens: 0,
         })
     }
 
@@ -397,6 +401,8 @@ impl BatchModelCache {
         request_slots: &[u32],
     ) -> Result<()> {
         self.is_contiguous_prefill = false;
+        self.is_segmented_prefill = false;
+        self.max_segment_tokens = 0;
         self.prepare_tokens(runtime, token_ids, positions, request_slots)?;
         self.segment_offsets_host.clear();
         self.segment_slots_host.clear();
@@ -423,6 +429,23 @@ impl BatchModelCache {
         self.is_contiguous_prefill = input.segment_offsets.len() == 2
             && input.positions.first().copied() == Some(0)
             && input.token_ids.len() > 1;
+        let all_start_at_zero = input.segment_offsets.windows(2).all(|w| {
+            let start = w[0] as usize;
+            start < input.positions.len() && input.positions[start] == 0
+        });
+        self.is_segmented_prefill = input.segment_offsets.len() > 2
+            && all_start_at_zero
+            && input.token_ids.len() > 1;
+        self.max_segment_tokens = if self.is_segmented_prefill {
+            input
+                .segment_offsets
+                .windows(2)
+                .map(|w| (w[1] - w[0]) as usize)
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
         ensure!(
             input.segment_offsets.last().copied() == Some(u32::try_from(input.token_ids.len())?),
             "last segment offset must equal flattened token count"
@@ -967,6 +990,8 @@ impl Lfm2Model {
                         arena,
                         metadata,
                         cache.is_contiguous_prefill,
+                        cache.is_segmented_prefill,
+                        cache.max_segment_tokens,
                         use_fp8,
                     )?
                 }
@@ -1751,6 +1776,8 @@ impl Lfm2Model {
         arena: &mut PagedKvArena,
         metadata: &GpuBatch,
         is_contiguous_prefill: bool,
+        is_segmented_prefill: bool,
+        max_segment_tokens: usize,
         use_fp8: bool,
     ) -> Result<Tensor<bf16>> {
         let num_tokens = normalized.dims()[0];
@@ -1840,6 +1867,16 @@ impl Lfm2Model {
             arena.write_lfm2(runtime, &key, &value, metadata.physical_slots())?;
             if is_contiguous_prefill {
                 ops::prefill_attention_lfm2_bf16(runtime, &query, &key, &value)?
+            } else if is_segmented_prefill && ops::prefill_dispatch::flash_prefill_enabled() {
+                ops::segmented_prefill_attention_lfm2_bf16(
+                    runtime,
+                    &query,
+                    &key,
+                    &value,
+                    metadata.segment_offsets(),
+                    metadata.segment_offsets().numel() - 1,
+                    max_segment_tokens,
+                )?
             } else {
                 ops::hybrid_ragged_attention_lfm2_bf16(
                     runtime,

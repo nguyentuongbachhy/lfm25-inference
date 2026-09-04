@@ -77,6 +77,56 @@ pub fn prefill_attention_lfm2_bf16(
     Ok(output)
 }
 
+pub fn segmented_prefill_attention_lfm2_bf16(
+    runtime: &CudaRuntime,
+    query: &Tensor<bf16>,
+    key: &Tensor<bf16>,
+    value: &Tensor<bf16>,
+    segment_offsets: &Tensor<u32>,
+    num_segments: usize,
+    max_tokens_per_segment: usize,
+) -> Result<Tensor<bf16>> {
+    ensure!(
+        query.rank() == 3 && query.dims()[1..] == [32, 64],
+        "LFM2 query must have shape [N,32,64], got {:?}",
+        query.dims()
+    );
+    let num_tokens = query.dims()[0];
+    ensure!(
+        key.dims() == [num_tokens, 8, 64],
+        "LFM2 key must have shape [{num_tokens},8,64], got {:?}",
+        key.dims()
+    );
+    ensure!(
+        value.shape() == key.shape(),
+        "LFM2 prefill K/V mismatch: K={:?}, V={:?}",
+        key.dims(),
+        value.dims()
+    );
+    ensure!(
+        segment_offsets.numel() >= num_segments + 1,
+        "segment offsets tensor too small"
+    );
+    let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
+    unsafe {
+        runtime
+            .kernels()
+            .attention()
+            .launch_segmented_prefill_flash_lfm2_bf16(
+                runtime.stream(),
+                query.storage(),
+                key.storage(),
+                value.storage(),
+                segment_offsets.storage(),
+                output.storage_mut(),
+                num_segments,
+                max_tokens_per_segment,
+                num_tokens,
+            )?;
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 pub(crate) fn paged_ragged_attention_lfm2_bf16(
     runtime: &CudaRuntime,

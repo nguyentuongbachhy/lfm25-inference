@@ -59,6 +59,8 @@ pub(crate) struct HybridAttentionLaunch<'a> {
 pub(crate) struct AttentionKernels {
     prefill: KernelLaunch,
     prefill_flash: KernelLaunch,
+    #[allow(dead_code)]
+    segmented_prefill_flash: KernelLaunch,
     #[cfg(test)]
     ps16: KernelLaunch,
     #[cfg(test)]
@@ -79,6 +81,11 @@ impl KernelSet for AttentionKernels {
         let prefill = load_function(&module, Self::MODULE_NAME, "prefill_gqa_lfm2_bf16")?;
         let prefill_flash =
             load_function(&module, Self::MODULE_NAME, "prefill_gqa_lfm2_bf16_flash")?;
+        let segmented_prefill_flash = load_function(
+            &module,
+            Self::MODULE_NAME,
+            "segmented_prefill_gqa_lfm2_bf16_flash",
+        )?;
         #[cfg(test)]
         let ps16 = load_function(&module, Self::MODULE_NAME, "paged_gqa_lfm2_bf16_ps16")?;
         #[cfg(test)]
@@ -109,6 +116,11 @@ impl KernelSet for AttentionKernels {
         Ok(Self {
             prefill: KernelLaunch::new_with_multiple(prefill, MAX_BLOCK_SIZE, 32)?,
             prefill_flash: KernelLaunch::new_with_multiple(prefill_flash, 128, 32)?,
+            segmented_prefill_flash: KernelLaunch::new_with_multiple(
+                segmented_prefill_flash,
+                128,
+                32,
+            )?,
             #[cfg(test)]
             ps16: KernelLaunch::new_with_multiple(ps16, MAX_BLOCK_SIZE, 32)?,
             #[cfg(test)]
@@ -400,6 +412,80 @@ impl AttentionKernels {
             .arg(value)
             .arg(output)
             .arg(&num_tokens);
+        unsafe {
+            args.launch(config)?;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) unsafe fn launch_segmented_prefill_flash_lfm2_bf16(
+        &self,
+        stream: &CudaStream,
+        query: &CudaSlice<bf16>,
+        key: &CudaSlice<bf16>,
+        value: &CudaSlice<bf16>,
+        segment_offsets: &CudaSlice<u32>,
+        output: &mut CudaSlice<bf16>,
+        num_segments: usize,
+        max_tokens_per_segment: usize,
+        total_tokens: usize,
+    ) -> Result<()> {
+        ensure!(
+            num_segments > 0,
+            "segmented flash prefill requires at least one segment"
+        );
+        ensure!(
+            total_tokens > 0,
+            "segmented flash prefill requires at least one token"
+        );
+        let query_required = total_tokens
+            .checked_mul(32 * 64)
+            .context("segmented flash prefill query size overflow")?;
+        let kv_required = total_tokens
+            .checked_mul(8 * 64)
+            .context("segmented flash prefill KV size overflow")?;
+        ensure!(
+            query.len() >= query_required,
+            "segmented flash prefill query storage too small"
+        );
+        ensure!(
+            key.len() >= kv_required,
+            "segmented flash prefill key storage too small"
+        );
+        ensure!(
+            value.len() >= kv_required,
+            "segmented flash prefill value storage too small"
+        );
+        ensure!(
+            output.len() >= query_required,
+            "segmented flash prefill output storage too small"
+        );
+        ensure!(
+            segment_offsets.len() >= num_segments + 1,
+            "segmented flash prefill offsets too small"
+        );
+        let max_q_tiles = max_tokens_per_segment.div_ceil(16);
+        let grid_x = u32::try_from(
+            max_q_tiles
+                .checked_mul(8)
+                .context("segmented flash prefill grid_x overflow")?,
+        )?;
+        let grid_y =
+            u32::try_from(num_segments).context("segmented flash prefill grid_y overflow")?;
+        let config = cudarc::driver::LaunchConfig {
+            grid_dim: (grid_x, grid_y, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut args = stream.launch_builder(self.segmented_prefill_flash.function());
+        args.arg(query)
+            .arg(key)
+            .arg(value)
+            .arg(segment_offsets)
+            .arg(output)
+            .arg(&num_segments)
+            .arg(&total_tokens);
         unsafe {
             args.launch(config)?;
         }

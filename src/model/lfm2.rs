@@ -274,3 +274,5 @@ mod cuda_graph_dispatch_tests;
 mod cuda_graph_production_tests;
 #[cfg(test)]
 mod prefill_flash_production_tests;
+#[cfg(test)]
+mod ragged_flash_production_tests;
