@@ -318,13 +318,13 @@ __device__ __forceinline__ void fused_decode_attention_body(
                 const float value0 = __bfloat162float(value_stage[stage][index0]);
                 const float value1 = __bfloat162float(value_stage[stage][index1]);
                 if (dot > maximum) {
-                    const float old_scale = expf(maximum - dot);
+                    const float old_scale = __expf(maximum - dot);
                     accumulator0 = accumulator0 * old_scale + value0;
                     accumulator1 = accumulator1 * old_scale + value1;
                     denominator = denominator * old_scale + 1.0f;
                     maximum = dot;
                 } else {
-                    const float new_scale = expf(dot - maximum);
+                    const float new_scale = __expf(dot - maximum);
                     accumulator0 = fmaf(value0, new_scale, accumulator0);
                     accumulator1 = fmaf(value1, new_scale, accumulator1);
                     denominator += new_scale;
