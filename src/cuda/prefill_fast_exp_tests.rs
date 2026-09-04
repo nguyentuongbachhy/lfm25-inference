@@ -28,11 +28,7 @@ impl FastExpPrefillKernel {
     fn load(runtime: &CudaRuntime) -> Result<Self> {
         let module = load_module(runtime.context(), MODULE_NAME, PTX)?;
         Ok(Self {
-            function: load_function(
-                &module,
-                MODULE_NAME,
-                "prefill_gqa_lfm2_bf16_fast_exp",
-            )?,
+            function: load_function(&module, MODULE_NAME, "prefill_gqa_lfm2_bf16_fast_exp")?,
         })
     }
 }

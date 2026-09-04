@@ -106,6 +106,39 @@ If the primitive passes, production integration remains opt-in until full-model 
 - no unacceptable top-1/token divergence;
 - material prompt-level latency improvement at approximately 2K and 8K tokens.
 
+## Phase 0 result
+
+RTX 5060 Laptop GPU, SM120, same-process balanced AB/BA timing:
+
+| Tokens | Precise mean | Fast mean | Mean speedup | Precise p50 | Fast p50 | Precise p95 | Fast p95 | Cosine | NRMSE | Tolerance |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 512 | 1541.405 us | 1488.938 us | 1.0379x | 1537.152 us | 1524.704 us | 1573.920 us | 1529.120 us | 1.00000000 | 0.00001819 | pass |
+| 2048 | 21474.515 us | 21323.754 us | 1.0071x | 21481.567 us | 21332.512 us | 21567.137 us | 21367.008 us | 1.00000000 | 0.00002699 | pass |
+| 8192 | 356698.981 us | 343095.001 us | 1.0397x | 357328.003 us | 343552.734 us | 361042.450 us | 346186.737 us | 1.00000000 | 0.00003694 | pass |
+
+Numerical tolerance:
+- All three lengths pass the decode fast-exp tolerance (`abs(diff) <= 0.035 + 0.025 * abs(ref)`).
+- 0 non-finite values. Cosine similarity is 1.00000000 across all lengths.
+
+Performance evaluation:
+- N=512: measured 1.0379x mean speedup (regression <= 3% gate passes).
+- N=2048: required >= 1.10x, observed 1.0071x (FAIL).
+- N=8192: required >= 1.10x, observed 1.0397x (FAIL).
+
+Conclusion:
+Replacing `expf` with `__expf` yields only ~0.7% speedup at N=2048 and ~4.0% at N=8192.
+The online-softmax exponential throughput is not the dominant bottleneck of long-context contiguous prefill.
+
+## Decision
+
+**REJECT for production.**
+
+Do not integrate fast-exp into contiguous prefill production dispatch.
+Do not combine fast-exp with Q4 query reuse.
+
+Both Q4 query reuse (~4.6%) and fast-exp scalar math replacement (~4.0%) fail to yield the required long-context speedup. Contiguous prefill requires a deeper algorithmic redesign (profiling instruction cost, warp serialization, shared-memory synchronization, or a tiled Tensor Core FlashAttention formulation) rather than local scalar or tiling micro-optimizations.
+
 ## Stop condition
 
 If fast-exp fails either numerical tolerance or the 1.10x long-context mean gate, reject prefill fast-exp and do not combine it with Q4. A combined Q4+fast-exp experiment is only justified after fast-exp independently passes.
+Fast-exp failed both N=2048 and N=8192 mean gates. Direction is closed.
