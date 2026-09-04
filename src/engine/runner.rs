@@ -2046,12 +2046,14 @@ impl Engine {
             && options.sampling.temperature == 0.0
             && decode_profile.is_none()
         {
-            Some(NgramDrafter::new(1, 4, options.speculative_draft))
+            Some(NgramDrafter::new(3, 5, options.speculative_draft))
         } else {
             None
         };
         let mut speculative_draft_tokens = 0usize;
         let mut speculative_accepted_tokens = 0usize;
+        let mut consecutive_rejections = 0usize;
+        let mut cooldown_steps = 0usize;
 
         while generated.len() < options.max_new_tokens {
             if token == self.model.config().eos_token_id && !ignore_eos {
@@ -2066,7 +2068,10 @@ impl Engine {
             }
 
             let remaining = options.max_new_tokens.saturating_sub(generated.len());
-            let mut draft = if let Some(ref drafter) = drafter {
+            let mut draft = if cooldown_steps > 0 {
+                cooldown_steps -= 1;
+                Vec::new()
+            } else if let Some(ref drafter) = drafter {
                 drafter.draft(&history)
             } else {
                 Vec::new()
@@ -2102,6 +2107,16 @@ impl Engine {
                     num_draft_accepted += 1;
                 }
                 speculative_accepted_tokens += num_draft_accepted;
+
+                if num_draft_accepted == 0 {
+                    consecutive_rejections += 1;
+                    if consecutive_rejections >= 2 {
+                        cooldown_steps = 3;
+                    }
+                } else {
+                    consecutive_rejections = 0;
+                    cooldown_steps = 0;
+                }
 
                 self.model.rollback_speculative(
                     &self.runtime,
