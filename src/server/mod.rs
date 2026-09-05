@@ -84,6 +84,15 @@ async fn serve_frontend(
     }
 }
 
+struct GenerationTask {
+    token_ids: Vec<u32>,
+    options: crate::engine::GenerationOptions,
+    model: String,
+    stop: Option<routes::StopCondition>,
+    stream: bool,
+    is_chat: bool,
+}
+
 async fn handle_connection(
     mut stream: TcpStream,
     tokenizer: Arc<Lfm2Tokenizer>,
@@ -92,75 +101,237 @@ async fn handle_connection(
 ) -> Result<()> {
     let request_started = Instant::now();
     let (method, path, body) = read_request(&mut stream).await?;
-    let response = match (method.as_str(), path.as_str()) {
-        ("GET", "/health") => routes::health(),
-        ("POST", "/v1/completions") => {
-            let (prompt, options) = match routes::parse_completion(&body) {
-                Ok(value) => value,
-                Err(response) => return write_response(&mut stream, response).await,
-            };
-            let tokenization_started = Instant::now();
-            let tokenizer_worker = Arc::clone(&tokenizer);
-            let token_ids = match tokio::task::spawn_blocking(move || {
-                tokenizer_worker.encode_user_prompt(&prompt)
-            })
-            .await
-            .context("tokenizer worker panicked")?
-            {
-                Ok(tokens) => tokens,
-                Err(error) => {
-                    return write_response(
-                        &mut stream,
-                        routes::error_response(
-                            "400 Bad Request",
-                            &format!("tokenization failed: {error:#}"),
-                        ),
-                    )
-                    .await;
-                }
-            };
-            let tokenization_ms = tokenization_started.elapsed().as_secs_f64() * 1000.0;
-            let (response_sender, response_receiver) = oneshot::channel();
-            let prepared = PreparedRequest {
-                request_id: request_ids.fetch_add(1, Ordering::Relaxed),
-                token_ids,
-                maximum_new_tokens: options.max_new_tokens,
-                stop_on_eos: true,
-                sampling: options.sampling,
-                arrived: request_started,
-                response: response_sender,
-            };
-            if handle.try_submit(prepared).is_err() {
-                return write_response(
-                    &mut stream,
-                    routes::error_response(
-                        "503 Service Unavailable",
-                        "engine admission queue is full",
-                    ),
+    let default_model = routes::DEFAULT_MODEL_NAME;
+    let normalized = path.trim_end_matches('/');
+    let normalized_path = if normalized.is_empty() { "/" } else { normalized };
+
+    let response = if method == "OPTIONS" {
+        routes::cors_preflight()
+    } else {
+        match (method.as_str(), normalized_path) {
+            ("GET", "/health") | ("GET", "/v1/health") => routes::health(),
+            ("GET", "/version") | ("GET", "/v1/version") => routes::version(),
+            ("GET", "/v1/models") | ("GET", "/models") => routes::models_list(default_model),
+            ("GET", p) if p.starts_with("/v1/models/") => {
+                let id = &p["/v1/models/".len()..];
+                routes::model_retrieve(default_model, id)
+            }
+            ("GET", p) if p.starts_with("/models/") => {
+                let id = &p["/models/".len()..];
+                routes::model_retrieve(default_model, id)
+            }
+            ("POST", "/v1/chat/completions") | ("POST", "/chat/completions") => {
+                let parsed = match routes::parse_chat_completion(&body, default_model) {
+                    Ok(val) => val,
+                    Err(resp) => return write_response(&mut stream, resp).await,
+                };
+                let tokenization_started = Instant::now();
+                let tokenizer_worker = Arc::clone(&tokenizer);
+                let messages = parsed.messages;
+                let token_ids = match tokio::task::spawn_blocking(move || {
+                    tokenizer_worker.encode_chat_prompt(&messages)
+                })
+                .await
+                .context("tokenizer worker panicked")?
+                {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        return write_response(
+                            &mut stream,
+                            routes::error_response(
+                                "400 Bad Request",
+                                &format!("tokenization failed: {error:#}"),
+                                "invalid_request_error",
+                                400,
+                                Some("messages"),
+                            ),
+                        )
+                        .await;
+                    }
+                };
+                let tokenization_ms = tokenization_started.elapsed().as_secs_f64() * 1000.0;
+                let task = GenerationTask {
+                    token_ids,
+                    options: parsed.options,
+                    model: parsed.model,
+                    stop: parsed.stop,
+                    stream: parsed.stream,
+                    is_chat: true,
+                };
+                execute_generation_task(
+                    task,
+                    handle,
+                    tokenizer,
+                    request_ids,
+                    request_started,
+                    tokenization_ms,
                 )
-                .await;
+                .await
             }
-            match response_receiver.await {
-                Ok(Ok(mut completion)) => {
-                    completion.metrics.tokenization_ms = tokenization_ms;
-                    let decode_started = Instant::now();
-                    let tokenizer_worker = Arc::clone(&tokenizer);
-                    let ids = completion.token_ids.clone();
-                    let text = tokio::task::spawn_blocking(move || tokenizer_worker.decode(&ids))
-                        .await
-                        .context("detokenizer worker panicked")??;
-                    completion.metrics.detokenization_ms =
-                        decode_started.elapsed().as_secs_f64() * 1000.0;
-                    completion.metrics.total_ms = request_started.elapsed().as_secs_f64() * 1000.0;
-                    routes::completion_response(completion, text)
-                }
-                Ok(Err(error)) => routes::error_response(error.status, &error.message),
-                Err(_) => routes::error_response("503 Service Unavailable", "GPU owner stopped"),
+            ("POST", "/v1/completions") | ("POST", "/completions") => {
+                let parsed = match routes::parse_completion(&body, default_model) {
+                    Ok(val) => val,
+                    Err(resp) => return write_response(&mut stream, resp).await,
+                };
+                let tokenization_started = Instant::now();
+                let tokenizer_worker = Arc::clone(&tokenizer);
+                let prompt = parsed.prompt;
+                let token_ids = match tokio::task::spawn_blocking(move || {
+                    tokenizer_worker.encode_text(&prompt)
+                })
+                .await
+                .context("tokenizer worker panicked")?
+                {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        return write_response(
+                            &mut stream,
+                            routes::error_response(
+                                "400 Bad Request",
+                                &format!("tokenization failed: {error:#}"),
+                                "invalid_request_error",
+                                400,
+                                Some("prompt"),
+                            ),
+                        )
+                        .await;
+                    }
+                };
+                let tokenization_ms = tokenization_started.elapsed().as_secs_f64() * 1000.0;
+                let task = GenerationTask {
+                    token_ids,
+                    options: parsed.options,
+                    model: parsed.model,
+                    stop: parsed.stop,
+                    stream: parsed.stream,
+                    is_chat: false,
+                };
+                execute_generation_task(
+                    task,
+                    handle,
+                    tokenizer,
+                    request_ids,
+                    request_started,
+                    tokenization_ms,
+                )
+                .await
             }
+            _ => routes::error_response(
+                "404 Not Found",
+                "route not found",
+                "not_found_error",
+                404,
+                None,
+            ),
         }
-        _ => routes::error_response("404 Not Found", "route not found"),
     };
     write_response(&mut stream, response).await
+}
+
+async fn execute_generation_task(
+    task: GenerationTask,
+    handle: ServingHandle,
+    tokenizer: Arc<Lfm2Tokenizer>,
+    request_ids: Arc<AtomicU64>,
+    request_started: Instant,
+    tokenization_ms: f64,
+) -> routes::RouteResponse {
+    let (response_sender, response_receiver) = oneshot::channel();
+    let request_id = request_ids.fetch_add(1, Ordering::Relaxed);
+    let prepared = PreparedRequest {
+        request_id,
+        token_ids: task.token_ids,
+        maximum_new_tokens: task.options.max_new_tokens,
+        stop_on_eos: true,
+        sampling: task.options.sampling,
+        arrived: request_started,
+        response: response_sender,
+    };
+    if handle.try_submit(prepared).is_err() {
+        return routes::error_response(
+            "503 Service Unavailable",
+            "engine admission queue is full",
+            "server_error",
+            503,
+            None,
+        );
+    }
+    match response_receiver.await {
+        Ok(Ok(mut completion)) => {
+            completion.metrics.tokenization_ms = tokenization_ms;
+            let decode_started = Instant::now();
+            let tokenizer_worker = Arc::clone(&tokenizer);
+            let ids = completion.token_ids.clone();
+            let text = match tokio::task::spawn_blocking(move || tokenizer_worker.decode(&ids)).await {
+                Ok(Ok(decoded)) => decoded,
+                Ok(Err(err)) => {
+                    return routes::error_response(
+                        "500 Internal Server Error",
+                        &format!("detokenization failed: {err:#}"),
+                        "internal_error",
+                        500,
+                        None,
+                    );
+                }
+                Err(err) => {
+                    return routes::error_response(
+                        "500 Internal Server Error",
+                        &format!("detokenizer worker panicked: {err:#}"),
+                        "internal_error",
+                        500,
+                        None,
+                    );
+                }
+            };
+            completion.metrics.detokenization_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+            completion.metrics.total_ms = request_started.elapsed().as_secs_f64() * 1000.0;
+            if task.is_chat {
+                if task.stream {
+                    routes::chat_completion_sse_stream(
+                        request_id,
+                        &task.model,
+                        &completion,
+                        &text,
+                        task.stop.as_ref(),
+                    )
+                } else {
+                    routes::chat_completion_response(
+                        request_id,
+                        task.model,
+                        completion,
+                        text,
+                        task.stop.as_ref(),
+                    )
+                }
+            } else if task.stream {
+                routes::completion_sse_stream(
+                    request_id,
+                    &task.model,
+                    &completion,
+                    &text,
+                    task.stop.as_ref(),
+                )
+            } else {
+                routes::completion_response(
+                    request_id,
+                    task.model,
+                    completion,
+                    text,
+                    task.stop.as_ref(),
+                )
+            }
+        }
+        Ok(Err(error)) => {
+            routes::error_response(error.status, &error.message, "server_error", 500, None)
+        }
+        Err(_) => routes::error_response(
+            "503 Service Unavailable",
+            "GPU owner stopped",
+            "server_error",
+            503,
+            None,
+        ),
+    }
 }
 
 async fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>)> {
@@ -218,19 +389,29 @@ async fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>
 }
 
 async fn write_response(stream: &mut TcpStream, response: routes::RouteResponse) -> Result<()> {
-    let headers = format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        response.status,
-        response.body.len(),
-    );
+    let headers = if response.status.starts_with("204") {
+        format!(
+            "HTTP/1.1 {}\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n",
+            response.status
+        )
+    } else {
+        format!(
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
+            response.status,
+            response.content_type,
+            response.body.len(),
+        )
+    };
     stream
         .write_all(headers.as_bytes())
         .await
         .context("failed to write HTTP headers")?;
-    stream
-        .write_all(response.body.as_bytes())
-        .await
-        .context("failed to write HTTP body")?;
+    if !response.body.is_empty() {
+        stream
+            .write_all(response.body.as_bytes())
+            .await
+            .context("failed to write HTTP body")?;
+    }
     stream
         .shutdown()
         .await
