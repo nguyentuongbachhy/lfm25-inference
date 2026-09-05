@@ -1465,6 +1465,9 @@ fn apply_stop_conditions(
             cleaned = stripped;
         }
     }
+    while let Some(stripped) = cleaned.strip_suffix('\u{FFFD}') {
+        cleaned = stripped;
+    }
 
     if let Some(stop_cond) = stop {
         let mut earliest_pos = None;

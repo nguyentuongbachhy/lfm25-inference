@@ -106,3 +106,4 @@ gantt
 3. **Phase 3 (Final Rollout)**:
    - Dynamic toggle `LFM25_KV_CACHE_DTYPE=fp8_e4m3` (defaulting to FP8 on SM89/SM120, fallback to BF16 on legacy hardware).
    - Update hardware cost model measurements for the new FP8 attention execution profile.
+

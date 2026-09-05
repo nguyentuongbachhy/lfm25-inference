@@ -637,6 +637,9 @@ async fn execute_live_streaming_task(
                 cleaned = stripped;
             }
         }
+        while let Some(stripped) = cleaned.strip_suffix('\u{FFFD}') {
+            cleaned = stripped;
+        }
         let prefix_len = if cleaned.starts_with(&emitted_text) {
             emitted_text.len()
         } else {
