@@ -91,6 +91,7 @@ struct GenerationTask {
     stop: Option<routes::StopCondition>,
     stream: bool,
     is_chat: bool,
+    is_structured_json: bool,
 }
 
 async fn handle_connection(
@@ -103,7 +104,11 @@ async fn handle_connection(
     let (method, path, body) = read_request(&mut stream).await?;
     let default_model = routes::DEFAULT_MODEL_NAME;
     let normalized = path.trim_end_matches('/');
-    let normalized_path = if normalized.is_empty() { "/" } else { normalized };
+    let normalized_path = if normalized.is_empty() {
+        "/"
+    } else {
+        normalized
+    };
 
     let response = if method == "OPTIONS" {
         routes::cors_preflight()
@@ -157,6 +162,7 @@ async fn handle_connection(
                     stop: parsed.stop,
                     stream: parsed.stream,
                     is_chat: true,
+                    is_structured_json: parsed.is_structured_json,
                 };
                 execute_generation_task(
                     task,
@@ -205,6 +211,7 @@ async fn handle_connection(
                     stop: parsed.stop,
                     stream: parsed.stream,
                     is_chat: false,
+                    is_structured_json: false,
                 };
                 execute_generation_task(
                     task,
@@ -262,27 +269,28 @@ async fn execute_generation_task(
             let decode_started = Instant::now();
             let tokenizer_worker = Arc::clone(&tokenizer);
             let ids = completion.token_ids.clone();
-            let text = match tokio::task::spawn_blocking(move || tokenizer_worker.decode(&ids)).await {
-                Ok(Ok(decoded)) => decoded,
-                Ok(Err(err)) => {
-                    return routes::error_response(
-                        "500 Internal Server Error",
-                        &format!("detokenization failed: {err:#}"),
-                        "internal_error",
-                        500,
-                        None,
-                    );
-                }
-                Err(err) => {
-                    return routes::error_response(
-                        "500 Internal Server Error",
-                        &format!("detokenizer worker panicked: {err:#}"),
-                        "internal_error",
-                        500,
-                        None,
-                    );
-                }
-            };
+            let text =
+                match tokio::task::spawn_blocking(move || tokenizer_worker.decode(&ids)).await {
+                    Ok(Ok(decoded)) => decoded,
+                    Ok(Err(err)) => {
+                        return routes::error_response(
+                            "500 Internal Server Error",
+                            &format!("detokenization failed: {err:#}"),
+                            "internal_error",
+                            500,
+                            None,
+                        );
+                    }
+                    Err(err) => {
+                        return routes::error_response(
+                            "500 Internal Server Error",
+                            &format!("detokenizer worker panicked: {err:#}"),
+                            "internal_error",
+                            500,
+                            None,
+                        );
+                    }
+                };
             completion.metrics.detokenization_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
             completion.metrics.total_ms = request_started.elapsed().as_secs_f64() * 1000.0;
             if task.is_chat {
@@ -293,6 +301,7 @@ async fn execute_generation_task(
                         &completion,
                         &text,
                         task.stop.as_ref(),
+                        task.is_structured_json,
                     )
                 } else {
                     routes::chat_completion_response(
@@ -301,6 +310,7 @@ async fn execute_generation_task(
                         completion,
                         text,
                         task.stop.as_ref(),
+                        task.is_structured_json,
                     )
                 }
             } else if task.stream {

@@ -112,19 +112,17 @@ pub fn segmented_prefill_attention_lfm2_bf16(
         runtime
             .kernels()
             .attention()
-            .launch_segmented_prefill_flash_lfm2_bf16(
-                crate::cuda::SegmentedFlashPrefillLaunch {
-                    stream: runtime.stream(),
-                    query: query.storage(),
-                    key: key.storage(),
-                    value: value.storage(),
-                    segment_offsets: segment_offsets.storage(),
-                    output: output.storage_mut(),
-                    num_segments,
-                    max_tokens_per_segment,
-                    total_tokens: num_tokens,
-                },
-            )?;
+            .launch_segmented_prefill_flash_lfm2_bf16(crate::cuda::SegmentedFlashPrefillLaunch {
+                stream: runtime.stream(),
+                query: query.storage(),
+                key: key.storage(),
+                value: value.storage(),
+                segment_offsets: segment_offsets.storage(),
+                output: output.storage_mut(),
+                num_segments,
+                max_tokens_per_segment,
+                total_tokens: num_tokens,
+            })?;
     }
     Ok(output)
 }

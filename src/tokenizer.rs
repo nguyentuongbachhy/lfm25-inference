@@ -105,7 +105,6 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
-    #[cfg(test)]
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: role.into(),

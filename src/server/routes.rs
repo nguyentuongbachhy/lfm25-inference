@@ -82,8 +82,31 @@ impl StopCondition {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum ResponseFormat {
+    JsonSchema {
+        r#type: String,
+        json_schema: JsonSchemaSpec,
+    },
+    TypeOnly {
+        r#type: String,
+    },
+    RawSchema(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct JsonSchemaSpec {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub strict: Option<bool>,
+    pub schema: serde_json::Value,
+}
+
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ChatCompletionRequest {
     #[serde(default)]
     pub model: Option<String>,
@@ -108,6 +131,12 @@ pub(crate) struct ChatCompletionRequest {
     pub stop: Option<StopCondition>,
     #[serde(default)]
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
+    #[serde(default)]
+    pub format: Option<serde_json::Value>,
+    #[serde(default)]
+    pub options: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -159,7 +188,6 @@ impl CompletionPrompt {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct CompletionRequest {
     #[serde(default)]
     pub model: Option<String>,
@@ -338,6 +366,7 @@ pub(crate) struct ParsedChatRequest {
     pub model: String,
     pub stop: Option<StopCondition>,
     pub stream: bool,
+    pub is_structured_json: bool,
 }
 
 pub(crate) fn parse_chat_completion(
@@ -365,10 +394,18 @@ pub(crate) fn parse_chat_completion(
             Some("messages"),
         ));
     }
+    let options_num_predict = request
+        .options
+        .as_ref()
+        .and_then(|opt| opt.get("num_predict"))
+        .and_then(|np| np.as_u64())
+        .map(|np| np as usize);
+
     let max_tokens = match extract_max_tokens(
         request.max_tokens,
         request.max_completion_tokens,
         request.max_new_tokens,
+        options_num_predict,
     ) {
         Ok(val) => val,
         Err(msg) => {
@@ -381,27 +418,73 @@ pub(crate) fn parse_chat_completion(
             ));
         }
     };
-    let sampling = match build_sampling_config(
-        request.temperature,
-        request.top_p,
-        request.top_k,
-        request.repetition_penalty,
-        request.seed,
-    ) {
-        Ok(cfg) => cfg,
-        Err(msg) => {
-            return Err(error_response(
-                "400 Bad Request",
-                &msg,
-                "invalid_request_error",
-                400,
-                None,
-            ));
-        }
-    };
+    let temperature = request.temperature.or_else(|| {
+        request
+            .options
+            .as_ref()
+            .and_then(|opt| opt.get("temperature"))
+            .and_then(|t| t.as_f64())
+            .map(|t| t as f32)
+    });
+    let top_p = request.top_p.or_else(|| {
+        request
+            .options
+            .as_ref()
+            .and_then(|opt| opt.get("top_p"))
+            .and_then(|t| t.as_f64())
+            .map(|t| t as f32)
+    });
+    let top_k = request.top_k.or_else(|| {
+        request
+            .options
+            .as_ref()
+            .and_then(|opt| opt.get("top_k"))
+            .and_then(|t| t.as_u64())
+            .map(|t| t as usize)
+    });
+    let seed = request.seed.or_else(|| {
+        request
+            .options
+            .as_ref()
+            .and_then(|opt| opt.get("seed"))
+            .and_then(|t| t.as_u64())
+    });
+    let sampling =
+        match build_sampling_config(temperature, top_p, top_k, request.repetition_penalty, seed) {
+            Ok(cfg) => cfg,
+            Err(msg) => {
+                return Err(error_response(
+                    "400 Bad Request",
+                    &msg,
+                    "invalid_request_error",
+                    400,
+                    None,
+                ));
+            }
+        };
     let model = request.model.unwrap_or_else(|| default_model.to_string());
+    let constraint =
+        extract_schema_constraint(request.response_format.as_ref(), request.format.as_ref());
+    let is_structured_json = constraint.is_some();
+    let mut messages = request.messages;
+    if let Some(schema_prompt) = constraint {
+        if let Some(first) = messages.first_mut() {
+            if first.role == "system" {
+                let mut content = first.text();
+                content.push_str(&schema_prompt);
+                first.content = crate::tokenizer::MessageContent::Text(content);
+            } else {
+                messages.insert(
+                    0,
+                    ChatMessage::new("system", schema_prompt.trim().to_string()),
+                );
+            }
+        } else {
+            messages.push(ChatMessage::new("system", schema_prompt.trim().to_string()));
+        }
+    }
     Ok(ParsedChatRequest {
-        messages: request.messages,
+        messages,
         options: GenerationOptions {
             max_new_tokens: max_tokens,
             sampling,
@@ -410,6 +493,7 @@ pub(crate) fn parse_chat_completion(
         model,
         stop: request.stop,
         stream: request.stream.unwrap_or(false),
+        is_structured_json,
     })
 }
 
@@ -453,6 +537,7 @@ pub(crate) fn parse_completion(
         request.max_tokens,
         request.max_completion_tokens,
         request.max_new_tokens,
+        None,
     ) {
         Ok(val) => val,
         Err(msg) => {
@@ -503,9 +588,15 @@ pub(crate) fn chat_completion_response(
     completion: ServingCompletion,
     text: String,
     stop: Option<&StopCondition>,
+    is_structured_json: bool,
 ) -> RouteResponse {
     let (cleaned_text, finish_reason) =
         apply_stop_conditions(&text, stop, completion.finish_reason);
+    let final_content = if is_structured_json {
+        clean_structured_output(&cleaned_text)
+    } else {
+        cleaned_text
+    };
     let prompt_tokens = completion.prompt_tokens;
     let completion_tokens = completion.token_ids.len();
     let response = ChatCompletionResponse {
@@ -517,7 +608,7 @@ pub(crate) fn chat_completion_response(
             index: 0,
             message: ChatResponseMessage {
                 role: "assistant",
-                content: cleaned_text,
+                content: final_content,
             },
             logprobs: None,
             finish_reason,
@@ -570,8 +661,14 @@ pub(crate) fn chat_completion_sse_stream(
     completion: &ServingCompletion,
     text: &str,
     stop: Option<&StopCondition>,
+    is_structured_json: bool,
 ) -> RouteResponse {
     let (cleaned_text, finish_reason) = apply_stop_conditions(text, stop, completion.finish_reason);
+    let final_content = if is_structured_json {
+        clean_structured_output(&cleaned_text)
+    } else {
+        cleaned_text
+    };
     let id = format!("chatcmpl-{:016x}{:08x}", current_timestamp(), request_id);
     let created = current_timestamp();
     let prompt_tokens = completion.prompt_tokens;
@@ -613,7 +710,7 @@ pub(crate) fn chat_completion_sse_stream(
             index: 0,
             delta: ChatChunkDelta {
                 role: None,
-                content: Some(cleaned_text),
+                content: Some(final_content),
             },
             logprobs: None,
             finish_reason: None,
@@ -725,15 +822,136 @@ fn extract_max_tokens(
     max_tokens: Option<usize>,
     max_completion_tokens: Option<usize>,
     max_new_tokens: Option<usize>,
+    options_num_predict: Option<usize>,
 ) -> Result<usize, &'static str> {
     let tokens = max_completion_tokens
         .or(max_tokens)
         .or(max_new_tokens)
-        .unwrap_or(64);
+        .or(options_num_predict)
+        .unwrap_or(128);
     if tokens == 0 {
         return Err("max_tokens must be positive");
     }
     Ok(tokens)
+}
+
+fn extract_schema_constraint(
+    response_format: Option<&ResponseFormat>,
+    format: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(rf) = response_format {
+        match rf {
+            ResponseFormat::JsonSchema { r#type, json_schema } if r#type == "json_schema" => {
+                let schema_str = serde_json::to_string_pretty(&json_schema.schema)
+                    .unwrap_or_else(|_| json_schema.schema.to_string());
+                Some(format!(
+                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. The root JSON object must directly contain the fields defined under 'properties' (do NOT wrap them in a 'properties' key). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                ))
+            }
+            ResponseFormat::TypeOnly { r#type } if r#type == "json_object" => {
+                Some(
+                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON."
+                        .to_string(),
+                )
+            }
+            ResponseFormat::RawSchema(val) => {
+                if let Some(s) = val.as_str() {
+                    if s == "json" {
+                        return Some(
+                            "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON."
+                                .to_string(),
+                        );
+                    }
+                } else if val.is_object() {
+                    let schema_str = serde_json::to_string_pretty(val)
+                        .unwrap_or_else(|_| val.to_string());
+                    return Some(format!(
+                        "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. The root JSON object must directly contain the fields defined under 'properties' (do NOT wrap them in a 'properties' key). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                    ));
+                }
+                None
+            }
+            _ => None,
+        }
+    } else if let Some(fmt) = format {
+        if let Some(s) = fmt.as_str() {
+            if s == "json" {
+                Some(
+                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON."
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        } else if fmt.is_object() {
+            let schema_str =
+                serde_json::to_string_pretty(fmt).unwrap_or_else(|_| fmt.to_string());
+            Some(format!(
+                "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. The root JSON object must directly contain the fields defined under 'properties' (do NOT wrap them in a 'properties' key). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn clean_structured_output(text: &str) -> String {
+    let trimmed = text.trim();
+    // 1. If wrapped in markdown ```json ... ``` or ``` ... ```
+    if let Some(stripped) = trimmed.strip_prefix("```") {
+        let after_fence = if let Some(rest) = stripped.strip_prefix("json") {
+            rest
+        } else {
+            stripped
+        };
+        let inner = if let Some(end_idx) = after_fence.rfind("```") {
+            &after_fence[..end_idx]
+        } else {
+            after_fence
+        };
+        let cleaned = inner.trim();
+        if serde_json::from_str::<serde_json::Value>(cleaned).is_ok() {
+            return unwrap_accidental_properties(cleaned);
+        }
+    }
+    // 2. If the trimmed text is already valid JSON
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return unwrap_accidental_properties(trimmed);
+    }
+    // 3. Try to locate the outermost matching '{' ... '}' or '[' ... ']'
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        let candidate = trimmed[start..=end].trim();
+        if start < end && serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return unwrap_accidental_properties(candidate);
+        }
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
+        let candidate = trimmed[start..=end].trim();
+        if start < end && serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return unwrap_accidental_properties(candidate);
+        }
+    }
+    // Fallback to trimmed text
+    trimmed.to_string()
+}
+
+fn unwrap_accidental_properties(json_str: &str) -> String {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+        if let Some(obj) = val.as_object() {
+            if obj.len() == 1 {
+                if let Some(inner) = obj.get("properties") {
+                    if inner.is_object() {
+                        if let Ok(unwrapped) = serde_json::to_string(inner) {
+                            return unwrapped;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    json_str.to_string()
 }
 
 fn build_sampling_config(
@@ -832,8 +1050,10 @@ pub(crate) fn error_response(
             code,
         },
     };
-    let body = serde_json::to_string(&envelope)
-        .unwrap_or_else(|_| "{\"error\":{\"message\":\"internal error\",\"type\":\"internal_error\",\"code\":500}}".to_string());
+    let body = serde_json::to_string(&envelope).unwrap_or_else(|_| {
+        "{\"error\":{\"message\":\"internal error\",\"type\":\"internal_error\",\"code\":500}}"
+            .to_string()
+    });
     RouteResponse {
         status,
         content_type: "application/json",
@@ -873,7 +1093,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "stop": "\n"
         }"#;
-        let parsed_single = parse_chat_completion(json_single_stop.as_bytes(), "default-model").unwrap();
+        let parsed_single =
+            parse_chat_completion(json_single_stop.as_bytes(), "default-model").unwrap();
         assert_eq!(
             parsed_single.stop,
             Some(StopCondition::Single("\n".to_string()))
@@ -926,5 +1147,125 @@ mod tests {
         assert!(resp.body.contains("\"id\":\"LFM2.5-1.2B-Instruct\""));
         assert!(resp.body.contains("\"object\":\"list\""));
     }
-}
 
+    #[test]
+    fn test_openai_json_schema_response_format() {
+        let json = r#"{
+            "model": "LFM2.5-1.2B-Instruct",
+            "messages": [
+                {"role": "user", "content": "Return json"}
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "enterprise_answer",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answerable": {"type": "boolean"},
+                            "answer": {"type": "string"}
+                        },
+                        "required": ["answerable", "answer"]
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_chat_completion(json.as_bytes(), "default-model").unwrap();
+        assert!(parsed.is_structured_json);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].role, "system");
+        assert!(
+            parsed.messages[0]
+                .text()
+                .contains("[RESPONSE FORMAT INSTRUCTION]")
+        );
+        assert!(parsed.messages[0].text().contains("answerable"));
+    }
+
+    #[test]
+    fn test_openai_json_object_response_format() {
+        let json = r#"{
+            "messages": [
+                {"role": "user", "content": "Return json"}
+            ],
+            "response_format": {"type": "json_object"}
+        }"#;
+        let parsed = parse_chat_completion(json.as_bytes(), "default-model").unwrap();
+        assert!(parsed.is_structured_json);
+        assert_eq!(parsed.messages[0].role, "system");
+        assert!(
+            parsed.messages[0]
+                .text()
+                .contains("[RESPONSE FORMAT INSTRUCTION]")
+        );
+    }
+
+    #[test]
+    fn test_ollama_format_and_options_payload() {
+        let json = r#"{
+            "model": "LFM2.5-1.2B-Instruct",
+            "stream": false,
+            "format": {
+                "type": "object",
+                "properties": {
+                    "answerable": {"type": "boolean"},
+                    "answer": {"type": "string"},
+                    "selected_chunk_ids": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["answerable", "answer", "selected_chunk_ids"]
+            },
+            "keep_alive": "5m",
+            "options": {"temperature": 0, "num_ctx": 4096, "num_predict": 128},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a grounded assistant."
+                },
+                {
+                    "role": "user",
+                    "content": "What is the answer?"
+                }
+            ]
+        }"#;
+        let parsed = parse_chat_completion(json.as_bytes(), "default-model").unwrap();
+        assert!(parsed.is_structured_json);
+        assert_eq!(parsed.options.max_new_tokens, 128);
+        assert_eq!(parsed.options.sampling.temperature, 0.0);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].role, "system");
+        assert!(
+            parsed.messages[0]
+                .text()
+                .contains("You are a grounded assistant.")
+        );
+        assert!(
+            parsed.messages[0]
+                .text()
+                .contains("[RESPONSE FORMAT INSTRUCTION]")
+        );
+        assert!(parsed.messages[0].text().contains("selected_chunk_ids"));
+    }
+
+    #[test]
+    fn test_clean_structured_output() {
+        // Markdown fence with json
+        let raw1 = "```json\n{\n  \"answerable\": true,\n  \"answer\": \"hello\"\n}\n```";
+        assert_eq!(
+            clean_structured_output(raw1),
+            "{\n  \"answerable\": true,\n  \"answer\": \"hello\"\n}"
+        );
+
+        // Markdown fence without json
+        let raw2 = "```\n{\"answerable\": false}\n```";
+        assert_eq!(clean_structured_output(raw2), "{\"answerable\": false}");
+
+        // Already clean json
+        let raw3 = "{\"answerable\": true}";
+        assert_eq!(clean_structured_output(raw3), "{\"answerable\": true}");
+
+        // Extra conversational fluff around json
+        let raw4 = "Here is the response:\n{\"answerable\": true}\nHope this helps!";
+        assert_eq!(clean_structured_output(raw4), "{\"answerable\": true}");
+    }
+}

@@ -6,8 +6,6 @@ use crate::{
     tensor::{Shape, Tensor},
 };
 
-
-
 pub(crate) fn argmax_rows_bf16_into(
     runtime: &CudaRuntime,
     input: &Tensor<bf16>,
