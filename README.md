@@ -165,12 +165,6 @@ The runtime includes an OpenAI-compatible and vLLM-aligned HTTP API server power
 Start the production continuous server on port `8088` (or any custom port):
 
 ```bash
-# Direct binary execution:
-cargo run --release -- \
-  --serve 127.0.0.1:8088 \
-  --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json
-
-# Or via Cargo:
 LLM_CUDA_ARCH=compute_120 cargo run --release -- \
   --model models/LFM2.5-1.2B-Instruct \
   --serve 127.0.0.1:8088 \
