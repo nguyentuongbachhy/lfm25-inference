@@ -162,25 +162,46 @@ The runtime includes an OpenAI-compatible and vLLM-aligned HTTP API server power
 
 ### Starting the Server
 
-Start the production continuous server on port `8086` (or any custom port):
+Start the production continuous server on port `8088` (or any custom port):
 
 ```bash
+# Direct binary execution:
+./target/release/lfm25-inference \
+  --serve 127.0.0.1:8088 \
+  --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json
+
+# Or via Cargo:
 LLM_CUDA_ARCH=compute_120 cargo run --release -- \
   --model models/LFM2.5-1.2B-Instruct \
-  --serve 127.0.0.1:8086 \
-  --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json \
-  --page-size 16
+  --serve 127.0.0.1:8088 \
+  --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json
 ```
 
 > [!NOTE]
-> The selective FP8 policy (`docs/benchmarks/fp8/selected-policy.json`) is auto-detected at startup if present. To force BF16-only serving, omit the FP8 policy and hardware profile.
+> The selective FP8 policy (`docs/benchmarks/fp8/selected-policy.json`) is auto-detected at startup if present. If your environment uses an HTTP proxy, specify `--noproxy "*"` with `curl` to ensure direct loopback requests.
+
+### Automated End-to-End Evaluation & Verification
+
+To verify that all endpoints (OpenAI & Ollama) work correctly and reproduce the benchmark numbers with a single command:
+
+```bash
+./scripts/run_serving_evaluation.sh 8088
+```
+
+This master script automatically:
+1. Compiles the release binary (if needed).
+2. Spawns the server on `127.0.0.1:8088`.
+3. Verifies all OpenAI (`/v1/*`) and Ollama (`/api/*`) endpoints with `scripts/serving/test_all_endpoints.py`.
+4. Executes the Multi-Turn Radix Tree Prefix Caching benchmark with `scripts/serving/bench_prefix_caching.py`.
+5. Executes the Continuous Batching Concurrency benchmark ($C=1, 2, 4, 8$) with `scripts/serving/bench_concurrency.py`.
+6. Gracefully shuts down the background server upon completion.
 
 ### API Usage Examples
 
 #### 1. Chat Completion (Non-Streaming)
 
 ```bash
-curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+curl --noproxy "*" -s -X POST http://127.0.0.1:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "LFM2.5-1.2B-Instruct",
@@ -188,22 +209,22 @@ curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
       {"role": "system", "content": "You are a helpful AI assistant."},
       {"role": "user", "content": "Explain quantum computing in one sentence."}
     ],
-    "max_tokens": 64,
+    "max_tokens": 100,
     "temperature": 0.0
   }'
 ```
 
-#### 2. Streaming Chat Completion (SSE)
+#### 2. Streaming Chat Completion (OpenAI SSE)
 
 ```bash
-curl -N -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+curl --noproxy "*" -N -s -X POST http://127.0.0.1:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "LFM2.5-1.2B-Instruct",
     "messages": [
       {"role": "user", "content": "Count from 1 to 5."}
     ],
-    "max_tokens": 64,
+    "max_tokens": 100,
     "stream": true
   }'
 ```
@@ -213,7 +234,7 @@ curl -N -s -X POST http://127.0.0.1:8086/v1/chat/completions \
 Enforce strict JSON schema validation for reliable tool calling, information extraction, and agent workflows:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+curl --noproxy "*" -s -X POST http://127.0.0.1:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "LFM2.5-1.2B-Instruct",
@@ -253,7 +274,7 @@ curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
 Clients configured for Ollama can call `/v1/chat/completions` directly without modification:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+curl --noproxy "*" -s -X POST http://127.0.0.1:8088/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "LFM2.5-1.2B-Instruct",
@@ -287,11 +308,11 @@ The server automatically injects the schema instruction, strips markdown code bl
 #### 5. Text Completion (`/v1/completions`)
 
 ```bash
-curl -s -X POST http://127.0.0.1:8086/v1/completions \
+curl --noproxy "*" -s -X POST http://127.0.0.1:8088/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Liquid Foundation Models are",
-    "max_tokens": 32,
+    "max_tokens": 64,
     "temperature": 0.0
   }'
 ```
@@ -301,7 +322,7 @@ curl -s -X POST http://127.0.0.1:8086/v1/completions \
 Drop-in replacement for Ollama clients and OpenWebUI. By default, `stream` is `true` emitting newline-delimited JSON (NDJSON) chunks:
 
 ```bash
-curl -N -s -X POST http://127.0.0.1:8086/api/chat \
+curl --noproxy "*" -N -s -X POST http://127.0.0.1:8088/api/chat \
   -H "Content-Type: application/json" \
   -d '{
     "model": "LFM2.5-1.2B-Instruct",
@@ -309,7 +330,7 @@ curl -N -s -X POST http://127.0.0.1:8086/api/chat \
       {"role": "user", "content": "Explain photosynthesis in 2 sentences."}
     ],
     "options": {
-      "num_predict": 64,
+      "num_predict": 100,
       "temperature": 0.0
     }
   }'
@@ -318,13 +339,13 @@ curl -N -s -X POST http://127.0.0.1:8086/api/chat \
 #### 7. Native Ollama Raw Generation (`/api/generate`)
 
 ```bash
-curl -N -s -X POST http://127.0.0.1:8086/api/generate \
+curl --noproxy "*" -N -s -X POST http://127.0.0.1:8088/api/generate \
   -H "Content-Type: application/json" \
   -d '{
     "model": "LFM2.5-1.2B-Instruct",
     "prompt": "The capital of France is",
     "options": {
-      "num_predict": 10,
+      "num_predict": 30,
       "temperature": 0.0
     }
   }'
@@ -333,7 +354,7 @@ curl -N -s -X POST http://127.0.0.1:8086/api/generate \
 #### 8. CORS Preflight Check
 
 ```bash
-curl -s -I -X OPTIONS http://127.0.0.1:8086/v1/chat/completions
+curl --noproxy "*" -s -I -X OPTIONS http://127.0.0.1:8088/v1/chat/completions
 # Returns HTTP/1.1 204 No Content with Access-Control-Allow-Origin: *
 ```
 
@@ -417,6 +438,27 @@ LLM_CUDA_ARCH=compute_120 cargo run --release -- \
   --benchmark-load docs/serving/ps16-load.json \
   --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json \
   --page-size 16
+```
+
+### Serving & Concurrency Benchmarks
+
+Run the all-in-one automated serving benchmark suite:
+
+```bash
+./scripts/run_serving_evaluation.sh 8088
+```
+
+Or run dedicated Python benchmark harnesses against an already running server:
+
+```bash
+# Verify all OpenAI and Ollama endpoints
+python3 scripts/serving/test_all_endpoints.py http://127.0.0.1:8088
+
+# Benchmark Multi-Turn Radix Tree Prefix Caching (TTFT speedup)
+python3 scripts/serving/bench_prefix_caching.py http://127.0.0.1:8088
+
+# Benchmark Continuous Batching Concurrency Scaling (C = 1, 2, 4, 8)
+python3 scripts/serving/bench_concurrency.py http://127.0.0.1:8088
 ```
 
 More benchmark and validation commands are collected in
