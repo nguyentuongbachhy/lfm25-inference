@@ -88,7 +88,8 @@ impl Args {
         let mut calibration_max_tokens = 1024usize;
         let mut fp8_eval_sequences = 16usize;
         let mut fp8_eval_max_tokens = 128usize;
-        let mut fp8_policy = None;
+        let mut fp8_policy = env::var("LFM25_FP8_POLICY").ok().map(PathBuf::from);
+        let mut disable_fp8_policy = false;
         let mut max_new_tokens = 64usize;
         let mut device = 0usize;
         let mut page_size = KvPageSize::P16;
@@ -208,6 +209,10 @@ impl Args {
                 }
                 "--fp8-policy" => {
                     fp8_policy = Some(PathBuf::from(next_value(&mut args, "--fp8-policy")?));
+                }
+                "--no-fp8-policy" | "--bf16" => {
+                    disable_fp8_policy = true;
+                    fp8_policy = None;
                 }
                 "--max-new-tokens" => {
                     max_new_tokens = next_value(&mut args, "--max-new-tokens")?
@@ -340,6 +345,19 @@ impl Args {
         if evaluate_fp8.is_some() && fp8_policy.is_some() {
             bail!("--evaluate-fp8 already specifies the policy; do not also use --fp8-policy");
         }
+        if !disable_fp8_policy
+            && fp8_policy.is_none()
+            && (prompt.is_some() || serve.is_some())
+            && evaluate_fp8.is_none()
+            && benchmark_fp8.is_none()
+            && benchmark_batched_fp8.is_none()
+            && calibrate_fp8.is_none()
+        {
+            let default_policy = PathBuf::from("docs/benchmarks/fp8/selected-policy.json");
+            if default_policy.exists() {
+                fp8_policy = Some(default_policy);
+            }
+        }
         SamplingConfig {
             temperature,
             top_k,
@@ -405,7 +423,7 @@ fn write_json(path: &std::path::Path, value: &impl serde::Serialize, label: &str
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --fused-rms-fp8\n  --no-fused-rms-fp8\n  --fused-swiglu-fp8\n  --no-fused-swiglu-fp8\n  --metadata-scratch\n  --no-metadata-scratch\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
+    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --fused-rms-fp8\n  --no-fused-rms-fp8\n  --fused-swiglu-fp8\n  --no-fused-swiglu-fp8\n  --metadata-scratch\n  --no-metadata-scratch\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --no-fp8-policy / --bf16\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
 }
 
 fn main() -> Result<()> {
