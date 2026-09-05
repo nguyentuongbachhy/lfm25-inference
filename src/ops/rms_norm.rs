@@ -288,8 +288,14 @@ mod fused_tests {
             &mut fused_fp8,
         )?;
 
-        assert_eq!(readback(&runtime, &fused_sum)?, readback(&runtime, &reference_sum)?);
-        assert_eq!(readback(&runtime, &fused_fp8)?, readback(&runtime, &reference_fp8)?);
+        assert_eq!(
+            readback(&runtime, &fused_sum)?,
+            readback(&runtime, &reference_sum)?
+        );
+        assert_eq!(
+            readback(&runtime, &fused_fp8)?,
+            readback(&runtime, &reference_fp8)?
+        );
         Ok(())
     }
 }

@@ -364,7 +364,8 @@ mod tests {
         let projected = runtime.upload(&projected_host, Shape::new([3, 6]))?;
         let weights = runtime.upload(&weights_host, Shape::new([2, 1, 3]))?;
         let mut state_standard = runtime.zeros::<bf16>(Shape::new([2, 2]))?;
-        let output_standard = short_conv_lfm2_bf16(&runtime, &projected, &weights, &mut state_standard)?;
+        let output_standard =
+            short_conv_lfm2_bf16(&runtime, &projected, &weights, &mut state_standard)?;
 
         let mut state_with_history = runtime.zeros::<bf16>(Shape::new([2, 2]))?;
         let mut history = runtime.zeros::<bf16>(Shape::new([3, 2, 2]))?;

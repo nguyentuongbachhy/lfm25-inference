@@ -323,7 +323,10 @@ impl ShortConvKernels {
             state_history.len() >= history_required,
             "short convolution state history storage too small"
         );
-        let config = self.lfm2_with_history.policy().for_work_items(hidden_size)?;
+        let config = self
+            .lfm2_with_history
+            .policy()
+            .for_work_items(hidden_size)?;
         let mut args = stream.launch_builder(self.lfm2_with_history.function());
         args.arg(projected)
             .arg(weight)

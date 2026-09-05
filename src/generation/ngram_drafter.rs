@@ -150,12 +150,9 @@ mod tests {
         // [10, 20] is followed by [30, 40] TWICE, and by [90, 91] ONCE (more recently)
         let history = vec![
             10, 20, 30, 40, // occurrence 1
-            1, 2,
-            10, 20, 30, 40, // occurrence 2
-            3, 4,
-            10, 20, 90, 91, // occurrence 3 (more recent, but lower frequency)
-            5, 6,
-            10, 20,         // query suffix
+            1, 2, 10, 20, 30, 40, // occurrence 2
+            3, 4, 10, 20, 90, 91, // occurrence 3 (more recent, but lower frequency)
+            5, 6, 10, 20, // query suffix
         ];
         let candidates = drafter.draft(&history);
         // Frequency 2 wins over recency 1
@@ -169,10 +166,8 @@ mod tests {
         // [Trí=1001, tuệ=1002, nhân=1003, tạo=1004, Việt=2001, Nam=2002]
         let history = vec![
             1001, 1002, 1003, 1004, // "Trí tuệ nhân tạo"
-            50, 51,
-            2001, 2002,             // "Việt Nam"
-            60, 61,
-            1001, 1002,             // Query suffix "Trí tuệ"
+            50, 51, 2001, 2002, // "Việt Nam"
+            60, 61, 1001, 1002, // Query suffix "Trí tuệ"
         ];
         let candidates = drafter.draft(&history);
         // Should predict continuation ["nhân", "tạo"]

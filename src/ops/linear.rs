@@ -83,7 +83,10 @@ pub(crate) fn linear_fp8_e4m3_from_fp8(
     activation_scale: ScalarScale,
     weight_scale: ScalarScale,
 ) -> Result<Tensor<bf16>> {
-    ensure!(quantized_input.rank() >= 1, "FP8 linear input must have rank >= 1");
+    ensure!(
+        quantized_input.rank() >= 1,
+        "FP8 linear input must have rank >= 1"
+    );
     ensure!(weight.rank() == 2, "FP8 linear weight must have rank 2");
     ensure!(
         quantized_input.numel() > 0 && weight.numel() > 0,

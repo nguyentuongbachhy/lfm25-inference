@@ -27,9 +27,8 @@ pub(crate) use kernels::{
     EmbeddingLaunch, FastRaggedAttentionLaunch, FusedAttentionCommon, FusedDecodeLaunch,
     FusedRaggedDecodeLaunch, GatherLaunch, HybridAttentionLaunch, KvCacheWriteLaunch,
     PagedAttentionLaunch, QkPostprocessLaunch, ResidualRmsNormFp8Launch, ResidualRmsNormLaunch,
-    RmsNormLaunch, RopeLaunch,
-    SegmentedShortConvLaunch, ShortConvLaunch, ShortConvWithHistoryLaunch,
-    SplitKRaggedAttentionLaunch,
+    RmsNormLaunch, RopeLaunch, SegmentedShortConvLaunch, ShortConvLaunch,
+    ShortConvWithHistoryLaunch, SplitKRaggedAttentionLaunch,
 };
 #[cfg(test)]
 pub(crate) use kernels::{RaggedAttentionLaunch, RaggedShortConvLaunch};

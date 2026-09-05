@@ -2130,7 +2130,9 @@ impl Engine {
                 let predictions = self.runtime.download(&predictions_gpu)?;
 
                 let mut num_draft_accepted = 0;
-                while num_draft_accepted < k && predictions[num_draft_accepted] == draft[num_draft_accepted] {
+                while num_draft_accepted < k
+                    && predictions[num_draft_accepted] == draft[num_draft_accepted]
+                {
                     num_draft_accepted += 1;
                 }
                 speculative_accepted_tokens += num_draft_accepted;

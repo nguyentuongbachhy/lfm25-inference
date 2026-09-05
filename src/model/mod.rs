@@ -14,9 +14,9 @@ pub(crate) use evaluation::{HiddenCapture, LogitMetricAccumulator, PropagationAc
 pub use evaluation::{LogitDistributionMetrics, PropagationPointMetrics};
 pub use fp8_analysis::Fp8GemmErrorReport;
 pub(crate) use fp8_analysis::characterize_gemm_site;
+pub(crate) use lfm2::{BatchModelCache, RaggedBatchInput};
 #[allow(unused_imports)]
 pub use lfm2::{Lfm2Model, SpeculativeCheckpoint};
-pub(crate) use lfm2::{BatchModelCache, RaggedBatchInput};
 pub(crate) use prefix::ConvCheckpointPool;
 pub use profile::{DecodeProfileMode, DecodeProfileReport};
 pub(crate) use profile::{ModelProfileRecorder, ProfileRegion, profiled};
