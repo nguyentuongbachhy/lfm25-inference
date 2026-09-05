@@ -98,6 +98,30 @@ pub(crate) fn silu_mul_packed_bf16_to_e4m3_into(
     Ok(())
 }
 
+pub fn silu_mul_packed_bf16_to_e4m3(
+    runtime: &CudaRuntime,
+    packed: &Tensor<bf16>,
+    scale: f32,
+) -> Result<Tensor<u8>> {
+    ensure!(
+        packed.rank() >= 2,
+        "packed silu_mul FP8 fusion expects rank >= 2, got {:?}",
+        packed.dims()
+    );
+    let packed_width = packed.dims()[packed.rank() - 1];
+    ensure!(
+        packed_width > 0 && packed_width.is_multiple_of(2),
+        "packed silu_mul FP8 fusion last dimension must be positive and even"
+    );
+    let intermediate_size = packed_width / 2;
+    let mut output_dims = packed.dims().to_vec();
+    let last = output_dims.len() - 1;
+    output_dims[last] = intermediate_size;
+    let mut out = runtime.alloc_fp8(Shape::new(output_dims))?;
+    silu_mul_packed_bf16_to_e4m3_into(runtime, packed, &mut out, scale)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;

@@ -48,6 +48,8 @@ pub struct EngineConfig {
     pub decode_profile_warmup_steps: usize,
     pub decode_profile_steps: usize,
     pub fused_rms_fp8: bool,
+    pub fused_swiglu_fp8: bool,
+    pub metadata_scratch: bool,
 }
 
 impl Default for EngineConfig {
@@ -58,6 +60,8 @@ impl Default for EngineConfig {
             decode_profile_warmup_steps: 4,
             decode_profile_steps: 128,
             fused_rms_fp8: true,
+            fused_swiglu_fp8: true,
+            metadata_scratch: false,
         }
     }
 }
@@ -768,6 +772,8 @@ impl Engine {
         let tokenizer = Lfm2Tokenizer::from_model_dir(model_dir)?;
         let mut model = Lfm2Model::load(&runtime, model_dir)?;
         model.set_fused_rms_fp8_enabled(config.fused_rms_fp8);
+        model.set_fused_swiglu_fp8_enabled(config.fused_swiglu_fp8);
+        model.set_metadata_scratch_enabled(config.metadata_scratch);
         Ok(Self {
             runtime,
             model,
@@ -783,11 +789,22 @@ impl Engine {
         self.model.set_fused_rms_fp8_enabled(enabled);
     }
 
+    #[allow(dead_code)]
+    pub fn set_fused_swiglu_fp8_enabled(&mut self, enabled: bool) {
+        self.config.fused_swiglu_fp8 = enabled;
+        self.model.set_fused_swiglu_fp8_enabled(enabled);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_metadata_scratch_enabled(&mut self, enabled: bool) {
+        self.config.metadata_scratch = enabled;
+        self.model.set_metadata_scratch_enabled(enabled);
+    }
+
     pub fn install_fp8_policy(&mut self, policy_path: &Path) -> Result<usize> {
         let policy = load_fp8_policy(policy_path)?;
         let enabled = self.model.install_fp8_policy(&self.runtime, &policy)?;
         ensure!(enabled > 0, "FP8 policy enables no runtime sites");
-        self.model.prepare_batched_fp8(&self.runtime, 8)?;
         Ok(enabled)
     }
 

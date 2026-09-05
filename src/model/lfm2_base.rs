@@ -157,10 +157,19 @@ pub struct SpeculativeCheckpoint {
     pub(crate) conv_histories: Vec<(usize, Tensor<bf16>)>,
 }
 
+pub(crate) struct StepMetadataScratch {
+    pub(crate) tokens: Tensor<u32>,
+    pub(crate) positions: Tensor<u32>,
+    pub(crate) slots: Tensor<i64>,
+    pub(crate) positions_host: Vec<u32>,
+    pub(crate) slots_host: Vec<i64>,
+}
+
 pub struct ModelCache {
     layers: Vec<LayerCache>,
     sequence_length: usize,
     capacity: usize,
+    metadata_scratch: Option<StepMetadataScratch>,
 }
 
 enum BatchLayerCache {
@@ -520,11 +529,19 @@ impl ModelCache {
                 ]))?));
             }
         }
+        let metadata_scratch = Some(StepMetadataScratch {
+            tokens: runtime.alloc_uninit::<u32>(Shape::new([16]))?,
+            positions: runtime.alloc_uninit::<u32>(Shape::new([16]))?,
+            slots: runtime.alloc_uninit::<i64>(Shape::new([16]))?,
+            positions_host: Vec::with_capacity(16),
+            slots_host: Vec::with_capacity(16),
+        });
 
         Ok(Self {
             layers,
             sequence_length: 0,
             capacity,
+            metadata_scratch,
         })
     }
 
@@ -554,6 +571,8 @@ pub struct Lfm2Model {
     inv_freq: Tensor<f32>,
     decode_fp8_enabled: bool,
     fused_rms_fp8_enabled: bool,
+    fused_swiglu_fp8_enabled: bool,
+    metadata_scratch_enabled: bool,
     maximum_fp8_batch: usize,
 }
 
@@ -717,6 +736,12 @@ impl Lfm2Model {
             decode_fp8_enabled: false,
             fused_rms_fp8_enabled: std::env::var("LFM25_FUSED_RMS_FP8")
                 .map(|v| v != "0" && v != "false")
+                .unwrap_or(true),
+            fused_swiglu_fp8_enabled: std::env::var("LFM25_FUSED_SWIGLU_FP8")
+                .map(|v| v != "0" && v != "false")
+                .unwrap_or(true),
+            metadata_scratch_enabled: std::env::var("LFM25_METADATA_SCRATCH")
+                .map(|v| v != "0" && v != "false")
                 .unwrap_or(false),
             maximum_fp8_batch: 1,
         })
@@ -737,6 +762,24 @@ impl Lfm2Model {
 
     pub(crate) fn set_fused_rms_fp8_enabled(&mut self, enabled: bool) {
         self.fused_rms_fp8_enabled = enabled;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn fused_swiglu_fp8_enabled(&self) -> bool {
+        self.fused_swiglu_fp8_enabled
+    }
+
+    pub(crate) fn set_fused_swiglu_fp8_enabled(&mut self, enabled: bool) {
+        self.fused_swiglu_fp8_enabled = enabled;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn metadata_scratch_enabled(&self) -> bool {
+        self.metadata_scratch_enabled
+    }
+
+    pub(crate) fn set_metadata_scratch_enabled(&mut self, enabled: bool) {
+        self.metadata_scratch_enabled = enabled;
     }
 
     pub(crate) fn maximum_fp8_batch(&self) -> usize {
@@ -1168,15 +1211,41 @@ impl Lfm2Model {
 
         let use_fp8_decode =
             self.decode_fp8_enabled && start > 0 && num_tokens <= self.maximum_fp8_batch;
-        let positions_host: Vec<u32> = (start..next_sequence_length)
-            .map(|position| u32::try_from(position).context("position exceeds u32"))
-            .collect::<Result<_>>()?;
-        let slots_host: Vec<i64> = (start..next_sequence_length)
-            .map(|slot| i64::try_from(slot).context("slot exceeds i64"))
-            .collect::<Result<_>>()?;
-        let tokens = runtime.upload(token_ids, Shape::new([num_tokens]))?;
-        let positions = runtime.upload(&positions_host, Shape::new([num_tokens]))?;
-        let slots = runtime.upload(&slots_host, Shape::new([num_tokens]))?;
+
+        let fallback_metadata;
+        let mut scratch = if self.metadata_scratch_enabled && num_tokens <= 16 {
+            cache.metadata_scratch.take()
+        } else {
+            None
+        };
+
+        let (tokens, positions, slots) = if let Some(ref mut s) = scratch {
+            s.positions_host.clear();
+            s.slots_host.clear();
+            for position in start..next_sequence_length {
+                s.positions_host.push(u32::try_from(position).context("position exceeds u32")?);
+                s.slots_host.push(i64::try_from(position).context("slot exceeds i64")?);
+            }
+            s.tokens.set_logical_shape(Shape::new([num_tokens]))?;
+            s.positions.set_logical_shape(Shape::new([num_tokens]))?;
+            s.slots.set_logical_shape(Shape::new([num_tokens]))?;
+            runtime.upload_prefix(token_ids, &mut s.tokens)?;
+            runtime.upload_prefix(&s.positions_host, &mut s.positions)?;
+            runtime.upload_prefix(&s.slots_host, &mut s.slots)?;
+            (&s.tokens, &s.positions, &s.slots)
+        } else {
+            let positions_host: Vec<u32> = (start..next_sequence_length)
+                .map(|position| u32::try_from(position).context("position exceeds u32"))
+                .collect::<Result<_>>()?;
+            let slots_host: Vec<i64> = (start..next_sequence_length)
+                .map(|slot| i64::try_from(slot).context("slot exceeds i64"))
+                .collect::<Result<_>>()?;
+            let t = runtime.upload(token_ids, Shape::new([num_tokens]))?;
+            let p = runtime.upload(&positions_host, Shape::new([num_tokens]))?;
+            let sl = runtime.upload(&slots_host, Shape::new([num_tokens]))?;
+            fallback_metadata = (t, p, sl);
+            (&fallback_metadata.0, &fallback_metadata.1, &fallback_metadata.2)
+        };
 
         let mut hidden = ops::embedding_bf16(runtime, &tokens, &self.weights.embedding)?;
         let mut normalized = ops::rms_norm_bf16(
@@ -1357,6 +1426,9 @@ impl Lfm2Model {
         }?;
 
         cache.sequence_length = next_sequence_length;
+        if let Some(s) = scratch {
+            cache.metadata_scratch = Some(s);
+        }
         let checkpoint = SpeculativeCheckpoint {
             start_sequence_length: start,
             num_tokens,
@@ -1604,15 +1676,40 @@ impl Lfm2Model {
         let start = cache.sequence_length;
         let contiguous_prefill = start == 0 && num_tokens > 1;
         let use_fp8_decode = self.decode_fp8_enabled && start > 0 && num_tokens == 1;
-        let positions_host: Vec<u32> = (start..next_sequence_length)
-            .map(|position| u32::try_from(position).context("position exceeds u32"))
-            .collect::<Result<_>>()?;
-        let slots_host: Vec<i64> = (start..next_sequence_length)
-            .map(|slot| i64::try_from(slot).context("slot exceeds i64"))
-            .collect::<Result<_>>()?;
-        let tokens = runtime.upload(token_ids, Shape::new([num_tokens]))?;
-        let positions = runtime.upload(&positions_host, Shape::new([num_tokens]))?;
-        let slots = runtime.upload(&slots_host, Shape::new([num_tokens]))?;
+        let fallback_metadata;
+        let mut scratch = if self.metadata_scratch_enabled && num_tokens <= 16 {
+            cache.metadata_scratch.take()
+        } else {
+            None
+        };
+
+        let (tokens, positions, slots) = if let Some(ref mut s) = scratch {
+            s.positions_host.clear();
+            s.slots_host.clear();
+            for position in start..next_sequence_length {
+                s.positions_host.push(u32::try_from(position).context("position exceeds u32")?);
+                s.slots_host.push(i64::try_from(position).context("slot exceeds i64")?);
+            }
+            s.tokens.set_logical_shape(Shape::new([num_tokens]))?;
+            s.positions.set_logical_shape(Shape::new([num_tokens]))?;
+            s.slots.set_logical_shape(Shape::new([num_tokens]))?;
+            runtime.upload_prefix(token_ids, &mut s.tokens)?;
+            runtime.upload_prefix(&s.positions_host, &mut s.positions)?;
+            runtime.upload_prefix(&s.slots_host, &mut s.slots)?;
+            (&s.tokens, &s.positions, &s.slots)
+        } else {
+            let positions_host: Vec<u32> = (start..next_sequence_length)
+                .map(|position| u32::try_from(position).context("position exceeds u32"))
+                .collect::<Result<_>>()?;
+            let slots_host: Vec<i64> = (start..next_sequence_length)
+                .map(|slot| i64::try_from(slot).context("slot exceeds i64"))
+                .collect::<Result<_>>()?;
+            let t = runtime.upload(token_ids, Shape::new([num_tokens]))?;
+            let p = runtime.upload(&positions_host, Shape::new([num_tokens]))?;
+            let sl = runtime.upload(&slots_host, Shape::new([num_tokens]))?;
+            fallback_metadata = (t, p, sl);
+            (&fallback_metadata.0, &fallback_metadata.1, &fallback_metadata.2)
+        };
 
         let mut hidden = ops::embedding_bf16(runtime, &tokens, &self.weights.embedding)?;
         let mut normalized = profiled(
@@ -1908,6 +2005,9 @@ impl Lfm2Model {
             },
         )?;
         cache.sequence_length = next_sequence_length;
+        if let Some(s) = scratch {
+            cache.metadata_scratch = Some(s);
+        }
         Ok(logits)
     }
 
@@ -2012,26 +2112,63 @@ impl Lfm2Model {
                 )
             },
         )?;
-        let activated = profiled(
-            runtime,
-            profile.as_deref_mut(),
-            ProfileRegion::MlpSilu,
-            || ops::silu_mul_packed_bf16(runtime, &gate_up),
-        )?;
-        if let Some(calibration) = calibration {
-            calibration.observe(
+
+        let ffn_down_weight = &weights.feed_forward.down;
+        let use_fused_swiglu_fp8 = self.fused_swiglu_fp8_enabled
+            && use_fp8
+            && ffn_down_weight.fp8.is_some()
+            && calibration.is_none();
+
+        if use_fused_swiglu_fp8 {
+            let fp8 = ffn_down_weight.fp8.as_ref().unwrap();
+            let activated_fp8 = profiled(
                 runtime,
-                format!("layers.{layer}.mlp.down.input"),
-                CalibrationTensorKind::Activation,
-                &activated,
+                profile.as_deref_mut(),
+                ProfileRegion::MlpSilu,
+                || {
+                    ops::silu_mul_packed_bf16_to_e4m3(
+                        runtime,
+                        &gate_up,
+                        fp8.activation_scale.quantize_multiplier,
+                    )
+                },
             )?;
+            profiled(
+                runtime,
+                profile,
+                ProfileRegion::MlpDownGemm,
+                || {
+                    ops::linear_fp8_e4m3_from_fp8(
+                        runtime,
+                        &activated_fp8,
+                        &fp8.data,
+                        fp8.activation_scale,
+                        fp8.weight_scale,
+                    )
+                },
+            )
+        } else {
+            let activated = profiled(
+                runtime,
+                profile.as_deref_mut(),
+                ProfileRegion::MlpSilu,
+                || ops::silu_mul_packed_bf16(runtime, &gate_up),
+            )?;
+            if let Some(calibration) = calibration {
+                calibration.observe(
+                    runtime,
+                    format!("layers.{layer}.mlp.down.input"),
+                    CalibrationTensorKind::Activation,
+                    &activated,
+                )?;
+            }
+            profiled(
+                runtime,
+                profile,
+                ProfileRegion::MlpDownGemm,
+                || linear_dispatch(runtime, &activated, ffn_down_weight, use_fp8),
+            )
         }
-        profiled(
-            runtime,
-            profile,
-            ProfileRegion::MlpDownGemm,
-            || linear_dispatch(runtime, &activated, &weights.feed_forward.down, use_fp8),
-        )
     }
 
     fn attention(

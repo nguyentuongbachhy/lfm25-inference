@@ -63,6 +63,8 @@ struct Args {
     hardware_profile: Option<PathBuf>,
     speculative_draft: usize,
     fused_rms_fp8: bool,
+    fused_swiglu_fp8: bool,
+    metadata_scratch: bool,
 }
 
 impl Args {
@@ -106,6 +108,12 @@ impl Args {
         let mut fused_rms_fp8 = env::var("LFM25_FUSED_RMS_FP8")
             .map(|v| v != "0" && v != "false")
             .unwrap_or(true);
+        let mut fused_swiglu_fp8 = env::var("LFM25_FUSED_SWIGLU_FP8")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true);
+        let mut metadata_scratch = env::var("LFM25_METADATA_SCRATCH")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(false);
         let mut args = env::args().skip(1);
 
         while let Some(argument) = args.next() {
@@ -277,6 +285,18 @@ impl Args {
                 "--no-fused-rms-fp8" => {
                     fused_rms_fp8 = false;
                 }
+                "--fused-swiglu-fp8" => {
+                    fused_swiglu_fp8 = true;
+                }
+                "--no-fused-swiglu-fp8" => {
+                    fused_swiglu_fp8 = false;
+                }
+                "--metadata-scratch" => {
+                    metadata_scratch = true;
+                }
+                "--no-metadata-scratch" => {
+                    metadata_scratch = false;
+                }
                 "-h" | "--help" => {
                     println!("{}", usage());
                     std::process::exit(0);
@@ -362,6 +382,8 @@ impl Args {
             hardware_profile,
             speculative_draft,
             fused_rms_fp8,
+            fused_swiglu_fp8,
+            metadata_scratch,
         })
     }
 }
@@ -383,7 +405,7 @@ fn write_json(path: &std::path::Path, value: &impl serde::Serialize, label: &str
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --fused-rms-fp8\n  --no-fused-rms-fp8\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
+    "Usage:\n  llm-inference --prompt TEXT [OPTIONS]\n  llm-inference --serve ADDRESS --hardware-profile PATH [OPTIONS]\n  llm-inference --calibrate-fp8 CORPUS --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --evaluate-fp8 POLICY --fp8-eval-corpus CORPUS [OPTIONS]\n  llm-inference --benchmark-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-batched-fp8 POLICY [OPTIONS]\n  llm-inference --benchmark-serving OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-hardware OUTPUT.json [OPTIONS]\n  llm-inference --benchmark-load OUTPUT.json --hardware-profile PATH [OPTIONS]\n\nOptions:\n  --model PATH\n  --max-new-tokens N\n  --speculative-draft N\n  --fused-rms-fp8\n  --no-fused-rms-fp8\n  --fused-swiglu-fp8\n  --no-fused-swiglu-fp8\n  --metadata-scratch\n  --no-metadata-scratch\n  --device N\n  --page-size 16|32\n  --hardware-profile PATH\n  --fp8-policy PATH\n  --benchmark-output PATH\n  --benchmark-pairs 20..30\n  --evaluation-output PATH\n  --profile-decode coarse|detailed\n  --profile-warmup-steps N\n  --profile-steps N\n  --profile-output PATH\n  --temperature FLOAT\n  --top-k N\n  --repetition-penalty FLOAT\n  --seed N\n  --calibration-output PATH\n  --calibration-max-sequences N\n  --calibration-max-tokens N\n  --fp8-eval-corpus PATH\n  --fp8-eval-sequences N\n  --fp8-eval-max-tokens N"
 }
 
 fn main() -> Result<()> {
@@ -398,6 +420,8 @@ fn main() -> Result<()> {
             decode_profile_warmup_steps: args.decode_profile_warmup_steps,
             decode_profile_steps: args.decode_profile_steps,
             fused_rms_fp8: args.fused_rms_fp8,
+            fused_swiglu_fp8: args.fused_swiglu_fp8,
+            metadata_scratch: args.metadata_scratch,
         },
     )?;
     if let Some(policy) = &args.fp8_policy {
