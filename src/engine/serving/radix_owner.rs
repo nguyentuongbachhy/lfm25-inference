@@ -347,13 +347,29 @@ pub(super) fn run_owner_radix(
             state.generated_tokens += 1;
             let eos = state.stop_on_eos && token == engine.model.config().eos_token_id;
             let length = state.generated_tokens >= state.maximum_new_tokens;
-            if !eos && !length {
+            let mut client_dropped = false;
+            if let Some(streamer) = &state.token_stream
+                && !eos
+                && streamer.send(token).is_err()
+            {
+                client_dropped = true;
+            }
+            if !eos && !length && !client_dropped {
                 request.push_token(token, now_us, config.scheduler.tpot_slo_us)?;
             } else {
                 if !eos {
                     request.push_token(token, now_us, config.scheduler.tpot_slo_us)?;
                 }
-                finished.push((slot, if eos { "stop" } else { "length" }));
+                finished.push((
+                    slot,
+                    if client_dropped {
+                        "abort"
+                    } else if eos {
+                        "stop"
+                    } else {
+                        "length"
+                    },
+                ));
             }
         }
         for (slot, reason) in finished.drain(..) {
@@ -684,6 +700,7 @@ fn admit_request_radix(
 
     let state = &mut responses[slot.0 as usize];
     state.response = Some(request.response);
+    state.token_stream = request.token_stream;
     state.arrived = request.arrived;
     state.first_token_ready = None;
     state.last_token_ready = None;

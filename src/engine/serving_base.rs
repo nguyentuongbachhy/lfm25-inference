@@ -54,6 +54,7 @@ pub struct PreparedRequest {
     pub sampling: SamplingConfig,
     pub arrived: Instant,
     pub response: oneshot::Sender<Result<ServingCompletion, ServingError>>,
+    pub token_stream: Option<mpsc::UnboundedSender<u32>>,
 }
 
 #[derive(Debug)]
@@ -133,6 +134,7 @@ impl ServingHandle {
 
 struct ResponseState {
     response: Option<oneshot::Sender<Result<ServingCompletion, ServingError>>>,
+    token_stream: Option<mpsc::UnboundedSender<u32>>,
     arrived: Instant,
     first_token_ready: Option<Instant>,
     last_token_ready: Option<Instant>,
@@ -159,6 +161,7 @@ impl ResponseState {
     fn vacant(maximum_tokens: usize) -> Self {
         Self {
             response: None,
+            token_stream: None,
             arrived: Instant::now(),
             first_token_ready: None,
             last_token_ready: None,
@@ -437,6 +440,7 @@ fn finish_request(
             metrics,
         }));
     }
+    drop(state.token_stream.take());
     cache.release(&engine.runtime, slot.0 as usize)?;
     slots.release(slot)?;
     Ok(())

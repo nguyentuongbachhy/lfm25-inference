@@ -811,11 +811,166 @@ pub(crate) fn completion_sse_stream(
 }
 
 fn append_sse_event(buffer: &mut String, value: &impl Serialize) {
-    if let Ok(json) = serde_json::to_string(value) {
-        buffer.push_str("data: ");
-        buffer.push_str(&json);
-        buffer.push_str("\n\n");
+    buffer.push_str(&format_sse_event(value));
+}
+
+pub(crate) fn format_sse_chat_role_chunk(id: &str, model: &str, created: u64) -> String {
+    let chunk = ChatChunkResponse {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChatChunkChoice {
+            index: 0,
+            delta: ChatChunkDelta {
+                role: Some("assistant"),
+                content: Some(String::new()),
+            },
+            logprobs: None,
+            finish_reason: None,
+        }],
+        usage: None,
+    };
+    format_sse_event(&chunk)
+}
+
+pub(crate) fn format_sse_chat_content_chunk(
+    id: &str,
+    model: &str,
+    created: u64,
+    delta: &str,
+) -> String {
+    let chunk = ChatChunkResponse {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChatChunkChoice {
+            index: 0,
+            delta: ChatChunkDelta {
+                role: None,
+                content: Some(delta.to_string()),
+            },
+            logprobs: None,
+            finish_reason: None,
+        }],
+        usage: None,
+    };
+    format_sse_event(&chunk)
+}
+
+pub(crate) fn format_sse_chat_finish_chunk(
+    id: &str,
+    model: &str,
+    created: u64,
+    finish_reason: &'static str,
+    usage: Usage,
+) -> String {
+    let chunk = ChatChunkResponse {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChatChunkChoice {
+            index: 0,
+            delta: ChatChunkDelta {
+                role: None,
+                content: None,
+            },
+            logprobs: None,
+            finish_reason: Some(finish_reason),
+        }],
+        usage: Some(usage),
+    };
+    format_sse_event(&chunk)
+}
+
+pub(crate) fn format_sse_text_content_chunk(
+    id: &str,
+    model: &str,
+    created: u64,
+    delta: &str,
+) -> String {
+    let chunk = TextChunkResponse {
+        id: id.to_string(),
+        object: "text_completion",
+        created,
+        model: model.to_string(),
+        choices: vec![TextChunkChoice {
+            index: 0,
+            text: delta.to_string(),
+            logprobs: None,
+            finish_reason: None,
+        }],
+        usage: None,
+    };
+    format_sse_event(&chunk)
+}
+
+pub(crate) fn format_sse_text_finish_chunk(
+    id: &str,
+    model: &str,
+    created: u64,
+    finish_reason: &'static str,
+    usage: Usage,
+) -> String {
+    let chunk = TextChunkResponse {
+        id: id.to_string(),
+        object: "text_completion",
+        created,
+        model: model.to_string(),
+        choices: vec![TextChunkChoice {
+            index: 0,
+            text: String::new(),
+            logprobs: None,
+            finish_reason: Some(finish_reason),
+        }],
+        usage: Some(usage),
+    };
+    format_sse_event(&chunk)
+}
+
+pub(crate) fn format_sse_event(value: &impl Serialize) -> String {
+    match serde_json::to_string(value) {
+        Ok(json) => format!("data: {json}\n\n"),
+        Err(_) => String::new(),
     }
+}
+
+pub(crate) fn check_stop_match(text: &str, stop_words: &[&str]) -> Option<usize> {
+    let mut earliest = None;
+    for &word in stop_words {
+        if word.is_empty() {
+            continue;
+        }
+        if let Some(pos) = text.find(word) {
+            match earliest {
+                None => earliest = Some(pos),
+                Some(p) if pos < p => earliest = Some(pos),
+                _ => {}
+            }
+        }
+    }
+    earliest
+}
+
+pub(crate) fn longest_stop_prefix_len(text: &str, stop_words: &[&str]) -> usize {
+    let mut max_prefix = 0;
+    for &word in stop_words {
+        if word.is_empty() {
+            continue;
+        }
+        let check_len = text.len().min(word.len());
+        for len in (1..=check_len).rev() {
+            if text.ends_with(&word[..len]) {
+                if len > max_prefix {
+                    max_prefix = len;
+                }
+                break;
+            }
+        }
+    }
+    max_prefix
 }
 
 fn extract_max_tokens(
@@ -993,7 +1148,7 @@ fn apply_stop_conditions(
     (cleaned.to_string(), original_finish_reason)
 }
 
-fn current_timestamp() -> u64 {
+pub(crate) fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1249,5 +1404,48 @@ mod tests {
         // Extra conversational fluff around json
         let raw4 = "Here is the response:\n{\"answerable\": true}\nHope this helps!";
         assert_eq!(clean_structured_output(raw4), "{\"answerable\": true}");
+    }
+
+    #[test]
+    fn test_sse_chunk_formatters() {
+        let created = 1720000000;
+        let role_chunk = format_sse_chat_role_chunk("chatcmpl-test", "test-model", created);
+        assert!(role_chunk.starts_with("data: "));
+        assert!(role_chunk.ends_with("\n\n"));
+        assert!(role_chunk.contains("\"role\":\"assistant\""));
+        assert!(role_chunk.contains("\"content\":\"\""));
+
+        let content_chunk =
+            format_sse_chat_content_chunk("chatcmpl-test", "test-model", created, "Xin chào");
+        assert!(content_chunk.starts_with("data: "));
+        assert!(content_chunk.contains("\"content\":\"Xin chào\""));
+
+        let usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        };
+        let finish_chunk =
+            format_sse_chat_finish_chunk("chatcmpl-test", "test-model", created, "stop", usage);
+        assert!(finish_chunk.contains("\"finish_reason\":\"stop\""));
+        assert!(finish_chunk.contains("\"completion_tokens\":5"));
+
+        let text_content = format_sse_text_content_chunk("cmpl-test", "test-model", created, "Hello");
+        assert!(text_content.contains("\"text\":\"Hello\""));
+    }
+
+    #[test]
+    fn test_stop_matching_helpers() {
+        let stop_words = vec!["stop", "end of sequence", "###"];
+        assert_eq!(
+            check_stop_match("here is the text stop now", &stop_words),
+            Some(17)
+        );
+        assert_eq!(check_stop_match("no matching words here", &stop_words), None);
+
+        // Longest stop prefix testing
+        assert_eq!(longest_stop_prefix_len("prefix end of", &stop_words), 6); // "end of" matches prefix of "end of sequence"
+        assert_eq!(longest_stop_prefix_len("prefix ###", &stop_words), 3);
+        assert_eq!(longest_stop_prefix_len("normal text", &stop_words), 0);
     }
 }

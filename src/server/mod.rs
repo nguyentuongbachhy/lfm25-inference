@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, ensure};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
 };
 
 use crate::{
@@ -164,7 +164,19 @@ async fn handle_connection(
                     is_chat: true,
                     is_structured_json: parsed.is_structured_json,
                 };
-                execute_generation_task(
+                if task.stream && !task.is_structured_json {
+                    return execute_live_streaming_task(
+                        stream,
+                        task,
+                        handle,
+                        tokenizer,
+                        request_ids,
+                        request_started,
+                        tokenization_ms,
+                    )
+                    .await;
+                }
+                let response = execute_generation_task(
                     task,
                     handle,
                     tokenizer,
@@ -172,7 +184,8 @@ async fn handle_connection(
                     request_started,
                     tokenization_ms,
                 )
-                .await
+                .await;
+                return write_response(&mut stream, response).await;
             }
             ("POST", "/v1/completions") | ("POST", "/completions") => {
                 let parsed = match routes::parse_completion(&body, default_model) {
@@ -213,7 +226,19 @@ async fn handle_connection(
                     is_chat: false,
                     is_structured_json: false,
                 };
-                execute_generation_task(
+                if task.stream {
+                    return execute_live_streaming_task(
+                        stream,
+                        task,
+                        handle,
+                        tokenizer,
+                        request_ids,
+                        request_started,
+                        tokenization_ms,
+                    )
+                    .await;
+                }
+                let response = execute_generation_task(
                     task,
                     handle,
                     tokenizer,
@@ -221,7 +246,8 @@ async fn handle_connection(
                     request_started,
                     tokenization_ms,
                 )
-                .await
+                .await;
+                return write_response(&mut stream, response).await;
             }
             _ => routes::error_response(
                 "404 Not Found",
@@ -233,6 +259,310 @@ async fn handle_connection(
         }
     };
     write_response(&mut stream, response).await
+}
+
+async fn write_http_chunk(stream: &mut TcpStream, data: &str) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let header = format!("{:x}\r\n", data.len());
+    stream
+        .write_all(header.as_bytes())
+        .await
+        .context("failed to write HTTP chunk header")?;
+    stream
+        .write_all(data.as_bytes())
+        .await
+        .context("failed to write HTTP chunk payload")?;
+    stream
+        .write_all(b"\r\n")
+        .await
+        .context("failed to write HTTP chunk delimiter")?;
+    stream
+        .flush()
+        .await
+        .context("failed to flush HTTP chunk")?;
+    Ok(())
+}
+
+async fn write_http_chunk_end(stream: &mut TcpStream) -> Result<()> {
+    stream
+        .write_all(b"0\r\n\r\n")
+        .await
+        .context("failed to write HTTP chunk end")?;
+    stream
+        .flush()
+        .await
+        .context("failed to flush HTTP chunk end")?;
+    Ok(())
+}
+
+async fn execute_live_streaming_task(
+    mut stream: TcpStream,
+    task: GenerationTask,
+    handle: ServingHandle,
+    tokenizer: Arc<Lfm2Tokenizer>,
+    request_ids: Arc<AtomicU64>,
+    request_started: Instant,
+    _tokenization_ms: f64,
+) -> Result<()> {
+    let (response_sender, response_receiver) = oneshot::channel();
+    let (token_sender, mut token_receiver) = mpsc::unbounded_channel();
+    let request_id = request_ids.fetch_add(1, Ordering::Relaxed);
+    let prompt_tokens = task.token_ids.len();
+    let prepared = PreparedRequest {
+        request_id,
+        token_ids: task.token_ids,
+        maximum_new_tokens: task.options.max_new_tokens,
+        stop_on_eos: true,
+        sampling: task.options.sampling,
+        arrived: request_started,
+        response: response_sender,
+        token_stream: Some(token_sender),
+    };
+
+    if handle.try_submit(prepared).is_err() {
+        let response = routes::error_response(
+            "503 Service Unavailable",
+            "engine admission queue is full",
+            "server_error",
+            503,
+            None,
+        );
+        return write_response(&mut stream, response).await;
+    }
+
+    let _ = stream.set_nodelay(true);
+    let created = routes::current_timestamp();
+    let req_id_str = if task.is_chat {
+        format!("chatcmpl-{:016x}{:08x}", created, request_id)
+    } else {
+        format!("cmpl-{:016x}{:08x}", created, request_id)
+    };
+
+    let headers = "HTTP/1.1 200 OK\r\n\
+        Content-Type: text/event-stream; charset=utf-8\r\n\
+        Cache-Control: no-cache\r\n\
+        Transfer-Encoding: chunked\r\n\
+        Access-Control-Allow-Origin: *\r\n\
+        Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+        Access-Control-Allow-Headers: *\r\n\
+        Connection: close\r\n\r\n";
+    stream
+        .write_all(headers.as_bytes())
+        .await
+        .context("failed to write streaming HTTP headers")?;
+    stream
+        .flush()
+        .await
+        .context("failed to flush streaming HTTP headers")?;
+
+    if task.is_chat {
+        let role_chunk = routes::format_sse_chat_role_chunk(&req_id_str, &task.model, created);
+        write_http_chunk(&mut stream, &role_chunk).await?;
+    }
+
+    let stop_words: Vec<String> = task
+        .stop
+        .as_ref()
+        .map(|s| s.as_vec().into_iter().map(|w| w.to_string()).collect())
+        .unwrap_or_default();
+    let stop_words_refs: Vec<&str> = stop_words.iter().map(|s| s.as_str()).collect();
+
+    let mut accumulated_tokens = Vec::new();
+    let mut emitted_text = String::new();
+    let mut stopped = false;
+
+    while let Some(token) = token_receiver.recv().await {
+        accumulated_tokens.push(token);
+        let current_text = match tokenizer.decode(&accumulated_tokens) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if current_text.ends_with('\u{FFFD}') {
+            continue;
+        }
+
+        if !stop_words_refs.is_empty() {
+            if let Some(pos) = routes::check_stop_match(&current_text, &stop_words_refs) {
+                let valid = &current_text[..pos];
+                let prefix_len = if valid.starts_with(&emitted_text) {
+                    emitted_text.len()
+                } else {
+                    valid
+                        .char_indices()
+                        .zip(emitted_text.char_indices())
+                        .take_while(|((_, c1), (_, c2))| c1 == c2)
+                        .last()
+                        .map(|((i, c), _)| i + c.len_utf8())
+                        .unwrap_or(0)
+                };
+                if valid.len() > prefix_len {
+                    let delta = &valid[prefix_len..];
+                    let chunk = if task.is_chat {
+                        routes::format_sse_chat_content_chunk(
+                            &req_id_str,
+                            &task.model,
+                            created,
+                            delta,
+                        )
+                    } else {
+                        routes::format_sse_text_content_chunk(
+                            &req_id_str,
+                            &task.model,
+                            created,
+                            delta,
+                        )
+                    };
+                    let _ = write_http_chunk(&mut stream, &chunk).await;
+                    emitted_text.push_str(delta);
+                }
+                stopped = true;
+                break;
+            }
+
+            let hold_len = routes::longest_stop_prefix_len(&current_text, &stop_words_refs);
+            let safe_len = current_text.len().saturating_sub(hold_len);
+            if safe_len > emitted_text.len() {
+                let safe_text = &current_text[..safe_len];
+                let prefix_len = if safe_text.starts_with(&emitted_text) {
+                    emitted_text.len()
+                } else {
+                    safe_text
+                        .char_indices()
+                        .zip(emitted_text.char_indices())
+                        .take_while(|((_, c1), (_, c2))| c1 == c2)
+                        .last()
+                        .map(|((i, c), _)| i + c.len_utf8())
+                        .unwrap_or(0)
+                };
+                if safe_text.len() > prefix_len {
+                    let delta = &safe_text[prefix_len..];
+                    let chunk = if task.is_chat {
+                        routes::format_sse_chat_content_chunk(
+                            &req_id_str,
+                            &task.model,
+                            created,
+                            delta,
+                        )
+                    } else {
+                        routes::format_sse_text_content_chunk(
+                            &req_id_str,
+                            &task.model,
+                            created,
+                            delta,
+                        )
+                    };
+                    if write_http_chunk(&mut stream, &chunk).await.is_err() {
+                        stopped = true;
+                        break;
+                    }
+                    emitted_text.push_str(delta);
+                }
+            }
+        } else {
+            let prefix_len = if current_text.starts_with(&emitted_text) {
+                emitted_text.len()
+            } else {
+                current_text
+                    .char_indices()
+                    .zip(emitted_text.char_indices())
+                    .take_while(|((_, c1), (_, c2))| c1 == c2)
+                    .last()
+                    .map(|((i, c), _)| i + c.len_utf8())
+                    .unwrap_or(0)
+            };
+            if current_text.len() > prefix_len {
+                let delta = &current_text[prefix_len..];
+                let chunk = if task.is_chat {
+                    routes::format_sse_chat_content_chunk(&req_id_str, &task.model, created, delta)
+                } else {
+                    routes::format_sse_text_content_chunk(&req_id_str, &task.model, created, delta)
+                };
+                if write_http_chunk(&mut stream, &chunk).await.is_err() {
+                    stopped = true;
+                    break;
+                }
+                emitted_text.push_str(delta);
+            }
+        }
+    }
+
+    drop(token_receiver);
+
+    let completion = match response_receiver.await {
+        Ok(Ok(c)) => c,
+        _ => {
+            let _ = write_http_chunk_end(&mut stream).await;
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+    };
+
+    if !stopped {
+        let final_text = tokenizer.decode(&accumulated_tokens).unwrap_or_default();
+        let mut cleaned = final_text.as_str();
+        for special in ["<|im_end|>", "<|endoftext|>"] {
+            if let Some(stripped) = cleaned.strip_suffix(special) {
+                cleaned = stripped;
+            }
+        }
+        let prefix_len = if cleaned.starts_with(&emitted_text) {
+            emitted_text.len()
+        } else {
+            cleaned
+                .char_indices()
+                .zip(emitted_text.char_indices())
+                .take_while(|((_, c1), (_, c2))| c1 == c2)
+                .last()
+                .map(|((i, c), _)| i + c.len_utf8())
+                .unwrap_or(0)
+        };
+        if cleaned.len() > prefix_len {
+            let delta = &cleaned[prefix_len..];
+            let chunk = if task.is_chat {
+                routes::format_sse_chat_content_chunk(&req_id_str, &task.model, created, delta)
+            } else {
+                routes::format_sse_text_content_chunk(&req_id_str, &task.model, created, delta)
+            };
+            let _ = write_http_chunk(&mut stream, &chunk).await;
+        }
+    }
+
+    let finish_reason = if stopped {
+        "stop"
+    } else {
+        completion.finish_reason
+    };
+    let completion_tokens = accumulated_tokens.len();
+    let usage = routes::Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+    };
+    let finish_chunk = if task.is_chat {
+        routes::format_sse_chat_finish_chunk(
+            &req_id_str,
+            &task.model,
+            created,
+            finish_reason,
+            usage,
+        )
+    } else {
+        routes::format_sse_text_finish_chunk(
+            &req_id_str,
+            &task.model,
+            created,
+            finish_reason,
+            usage,
+        )
+    };
+    let _ = write_http_chunk(&mut stream, &finish_chunk).await;
+    let _ = write_http_chunk(&mut stream, "data: [DONE]\n\n").await;
+    let _ = write_http_chunk_end(&mut stream).await;
+    let _ = stream.shutdown().await;
+    Ok(())
 }
 
 async fn execute_generation_task(
@@ -253,6 +583,7 @@ async fn execute_generation_task(
         sampling: task.options.sampling,
         arrived: request_started,
         response: response_sender,
+        token_stream: None,
     };
     if handle.try_submit(prepared).is_err() {
         return routes::error_response(

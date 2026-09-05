@@ -268,6 +268,7 @@ fn submit(
         },
         arrived: Instant::now(),
         response,
+        token_stream: None,
     };
     *request_id = request_id.saturating_add(1);
     if handle.try_submit(prepared).is_ok() {
