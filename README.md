@@ -166,7 +166,7 @@ Start the production continuous server on port `8088` (or any custom port):
 
 ```bash
 # Direct binary execution:
-./target/release/lfm25-inference \
+cargo run --release -- \
   --serve 127.0.0.1:8088 \
   --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json
 
