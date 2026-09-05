@@ -11,6 +11,20 @@ use super::{attention::PagedAttentionLaunch, kernel_set::KernelSet};
 const BLOCK_SIZE: u32 = 256;
 pub(crate) const SPLITK_PARTIAL_STRIDE: usize = 66;
 
+pub(crate) struct RaggedAttentionBuffers<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) query: &'a CudaSlice<bf16>,
+    pub(crate) key_cache: &'a CudaSlice<bf16>,
+    pub(crate) value_cache: &'a CudaSlice<bf16>,
+    pub(crate) block_tables: &'a CudaSlice<u32>,
+    pub(crate) request_slots: &'a CudaSlice<u32>,
+    pub(crate) position_ids: &'a CudaSlice<u32>,
+    pub(crate) output: &'a CudaSlice<bf16>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_pages: usize,
+    pub(crate) block_table_stride: usize,
+}
+
 pub(crate) struct FastRaggedAttentionLaunch<'a> {
     pub(crate) page_size: usize,
     pub(crate) query: &'a CudaSlice<bf16>,
@@ -23,6 +37,24 @@ pub(crate) struct FastRaggedAttentionLaunch<'a> {
     pub(crate) num_tokens: usize,
     pub(crate) num_pages: usize,
     pub(crate) block_table_stride: usize,
+}
+
+impl<'a> FastRaggedAttentionLaunch<'a> {
+    fn buffers(&self) -> RaggedAttentionBuffers<'_> {
+        RaggedAttentionBuffers {
+            page_size: self.page_size,
+            query: self.query,
+            key_cache: self.key_cache,
+            value_cache: self.value_cache,
+            block_tables: self.block_tables,
+            request_slots: self.request_slots,
+            position_ids: self.position_ids,
+            output: self.output,
+            num_tokens: self.num_tokens,
+            num_pages: self.num_pages,
+            block_table_stride: self.block_table_stride,
+        }
+    }
 }
 
 pub(crate) struct SplitKRaggedAttentionLaunch<'a> {
@@ -39,6 +71,24 @@ pub(crate) struct SplitKRaggedAttentionLaunch<'a> {
     pub(crate) num_pages: usize,
     pub(crate) block_table_stride: usize,
     pub(crate) num_splits: usize,
+}
+
+impl<'a> SplitKRaggedAttentionLaunch<'a> {
+    fn buffers(&self) -> RaggedAttentionBuffers<'_> {
+        RaggedAttentionBuffers {
+            page_size: self.page_size,
+            query: self.query,
+            key_cache: self.key_cache,
+            value_cache: self.value_cache,
+            block_tables: self.block_tables,
+            request_slots: self.request_slots,
+            position_ids: self.position_ids,
+            output: self.output,
+            num_tokens: self.num_tokens,
+            num_pages: self.num_pages,
+            block_table_stride: self.block_table_stride,
+        }
+    }
 }
 
 pub(crate) struct AsyncAttentionFastKernels {
@@ -211,20 +261,20 @@ impl AsyncAttentionFastKernels {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn validate_ragged_common(
-        page_size: usize,
-        query: &CudaSlice<bf16>,
-        key_cache: &CudaSlice<bf16>,
-        value_cache: &CudaSlice<bf16>,
-        block_tables: &CudaSlice<u32>,
-        request_slots: &CudaSlice<u32>,
-        position_ids: &CudaSlice<u32>,
-        output: &CudaSlice<bf16>,
-        num_tokens: usize,
-        num_pages: usize,
-        block_table_stride: usize,
-    ) -> Result<()> {
+    fn validate_ragged_common(buffers: &RaggedAttentionBuffers<'_>) -> Result<()> {
+        let RaggedAttentionBuffers {
+            page_size,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            request_slots,
+            position_ids,
+            output,
+            num_tokens,
+            num_pages,
+            block_table_stride,
+        } = *buffers;
         ensure!(num_tokens > 0, "fast-exp ragged attention requires tokens");
         ensure!(
             num_pages > 0,
@@ -286,6 +336,7 @@ impl AsyncAttentionFastKernels {
         stream: &CudaStream,
         launch: FastRaggedAttentionLaunch<'_>,
     ) -> Result<()> {
+        Self::validate_ragged_common(&launch.buffers())?;
         let FastRaggedAttentionLaunch {
             page_size,
             query,
@@ -299,19 +350,6 @@ impl AsyncAttentionFastKernels {
             num_pages,
             block_table_stride,
         } = launch;
-        Self::validate_ragged_common(
-            page_size,
-            query,
-            key_cache,
-            value_cache,
-            block_tables,
-            request_slots,
-            position_ids,
-            output,
-            num_tokens,
-            num_pages,
-            block_table_stride,
-        )?;
         let kernel = match page_size {
             16 => &self.ragged_ps16,
             32 => &self.ragged_ps32,
@@ -345,6 +383,7 @@ impl AsyncAttentionFastKernels {
         stream: &CudaStream,
         launch: SplitKRaggedAttentionLaunch<'_>,
     ) -> Result<()> {
+        Self::validate_ragged_common(&launch.buffers())?;
         let SplitKRaggedAttentionLaunch {
             page_size,
             query,
@@ -360,19 +399,6 @@ impl AsyncAttentionFastKernels {
             block_table_stride,
             num_splits,
         } = launch;
-        Self::validate_ragged_common(
-            page_size,
-            query,
-            key_cache,
-            value_cache,
-            block_tables,
-            request_slots,
-            position_ids,
-            output,
-            num_tokens,
-            num_pages,
-            block_table_stride,
-        )?;
         ensure!(
             (2..=8).contains(&num_splits),
             "split-K ragged attention requires 2..=8 splits"

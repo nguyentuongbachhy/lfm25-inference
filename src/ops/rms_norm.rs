@@ -82,7 +82,6 @@ pub fn residual_rms_norm_bf16(
     Ok((residual_out, normalized_out))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn residual_rms_norm_bf16_into(
     runtime: &CudaRuntime,
     residual: &Tensor<bf16>,
@@ -133,17 +132,29 @@ pub(crate) fn residual_rms_norm_bf16_into(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct FusedResidualRmsNormFp8Args<'a> {
+    pub residual: &'a Tensor<bf16>,
+    pub update: &'a Tensor<bf16>,
+    pub weight: &'a Tensor<bf16>,
+    pub eps: f32,
+    pub quant_scale: f32,
+    pub residual_out: &'a mut Tensor<bf16>,
+    pub normalized_fp8_out: &'a mut Tensor<u8>,
+}
+
 pub(crate) fn residual_rms_norm_bf16_to_e4m3_into(
     runtime: &CudaRuntime,
-    residual: &Tensor<bf16>,
-    update: &Tensor<bf16>,
-    weight: &Tensor<bf16>,
-    eps: f32,
-    quant_scale: f32,
-    residual_out: &mut Tensor<bf16>,
-    normalized_fp8_out: &mut Tensor<u8>,
+    args: FusedResidualRmsNormFp8Args<'_>,
 ) -> Result<()> {
+    let FusedResidualRmsNormFp8Args {
+        residual,
+        update,
+        weight,
+        eps,
+        quant_scale,
+        residual_out,
+        normalized_fp8_out,
+    } = args;
     ensure!(
         residual.shape() == update.shape(),
         "fused residual RMSNorm shape mismatch: residual={:?}, update={:?}",
@@ -279,13 +290,15 @@ mod fused_tests {
         let mut fused_fp8 = runtime.alloc_fp8(Shape::new([rows, hidden]))?;
         residual_rms_norm_bf16_to_e4m3_into(
             &runtime,
-            &residual,
-            &update,
-            &weight,
-            1e-5,
-            quant_scale,
-            &mut fused_sum,
-            &mut fused_fp8,
+            FusedResidualRmsNormFp8Args {
+                residual: &residual,
+                update: &update,
+                weight: &weight,
+                eps: 1e-5,
+                quant_scale,
+                residual_out: &mut fused_sum,
+                normalized_fp8_out: &mut fused_fp8,
+            },
         )?;
 
         assert_eq!(

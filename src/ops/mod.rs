@@ -57,7 +57,8 @@ pub(crate) use qk_postprocess::{
 };
 pub use rms_norm::{residual_rms_norm_bf16, rms_norm_bf16};
 pub(crate) use rms_norm::{
-    residual_rms_norm_bf16_into, residual_rms_norm_bf16_to_e4m3_into, rms_norm_bf16_into,
+    FusedResidualRmsNormFp8Args, residual_rms_norm_bf16_into, residual_rms_norm_bf16_to_e4m3_into,
+    rms_norm_bf16_into,
 };
 pub use rope::rope_qk_bf16_inplace;
 pub(crate) use sampling_dispatch::argmax_rows_bf16_into;

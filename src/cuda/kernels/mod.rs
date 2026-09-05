@@ -23,7 +23,9 @@ use cudarc::driver::CudaContext;
 use attention::AttentionKernels;
 #[cfg(test)]
 pub(crate) use attention::RaggedAttentionLaunch;
-pub(crate) use attention::{HybridAttentionLaunch, PagedAttentionLaunch};
+pub(crate) use attention::{
+    HybridAttentionLaunch, PagedAttentionLaunch, SegmentedFlashPrefillLaunch,
+};
 use attention_async_fast::AsyncAttentionFastKernels;
 pub(crate) use attention_async_fast::{FastRaggedAttentionLaunch, SplitKRaggedAttentionLaunch};
 use attention_fused::FusedAttentionKernels;
@@ -39,6 +41,7 @@ use kernel_set::KernelSet;
 use kv_cache::KvCacheKernels;
 pub(crate) use kv_cache::KvCacheWriteLaunch;
 use metadata::MetadataKernels;
+pub(crate) use metadata::ScatterMetadataLaunch;
 use qk_postprocess::QkPostprocessKernels;
 pub(crate) use qk_postprocess::QkPostprocessLaunch;
 use residual_rms_fp8::ResidualRmsFp8Kernels;

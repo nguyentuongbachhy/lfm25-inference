@@ -25,22 +25,35 @@ impl KernelSet for MetadataKernels {
     }
 }
 
+pub(crate) struct ScatterMetadataLaunch<'a> {
+    pub(crate) stream: &'a CudaStream,
+    pub(crate) packed: &'a CudaSlice<u8>,
+    pub(crate) token_ids: &'a mut CudaSlice<u32>,
+    pub(crate) positions: &'a mut CudaSlice<u32>,
+    pub(crate) request_slots: &'a mut CudaSlice<u32>,
+    pub(crate) physical_slots: &'a mut CudaSlice<i64>,
+    pub(crate) segment_offsets: &'a mut CudaSlice<u32>,
+    pub(crate) segment_slots: &'a mut CudaSlice<u32>,
+    pub(crate) output_rows: &'a mut CudaSlice<u32>,
+    pub(crate) num_tokens: usize,
+    pub(crate) num_segments: usize,
+}
+
 impl MetadataKernels {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) unsafe fn launch_scatter(
-        &self,
-        stream: &CudaStream,
-        packed: &CudaSlice<u8>,
-        token_ids: &mut CudaSlice<u32>,
-        positions: &mut CudaSlice<u32>,
-        request_slots: &mut CudaSlice<u32>,
-        physical_slots: &mut CudaSlice<i64>,
-        segment_offsets: &mut CudaSlice<u32>,
-        segment_slots: &mut CudaSlice<u32>,
-        output_rows: &mut CudaSlice<u32>,
-        num_tokens: usize,
-        num_segments: usize,
-    ) -> Result<()> {
+    pub(crate) unsafe fn launch_scatter(&self, launch: ScatterMetadataLaunch<'_>) -> Result<()> {
+        let ScatterMetadataLaunch {
+            stream,
+            packed,
+            token_ids,
+            positions,
+            request_slots,
+            physical_slots,
+            segment_offsets,
+            segment_slots,
+            output_rows,
+            num_tokens,
+            num_segments,
+        } = launch;
         ensure!(num_tokens > 0, "metadata scatter requires tokens");
         ensure!(num_segments > 0, "metadata scatter requires segments");
         ensure!(

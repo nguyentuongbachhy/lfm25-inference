@@ -783,24 +783,6 @@ impl Engine {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn set_fused_rms_fp8_enabled(&mut self, enabled: bool) {
-        self.config.fused_rms_fp8 = enabled;
-        self.model.set_fused_rms_fp8_enabled(enabled);
-    }
-
-    #[allow(dead_code)]
-    pub fn set_fused_swiglu_fp8_enabled(&mut self, enabled: bool) {
-        self.config.fused_swiglu_fp8 = enabled;
-        self.model.set_fused_swiglu_fp8_enabled(enabled);
-    }
-
-    #[allow(dead_code)]
-    pub fn set_metadata_scratch_enabled(&mut self, enabled: bool) {
-        self.config.metadata_scratch = enabled;
-        self.model.set_metadata_scratch_enabled(enabled);
-    }
-
     pub fn install_fp8_policy(&mut self, policy_path: &Path) -> Result<usize> {
         let policy = load_fp8_policy(policy_path)?;
         let enabled = self.model.install_fp8_policy(&self.runtime, &policy)?;

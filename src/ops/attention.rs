@@ -104,7 +104,7 @@ pub fn segmented_prefill_attention_lfm2_bf16(
         value.dims()
     );
     ensure!(
-        segment_offsets.numel() >= num_segments + 1,
+        segment_offsets.numel() > num_segments,
         "segment offsets tensor too small"
     );
     let mut output = runtime.alloc_bf16(Shape::new([num_tokens, 32, 64]))?;
@@ -113,15 +113,17 @@ pub fn segmented_prefill_attention_lfm2_bf16(
             .kernels()
             .attention()
             .launch_segmented_prefill_flash_lfm2_bf16(
-                runtime.stream(),
-                query.storage(),
-                key.storage(),
-                value.storage(),
-                segment_offsets.storage(),
-                output.storage_mut(),
-                num_segments,
-                max_tokens_per_segment,
-                num_tokens,
+                crate::cuda::SegmentedFlashPrefillLaunch {
+                    stream: runtime.stream(),
+                    query: query.storage(),
+                    key: key.storage(),
+                    value: value.storage(),
+                    segment_offsets: segment_offsets.storage(),
+                    output: output.storage_mut(),
+                    num_segments,
+                    max_tokens_per_segment,
+                    total_tokens: num_tokens,
+                },
             )?;
     }
     Ok(output)

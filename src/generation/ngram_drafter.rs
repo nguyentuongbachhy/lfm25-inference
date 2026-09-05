@@ -35,21 +35,6 @@ impl NgramDrafter {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn min_ngram(&self) -> usize {
-        self.min_ngram
-    }
-
-    #[allow(dead_code)]
-    pub fn max_ngram(&self) -> usize {
-        self.max_ngram
-    }
-
-    #[allow(dead_code)]
-    pub fn draft_length(&self) -> usize {
-        self.draft_length
-    }
-
     /// Proposes up to `draft_length` candidate tokens given the complete token history.
     /// Scans backwards for matching suffixes, weighting by frequency and scaling by depth.
     pub fn draft(&self, history: &[u32]) -> Vec<u32> {

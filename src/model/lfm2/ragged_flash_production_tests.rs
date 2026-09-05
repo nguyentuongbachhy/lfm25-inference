@@ -57,11 +57,13 @@ fn load_model(runtime: &CudaRuntime) -> Result<Lfm2Model> {
     Ok(model)
 }
 
+type RaggedInputTuple = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>);
+
 fn build_ragged_input(
     model: &Lfm2Model,
     batch_size: usize,
     tokens_per_seq: usize,
-) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>)> {
+) -> Result<RaggedInputTuple> {
     let total_tokens = batch_size * tokens_per_seq;
     let mut token_ids = Vec::with_capacity(total_tokens);
     let mut positions = Vec::with_capacity(total_tokens);

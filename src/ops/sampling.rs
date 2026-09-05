@@ -6,29 +6,7 @@ use crate::{
     tensor::{Shape, Tensor},
 };
 
-#[allow(dead_code)]
-pub fn argmax_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
-    ensure!(input.numel() > 0, "argmax does not support empty tensors");
-    let mut output = runtime.alloc_uninit::<u32>(Shape::new([1]))?;
-    unsafe {
-        runtime.kernels().sampling().launch_argmax_bf16(
-            runtime.stream(),
-            input.storage(),
-            output.storage_mut(),
-            input.numel(),
-        )?;
-    }
-    Ok(output)
-}
 
-#[allow(dead_code)]
-pub fn argmax_rows_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
-    ensure!(input.rank() == 2, "batched argmax expects rank-2 input");
-    let rows = input.dims()[0];
-    let mut output = runtime.alloc_u32(Shape::new([rows]))?;
-    argmax_rows_bf16_into(runtime, input, &mut output)?;
-    Ok(output)
-}
 
 pub(crate) fn argmax_rows_bf16_into(
     runtime: &CudaRuntime,
@@ -82,6 +60,28 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
+
+    fn argmax_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
+        ensure!(input.numel() > 0, "argmax does not support empty tensors");
+        let mut output = runtime.alloc_uninit::<u32>(Shape::new([1]))?;
+        unsafe {
+            runtime.kernels().sampling().launch_argmax_bf16(
+                runtime.stream(),
+                input.storage(),
+                output.storage_mut(),
+                input.numel(),
+            )?;
+        }
+        Ok(output)
+    }
+
+    fn argmax_rows_bf16(runtime: &CudaRuntime, input: &Tensor<bf16>) -> Result<Tensor<u32>> {
+        ensure!(input.rank() == 2, "batched argmax expects rank-2 input");
+        let rows = input.dims()[0];
+        let mut output = runtime.alloc_u32(Shape::new([rows]))?;
+        argmax_rows_bf16_into(runtime, input, &mut output)?;
+        Ok(output)
+    }
 
     #[test]
     fn sampling_kernel_selects_argmax() -> Result<()> {

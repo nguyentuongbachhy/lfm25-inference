@@ -56,10 +56,21 @@ pub(crate) struct HybridAttentionLaunch<'a> {
     pub(crate) num_segments: usize,
 }
 
+pub(crate) struct SegmentedFlashPrefillLaunch<'a> {
+    pub(crate) stream: &'a CudaStream,
+    pub(crate) query: &'a CudaSlice<bf16>,
+    pub(crate) key: &'a CudaSlice<bf16>,
+    pub(crate) value: &'a CudaSlice<bf16>,
+    pub(crate) segment_offsets: &'a CudaSlice<u32>,
+    pub(crate) output: &'a mut CudaSlice<bf16>,
+    pub(crate) num_segments: usize,
+    pub(crate) max_tokens_per_segment: usize,
+    pub(crate) total_tokens: usize,
+}
+
 pub(crate) struct AttentionKernels {
     prefill: KernelLaunch,
     prefill_flash: KernelLaunch,
-    #[allow(dead_code)]
     segmented_prefill_flash: KernelLaunch,
     #[cfg(test)]
     ps16: KernelLaunch,
@@ -418,19 +429,21 @@ impl AttentionKernels {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub(crate) unsafe fn launch_segmented_prefill_flash_lfm2_bf16(
         &self,
-        stream: &CudaStream,
-        query: &CudaSlice<bf16>,
-        key: &CudaSlice<bf16>,
-        value: &CudaSlice<bf16>,
-        segment_offsets: &CudaSlice<u32>,
-        output: &mut CudaSlice<bf16>,
-        num_segments: usize,
-        max_tokens_per_segment: usize,
-        total_tokens: usize,
+        launch: SegmentedFlashPrefillLaunch<'_>,
     ) -> Result<()> {
+        let SegmentedFlashPrefillLaunch {
+            stream,
+            query,
+            key,
+            value,
+            segment_offsets,
+            output,
+            num_segments,
+            max_tokens_per_segment,
+            total_tokens,
+        } = launch;
         ensure!(
             num_segments > 0,
             "segmented flash prefill requires at least one segment"
@@ -462,7 +475,7 @@ impl AttentionKernels {
             "segmented flash prefill output storage too small"
         );
         ensure!(
-            segment_offsets.len() >= num_segments + 1,
+            segment_offsets.len() > num_segments,
             "segmented flash prefill offsets too small"
         );
         let max_q_tiles = max_tokens_per_segment.div_ceil(16);

@@ -182,19 +182,19 @@ impl GpuBatch {
             .set_logical_shape(Shape::new([packed_bytes]))?;
 
         unsafe {
-            runtime.kernels().metadata().launch_scatter(
-                runtime.stream(),
-                self.metadata_staging.storage(),
-                self.token_ids.storage_mut(),
-                self.positions.storage_mut(),
-                self.request_slots.storage_mut(),
-                self.physical_slots.storage_mut(),
-                self.segment_offsets.storage_mut(),
-                self.segment_slots.storage_mut(),
-                self.output_rows.storage_mut(),
-                tokens,
-                segments,
-            )?;
+            runtime.kernels().metadata().launch_scatter(crate::cuda::ScatterMetadataLaunch {
+                stream: runtime.stream(),
+                packed: self.metadata_staging.storage(),
+                token_ids: self.token_ids.storage_mut(),
+                positions: self.positions.storage_mut(),
+                request_slots: self.request_slots.storage_mut(),
+                physical_slots: self.physical_slots.storage_mut(),
+                segment_offsets: self.segment_offsets.storage_mut(),
+                segment_slots: self.segment_slots.storage_mut(),
+                output_rows: self.output_rows.storage_mut(),
+                num_tokens: tokens,
+                num_segments: segments,
+            })?;
         }
 
         self.token_ids.set_logical_shape(Shape::new([tokens]))?;

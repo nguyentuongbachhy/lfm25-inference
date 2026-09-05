@@ -545,7 +545,7 @@ impl ModelCache {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn reset(&mut self, runtime: &CudaRuntime) -> Result<()> {
         self.sequence_length = 0;
         for layer in &mut self.layers {
@@ -648,6 +648,17 @@ fn linear_dispatch_input(
             ops::linear_bf16(runtime, input, &weight.bf16)
         }
     }
+}
+
+struct AttentionBatchArgs<'a> {
+    weights: &'a AttentionWeights,
+    normalized: Tensor<bf16>,
+    arena: &'a mut PagedKvArena,
+    metadata: &'a GpuBatch,
+    is_contiguous_prefill: bool,
+    is_segmented_prefill: bool,
+    max_segment_tokens: usize,
+    use_fp8: bool,
 }
 
 impl Lfm2Model {
@@ -755,27 +766,13 @@ impl Lfm2Model {
         self.decode_fp8_enabled
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn fused_rms_fp8_enabled(&self) -> bool {
-        self.fused_rms_fp8_enabled
-    }
-
+    
     pub(crate) fn set_fused_rms_fp8_enabled(&mut self, enabled: bool) {
         self.fused_rms_fp8_enabled = enabled;
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn fused_swiglu_fp8_enabled(&self) -> bool {
-        self.fused_swiglu_fp8_enabled
-    }
-
     pub(crate) fn set_fused_swiglu_fp8_enabled(&mut self, enabled: bool) {
         self.fused_swiglu_fp8_enabled = enabled;
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn metadata_scratch_enabled(&self) -> bool {
-        self.metadata_scratch_enabled
     }
 
     pub(crate) fn set_metadata_scratch_enabled(&mut self, enabled: bool) {
@@ -1088,14 +1085,16 @@ impl Lfm2Model {
                 (OperatorWeights::Attention(operator), BatchLayerCache::Attention(arena)) => {
                     self.attention_batch(
                         runtime,
-                        operator,
-                        normalized,
-                        arena,
-                        metadata,
-                        cache.is_contiguous_prefill,
-                        cache.is_segmented_prefill,
-                        cache.max_segment_tokens,
-                        use_fp8,
+                        AttentionBatchArgs {
+                            weights: operator,
+                            normalized,
+                            arena,
+                            metadata,
+                            is_contiguous_prefill: cache.is_contiguous_prefill,
+                            is_segmented_prefill: cache.is_segmented_prefill,
+                            max_segment_tokens: cache.max_segment_tokens,
+                            use_fp8,
+                        },
                     )?
                 }
                 (OperatorWeights::Conv(operator), BatchLayerCache::Conv(states)) => self
@@ -1247,7 +1246,7 @@ impl Lfm2Model {
             (&fallback_metadata.0, &fallback_metadata.1, &fallback_metadata.2)
         };
 
-        let mut hidden = ops::embedding_bf16(runtime, &tokens, &self.weights.embedding)?;
+        let mut hidden = ops::embedding_bf16(runtime, tokens, &self.weights.embedding)?;
         let mut normalized = ops::rms_norm_bf16(
             runtime,
             &hidden,
@@ -1280,8 +1279,8 @@ impl Lfm2Model {
                             query_norm: &operator.query_norm,
                             key_norm: &operator.key_norm,
                             inv_freq: &self.inv_freq,
-                            position_ids: &positions,
-                            slot_mapping: &slots,
+                            position_ids: positions,
+                            slot_mapping: slots,
                             eps: self.config.norm_eps,
                         },
                         kv_cache,
@@ -1291,7 +1290,7 @@ impl Lfm2Model {
                         runtime,
                         &query,
                         kv_cache,
-                        &positions,
+                        positions,
                     )?
                     .reshape(Shape::new([num_tokens, self.config.hidden_size]))?;
                     linear_dispatch(runtime, &attended, &operator.output, use_fp8_decode)?
@@ -1331,13 +1330,15 @@ impl Lfm2Model {
                 let mut ffn_input_fp8 = runtime.alloc_fp8(hidden.shape().clone())?;
                 ops::residual_rms_norm_bf16_to_e4m3_into(
                     runtime,
-                    &hidden,
-                    &operator_output,
-                    &weights.ffn_norm,
-                    self.config.norm_eps,
-                    gate_up_fp8.activation_scale.quantize_multiplier,
-                    &mut post_operator,
-                    &mut ffn_input_fp8,
+                    ops::FusedResidualRmsNormFp8Args {
+                        residual: &hidden,
+                        update: &operator_output,
+                        weight: &weights.ffn_norm,
+                        eps: self.config.norm_eps,
+                        quant_scale: gate_up_fp8.activation_scale.quantize_multiplier,
+                        residual_out: &mut post_operator,
+                        normalized_fp8_out: &mut ffn_input_fp8,
+                    },
                 )?;
                 (post_operator, None, Some(ffn_input_fp8))
             } else {
@@ -1382,13 +1383,15 @@ impl Lfm2Model {
                 let mut final_fp8 = runtime.alloc_fp8(post_operator.shape().clone())?;
                 ops::residual_rms_norm_bf16_to_e4m3_into(
                     runtime,
-                    &post_operator,
-                    &ffn_output,
-                    next_norm,
-                    self.config.norm_eps,
-                    lm_fp8.activation_scale.quantize_multiplier,
-                    &mut next_hidden,
-                    &mut final_fp8,
+                    ops::FusedResidualRmsNormFp8Args {
+                        residual: &post_operator,
+                        update: &ffn_output,
+                        weight: next_norm,
+                        eps: self.config.norm_eps,
+                        quant_scale: lm_fp8.activation_scale.quantize_multiplier,
+                        residual_out: &mut next_hidden,
+                        normalized_fp8_out: &mut final_fp8,
+                    },
                 )?;
                 hidden = next_hidden;
                 final_normalized_fp8 = Some(final_fp8);
@@ -1711,7 +1714,7 @@ impl Lfm2Model {
             (&fallback_metadata.0, &fallback_metadata.1, &fallback_metadata.2)
         };
 
-        let mut hidden = ops::embedding_bf16(runtime, &tokens, &self.weights.embedding)?;
+        let mut hidden = ops::embedding_bf16(runtime, tokens, &self.weights.embedding)?;
         let mut normalized = profiled(
             runtime,
             profile.as_deref_mut(),
@@ -1753,8 +1756,8 @@ impl Lfm2Model {
                 (OperatorWeights::Attention(operator), LayerCache::Attention(kv_cache)) => {
                     let step = AttentionStep {
                         cache: kv_cache,
-                        slots: &slots,
-                        positions: &positions,
+                        slots,
+                        positions,
                         contiguous_prefill,
                         context_tokens: next_sequence_length,
                     };
@@ -1844,13 +1847,15 @@ impl Lfm2Model {
                     || {
                         ops::residual_rms_norm_bf16_to_e4m3_into(
                             runtime,
-                            &hidden,
-                            &operator_output,
-                            &weights.ffn_norm,
-                            self.config.norm_eps,
-                            gate_up_fp8.activation_scale.quantize_multiplier,
-                            &mut post_operator,
-                            &mut ffn_input_fp8,
+                            ops::FusedResidualRmsNormFp8Args {
+                                residual: &hidden,
+                                update: &operator_output,
+                                weight: &weights.ffn_norm,
+                                eps: self.config.norm_eps,
+                                quant_scale: gate_up_fp8.activation_scale.quantize_multiplier,
+                                residual_out: &mut post_operator,
+                                normalized_fp8_out: &mut ffn_input_fp8,
+                            },
                         )
                     },
                 )?;
@@ -1934,13 +1939,15 @@ impl Lfm2Model {
                     || {
                         ops::residual_rms_norm_bf16_to_e4m3_into(
                             runtime,
-                            &post_operator,
-                            &ffn_output,
-                            next_norm,
-                            self.config.norm_eps,
-                            lm_fp8.activation_scale.quantize_multiplier,
-                            &mut next_hidden,
-                            &mut final_fp8,
+                            ops::FusedResidualRmsNormFp8Args {
+                                residual: &post_operator,
+                                update: &ffn_output,
+                                weight: next_norm,
+                                eps: self.config.norm_eps,
+                                quant_scale: lm_fp8.activation_scale.quantize_multiplier,
+                                residual_out: &mut next_hidden,
+                                normalized_fp8_out: &mut final_fp8,
+                            },
                         )
                     },
                 )?;
@@ -2088,15 +2095,13 @@ impl Lfm2Model {
             layer,
             use_fp8,
         } = execution;
-        if let Some(calibration) = calibration.as_deref_mut() {
-            if let Some(input) = input_bf16 {
-                calibration.observe(
-                    runtime,
-                    format!("layers.{layer}.mlp.gate_up.input"),
-                    CalibrationTensorKind::Activation,
-                    input,
-                )?;
-            }
+        if let (Some(calibration), Some(input)) = (calibration.as_deref_mut(), input_bf16) {
+            calibration.observe(
+                runtime,
+                format!("layers.{layer}.mlp.gate_up.input"),
+                CalibrationTensorKind::Activation,
+                input,
+            )?;
         }
         let gate_up = profiled(
             runtime,
@@ -2314,15 +2319,18 @@ impl Lfm2Model {
     fn attention_batch(
         &self,
         runtime: &CudaRuntime,
-        weights: &AttentionWeights,
-        normalized: Tensor<bf16>,
-        arena: &mut PagedKvArena,
-        metadata: &GpuBatch,
-        is_contiguous_prefill: bool,
-        is_segmented_prefill: bool,
-        max_segment_tokens: usize,
-        use_fp8: bool,
+        args: AttentionBatchArgs<'_>,
     ) -> Result<Tensor<bf16>> {
+        let AttentionBatchArgs {
+            weights,
+            normalized,
+            arena,
+            metadata,
+            is_contiguous_prefill,
+            is_segmented_prefill,
+            max_segment_tokens,
+            use_fp8,
+        } = args;
         let num_tokens = normalized.dims()[0];
         let mut query = linear_dispatch(runtime, &normalized, &weights.query, use_fp8)?
             .reshape(Shape::new([num_tokens, 32, 64]))?;

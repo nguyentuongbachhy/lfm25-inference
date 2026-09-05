@@ -126,15 +126,17 @@ fn test_segmented_prefill_flash_correctness() -> Result<()> {
                 .kernels()
                 .attention()
                 .launch_segmented_prefill_flash_lfm2_bf16(
-                    runtime.stream(),
-                    query.storage(),
-                    key.storage(),
-                    value.storage(),
-                    offsets_gpu.storage(),
-                    candidate.storage_mut(),
-                    num_segments,
-                    max_tokens,
-                    total_tokens,
+                    crate::cuda::SegmentedFlashPrefillLaunch {
+                        stream: runtime.stream(),
+                        query: query.storage(),
+                        key: key.storage(),
+                        value: value.storage(),
+                        segment_offsets: offsets_gpu.storage(),
+                        output: candidate.storage_mut(),
+                        num_segments,
+                        max_tokens_per_segment: max_tokens,
+                        total_tokens,
+                    },
                 )?;
         }
         runtime.synchronize()?;
@@ -307,15 +309,17 @@ fn bench_segmented_prefill_flash_bf16() -> Result<()> {
                     .kernels()
                     .attention()
                     .launch_segmented_prefill_flash_lfm2_bf16(
-                        runtime.stream(),
-                        query.storage(),
-                        key.storage(),
-                        value.storage(),
-                        offsets_gpu.storage(),
-                        out_cand.storage_mut(),
-                        num_segments,
-                        max_tokens,
-                        total_tokens,
+                        crate::cuda::SegmentedFlashPrefillLaunch {
+                            stream: runtime.stream(),
+                            query: query.storage(),
+                            key: key.storage(),
+                            value: value.storage(),
+                            segment_offsets: offsets_gpu.storage(),
+                            output: out_cand.storage_mut(),
+                            num_segments,
+                            max_tokens_per_segment: max_tokens,
+                            total_tokens,
+                        },
                     )?;
                 Ok(())
             },

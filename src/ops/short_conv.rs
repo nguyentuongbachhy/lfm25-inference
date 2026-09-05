@@ -235,7 +235,6 @@ pub fn short_conv_segmented_lfm2_bf16(
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn short_conv_segmented_lfm2_bf16_into(
     runtime: &CudaRuntime,
     projected: &Tensor<bf16>,
