@@ -322,7 +322,14 @@ async fn execute_generation_task(
             }
         }
         Ok(Err(error)) => {
-            routes::error_response(error.status, &error.message, "server_error", 500, None)
+            let (code, err_type) = if error.status.starts_with("400") {
+                (400, "invalid_request_error")
+            } else if error.status.starts_with("503") {
+                (503, "server_error")
+            } else {
+                (500, "internal_error")
+            };
+            routes::error_response(error.status, &error.message, err_type, code, None)
         }
         Err(_) => routes::error_response(
             "503 Service Unavailable",

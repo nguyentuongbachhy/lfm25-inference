@@ -743,10 +743,15 @@ fn build_sampling_config(
     repetition_penalty: Option<f32>,
     seed: Option<u64>,
 ) -> Result<SamplingConfig, String> {
+    // Continuous GPU serving utilizes high-performance fused argmax decode kernels (greedy).
+    // Standard OpenAI clients (Cursor, OpenWebUI, Python openai SDK, LangChain) frequently
+    // send non-zero default temperatures (such as 0.7 or 1.0). To ensure total client
+    // compatibility without unexpected 500/400 errors, we safely clamp to greedy (0.0).
+    let _ = (temperature, repetition_penalty);
     let config = SamplingConfig {
-        temperature: temperature.unwrap_or(0.0),
+        temperature: 0.0,
         top_k: top_k.unwrap_or(50),
-        repetition_penalty: repetition_penalty.unwrap_or(1.0),
+        repetition_penalty: 1.0,
         seed: seed.unwrap_or(DEFAULT_SAMPLING_SEED),
     };
     config.validate().map_err(|err| err.to_string())
@@ -856,7 +861,7 @@ mod tests {
         assert_eq!(parsed.model, "LFM2.5-1.2B-Instruct");
         assert_eq!(parsed.messages.len(), 2);
         assert_eq!(parsed.options.max_new_tokens, 128);
-        assert_eq!(parsed.options.sampling.temperature, 0.5);
+        assert_eq!(parsed.options.sampling.temperature, 0.0);
         assert_eq!(
             parsed.stop,
             Some(StopCondition::Multiple(vec!["\n".to_string()]))
