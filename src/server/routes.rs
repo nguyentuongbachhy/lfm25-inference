@@ -66,6 +66,102 @@ pub(crate) struct ModelPermission {
     pub is_blocking: bool,
 }
 
+#[derive(Serialize)]
+pub(crate) struct OllamaTagsResponse {
+    pub models: Vec<OllamaModelEntry>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OllamaModelEntry {
+    pub name: String,
+    pub model: String,
+    pub modified_at: &'static str,
+    pub size: u64,
+    pub digest: &'static str,
+    pub details: OllamaModelDetails,
+}
+
+#[derive(Serialize, Clone)]
+pub(crate) struct OllamaModelDetails {
+    pub parent_model: &'static str,
+    pub format: &'static str,
+    pub family: &'static str,
+    pub families: Vec<&'static str>,
+    pub parameter_size: &'static str,
+    pub quantization_level: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OllamaShowResponse {
+    pub license: &'static str,
+    pub modelfile: String,
+    pub parameters: &'static str,
+    pub template: &'static str,
+    pub details: OllamaModelDetails,
+    pub model_info: OllamaModelInfo,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OllamaModelInfo {
+    #[serde(rename = "general.architecture")]
+    pub general_architecture: &'static str,
+    pub context_length: usize,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct OllamaShowRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OllamaChatChunk {
+    pub model: String,
+    pub created_at: String,
+    pub message: OllamaMessage,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_duration: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OllamaGenerateChunk {
+    pub model: String,
+    pub created_at: String,
+    pub response: String,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_duration: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OllamaMessage {
+    pub role: &'static str,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub(crate) enum StopCondition {
@@ -234,7 +330,7 @@ struct Choice {
     finish_reason: &'static str,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Copy)]
 pub(crate) struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -331,6 +427,64 @@ pub(crate) fn model_retrieve(model_name: &str, requested_id: &str) -> RouteRespo
             Some("model"),
         )
     }
+}
+
+pub(crate) fn ollama_tags(model_name: &str) -> RouteResponse {
+    let response = OllamaTagsResponse {
+        models: vec![OllamaModelEntry {
+            name: format!("{model_name}:latest"),
+            model: format!("{model_name}:latest"),
+            modified_at: "2026-09-05T00:00:00.000000Z",
+            size: 2_400_000_000,
+            digest: "sha256:lfm2512binstructfp8sm120",
+            details: OllamaModelDetails {
+                parent_model: "",
+                format: "safetensors",
+                family: "lfm",
+                families: vec!["lfm"],
+                parameter_size: "1.2B",
+                quantization_level: "FP8/BF16",
+            },
+        }],
+    };
+    json_response("200 OK", &response)
+}
+
+pub(crate) fn ollama_show(body: &[u8], model_name: &str) -> RouteResponse {
+    let req: Option<OllamaShowRequest> = serde_json::from_slice(body).ok();
+    let requested = req
+        .and_then(|r| r.name.or(r.model))
+        .unwrap_or_else(|| model_name.to_string());
+    if !requested.starts_with(model_name) && requested != "default" && !requested.is_empty() {
+        return error_response(
+            "404 Not Found",
+            &format!("model '{requested}' not found"),
+            "not_found",
+            404,
+            Some("model"),
+        );
+    }
+    let response = OllamaShowResponse {
+        license: "Apache-2.0",
+        modelfile: format!(
+            "# Modelfile for {model_name}\nFROM models/{model_name}\nPARAMETER stop <|im_end|>\nPARAMETER stop <|endoftext|>\n"
+        ),
+        parameters: "stop <|im_end|>\nstop <|endoftext|>",
+        template: "<|startoftext|>{{- range .Messages }}<|im_start|>{{ .Role }}\n{{ .Content }}<|im_end|>\n{{- end }}<|im_start|>assistant\n",
+        details: OllamaModelDetails {
+            parent_model: "",
+            format: "safetensors",
+            family: "lfm",
+            families: vec!["lfm"],
+            parameter_size: "1.2B",
+            quantization_level: "FP8/BF16",
+        },
+        model_info: OllamaModelInfo {
+            general_architecture: "lfm",
+            context_length: 32_768,
+        },
+    };
+    json_response("200 OK", &response)
 }
 
 fn build_model_object(model_name: &str) -> ModelObject {
@@ -580,6 +734,30 @@ pub(crate) fn parse_completion(
         stop: request.stop,
         stream: request.stream.unwrap_or(false),
     })
+}
+
+pub(crate) fn parse_ollama_chat(
+    body: &[u8],
+    default_model: &str,
+) -> Result<ParsedChatRequest, RouteResponse> {
+    let mut parsed = parse_chat_completion(body, default_model)?;
+    let req_json: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    if req_json.get("stream").is_none() {
+        parsed.stream = true;
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn parse_ollama_generate(
+    body: &[u8],
+    default_model: &str,
+) -> Result<ParsedCompletionRequest, RouteResponse> {
+    let mut parsed = parse_completion(body, default_model)?;
+    let req_json: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    if req_json.get("stream").is_none() {
+        parsed.stream = true;
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn chat_completion_response(
@@ -937,6 +1115,168 @@ pub(crate) fn format_sse_event(value: &impl Serialize) -> String {
     }
 }
 
+pub(crate) fn iso8601_timestamp() -> String {
+    let now = current_timestamp();
+    let secs = now % 86400;
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    format!("2026-09-05T{hours:02}:{minutes:02}:{seconds:02}.000000Z")
+}
+
+pub(crate) fn format_ollama_chat_delta_chunk(model: &str, delta: &str) -> String {
+    let chunk = OllamaChatChunk {
+        model: model.to_string(),
+        created_at: iso8601_timestamp(),
+        message: OllamaMessage {
+            role: "assistant",
+            content: delta.to_string(),
+        },
+        done: false,
+        total_duration: None,
+        load_duration: None,
+        prompt_eval_count: None,
+        prompt_eval_duration: None,
+        eval_count: None,
+        eval_duration: None,
+    };
+    serde_json::to_string(&chunk)
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default()
+}
+
+pub(crate) fn format_ollama_chat_finish_chunk(
+    model: &str,
+    usage: Usage,
+    total_duration_ns: u64,
+    prompt_eval_duration_ns: u64,
+    eval_duration_ns: u64,
+) -> String {
+    let chunk = OllamaChatChunk {
+        model: model.to_string(),
+        created_at: iso8601_timestamp(),
+        message: OllamaMessage {
+            role: "assistant",
+            content: String::new(),
+        },
+        done: true,
+        total_duration: Some(total_duration_ns),
+        load_duration: Some(1_000_000),
+        prompt_eval_count: Some(usage.prompt_tokens),
+        prompt_eval_duration: Some(prompt_eval_duration_ns),
+        eval_count: Some(usage.completion_tokens),
+        eval_duration: Some(eval_duration_ns),
+    };
+    serde_json::to_string(&chunk)
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default()
+}
+
+pub(crate) fn format_ollama_generate_delta_chunk(model: &str, delta: &str) -> String {
+    let chunk = OllamaGenerateChunk {
+        model: model.to_string(),
+        created_at: iso8601_timestamp(),
+        response: delta.to_string(),
+        done: false,
+        total_duration: None,
+        load_duration: None,
+        prompt_eval_count: None,
+        prompt_eval_duration: None,
+        eval_count: None,
+        eval_duration: None,
+    };
+    serde_json::to_string(&chunk)
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default()
+}
+
+pub(crate) fn format_ollama_generate_finish_chunk(
+    model: &str,
+    usage: Usage,
+    total_duration_ns: u64,
+    prompt_eval_duration_ns: u64,
+    eval_duration_ns: u64,
+) -> String {
+    let chunk = OllamaGenerateChunk {
+        model: model.to_string(),
+        created_at: iso8601_timestamp(),
+        response: String::new(),
+        done: true,
+        total_duration: Some(total_duration_ns),
+        load_duration: Some(1_000_000),
+        prompt_eval_count: Some(usage.prompt_tokens),
+        prompt_eval_duration: Some(prompt_eval_duration_ns),
+        eval_count: Some(usage.completion_tokens),
+        eval_duration: Some(eval_duration_ns),
+    };
+    serde_json::to_string(&chunk)
+        .map(|s| format!("{s}\n"))
+        .unwrap_or_default()
+}
+
+pub(crate) fn ollama_chat_response(
+    model: String,
+    completion: ServingCompletion,
+    text: String,
+    stop: Option<&StopCondition>,
+    is_structured_json: bool,
+    total_duration_ns: u64,
+) -> RouteResponse {
+    let (cleaned_text, _) = apply_stop_conditions(&text, stop, completion.finish_reason);
+    let final_content = if is_structured_json {
+        clean_structured_output(&cleaned_text)
+    } else {
+        cleaned_text
+    };
+    let prompt_tokens = completion.prompt_tokens;
+    let completion_tokens = completion.token_ids.len();
+    let prompt_eval_ns = (completion.metrics.prefill_gpu_ms * 1_000_000.0) as u64;
+    let eval_ns = (completion.metrics.decode_gpu_ms * 1_000_000.0) as u64;
+    let response = OllamaChatChunk {
+        model,
+        created_at: iso8601_timestamp(),
+        message: OllamaMessage {
+            role: "assistant",
+            content: final_content,
+        },
+        done: true,
+        total_duration: Some(total_duration_ns),
+        load_duration: Some(1_000_000),
+        prompt_eval_count: Some(prompt_tokens),
+        prompt_eval_duration: Some(prompt_eval_ns),
+        eval_count: Some(completion_tokens),
+        eval_duration: Some(eval_ns),
+    };
+    json_response("200 OK", &response)
+}
+
+pub(crate) fn ollama_generate_response(
+    model: String,
+    completion: ServingCompletion,
+    text: String,
+    stop: Option<&StopCondition>,
+    total_duration_ns: u64,
+) -> RouteResponse {
+    let (cleaned_text, _) = apply_stop_conditions(&text, stop, completion.finish_reason);
+    let prompt_tokens = completion.prompt_tokens;
+    let completion_tokens = completion.token_ids.len();
+    let prompt_eval_ns = (completion.metrics.prefill_gpu_ms * 1_000_000.0) as u64;
+    let eval_ns = (completion.metrics.decode_gpu_ms * 1_000_000.0) as u64;
+    let response = OllamaGenerateChunk {
+        model,
+        created_at: iso8601_timestamp(),
+        response: cleaned_text,
+        done: true,
+        total_duration: Some(total_duration_ns),
+        load_duration: Some(1_000_000),
+        prompt_eval_count: Some(prompt_tokens),
+        prompt_eval_duration: Some(prompt_eval_ns),
+        eval_count: Some(completion_tokens),
+        eval_duration: Some(eval_ns),
+    };
+    json_response("200 OK", &response)
+}
+
 pub(crate) fn check_stop_match(text: &str, stop_words: &[&str]) -> Option<usize> {
     let mut earliest = None;
     for &word in stop_words {
@@ -1000,7 +1340,7 @@ fn extract_schema_constraint(
                 let schema_str = serde_json::to_string_pretty(&json_schema.schema)
                     .unwrap_or_else(|_| json_schema.schema.to_string());
                 Some(format!(
-                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object whose top-level keys match the property names defined in the schema below (do not output 'properties' or 'required' as keys). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
                 ))
             }
             ResponseFormat::TypeOnly { r#type } if r#type == "json_object" => {
@@ -1021,7 +1361,7 @@ fn extract_schema_constraint(
                     let schema_str = serde_json::to_string_pretty(val)
                         .unwrap_or_else(|_| val.to_string());
                     return Some(format!(
-                        "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                        "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object whose top-level keys match the property names defined in the schema below (do not output 'properties' or 'required' as keys). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
                     ));
                 }
                 None
@@ -1041,7 +1381,7 @@ fn extract_schema_constraint(
         } else if fmt.is_object() {
             let schema_str = serde_json::to_string_pretty(fmt).unwrap_or_else(|_| fmt.to_string());
             Some(format!(
-                "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object whose top-level keys match the property names defined in the schema below (do not output 'properties' or 'required' as keys). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
             ))
         } else {
             None
@@ -1447,5 +1787,71 @@ mod tests {
         assert_eq!(longest_stop_prefix_len("prefix end of", &stop_words), 6); // "end of" matches prefix of "end of sequence"
         assert_eq!(longest_stop_prefix_len("prefix ###", &stop_words), 3);
         assert_eq!(longest_stop_prefix_len("normal text", &stop_words), 0);
+    }
+
+    #[test]
+    fn test_ollama_tags_and_show() {
+        let tags_resp = ollama_tags("LFM2.5-1.2B-Instruct");
+        assert_eq!(tags_resp.status, "200 OK");
+        assert_eq!(tags_resp.content_type, "application/json");
+        assert!(tags_resp.body.contains("LFM2.5-1.2B-Instruct"));
+        assert!(tags_resp.body.contains("models"));
+
+        let show_resp = ollama_show(
+            br#"{"name":"LFM2.5-1.2B-Instruct"}"#,
+            "LFM2.5-1.2B-Instruct",
+        );
+        assert_eq!(show_resp.status, "200 OK");
+        assert!(show_resp.body.contains("general.architecture"));
+        assert!(show_resp.body.contains("context_length"));
+    }
+
+    #[test]
+    fn test_ollama_chat_and_generate_parsers() {
+        // Chat defaults stream to true
+        let chat_json = br#"{"messages":[{"role":"user","content":"Hello"}]}"#;
+        let parsed_chat = parse_ollama_chat(chat_json, "test-model").unwrap();
+        assert!(parsed_chat.stream);
+        assert_eq!(parsed_chat.messages.len(), 1);
+
+        // Chat stream explicitly false
+        let chat_json_sync = br#"{"messages":[{"role":"user","content":"Hello"}],"stream":false}"#;
+        let parsed_chat_sync = parse_ollama_chat(chat_json_sync, "test-model").unwrap();
+        assert!(!parsed_chat_sync.stream);
+
+        // Generate defaults stream to true
+        let gen_json = br#"{"prompt":"Hello world"}"#;
+        let parsed_gen = parse_ollama_generate(gen_json, "test-model").unwrap();
+        assert!(parsed_gen.stream);
+        assert_eq!(parsed_gen.prompt, "Hello world");
+    }
+
+    #[test]
+    fn test_ollama_chunk_formatters() {
+        let delta = format_ollama_chat_delta_chunk("test-model", "Xin chào");
+        assert!(delta.ends_with('\n'));
+        assert!(delta.contains("\"content\":\"Xin chào\""));
+        assert!(delta.contains("\"done\":false"));
+
+        let usage = Usage {
+            prompt_tokens: 12,
+            completion_tokens: 8,
+            total_tokens: 20,
+        };
+        let finish =
+            format_ollama_chat_finish_chunk("test-model", usage, 50_000_000, 10_000_000, 40_000_000);
+        assert!(finish.contains("\"done\":true"));
+        assert!(finish.contains("\"prompt_eval_count\":12"));
+        assert!(finish.contains("\"eval_count\":8"));
+        assert!(finish.contains("\"total_duration\":50000000"));
+
+        let gen_delta = format_ollama_generate_delta_chunk("test-model", "test");
+        assert!(gen_delta.contains("\"response\":\"test\""));
+        assert!(gen_delta.contains("\"done\":false"));
+
+        let gen_finish =
+            format_ollama_generate_finish_chunk("test-model", usage, 30_000_000, 5_000_000, 25_000_000);
+        assert!(gen_finish.contains("\"done\":true"));
+        assert!(gen_finish.contains("\"eval_count\":8"));
     }
 }

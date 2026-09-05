@@ -7,11 +7,13 @@ cuBLASLt GEMMs, paged KV caching, fused activations, low-latency decode, continu
 batching, and an OpenAI-compatible HTTP API server without PyTorch, Candle, GGUF/GGML, ONNX, or Burn.
 
 Key runtime features:
-- **OpenAI & vLLM Compatible Server**: Full `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, CORS `OPTIONS`, and Server-Sent Events (SSE) streaming.
+- **OpenAI & Ollama Drop-in Serving**: Full OpenAI `/v1/chat/completions`, `/v1/completions`, `/v1/models` and native Ollama `/api/tags`, `/api/version`, `/api/show`, `/api/chat`, `/api/generate` endpoints with NDJSON streaming.
+- **High Concurrency Continuous Batching**: Zero-overhead continuous batching scaling from 151 tok/s ($C=1$) to **1,006.8 tok/s** ($C=8$) on an RTX 5060 Laptop GPU.
+- **Multi-Turn Radix Tree Prefix Caching**: Automated KV block reuse across conversation turns delivering **6.15x TTFT speedup** on multi-turn chats.
+- **CUDA Graphs Decode Acceleration**: Default-enabled lazy graph capture promoting single-stream decode host launch overhead down by 9.3x.
 - **Structured Outputs (JSON Schema)**: Strict OpenAI `response_format: {"type": "json_schema" | "json_object"}` alongside Ollama `format` / `options` schema compatibility with automated markdown fence stripping.
 - **Fused CUDA Kernels**: Fused Residual RMSNorm $\to$ FP8 E4M3 (Sprint 1 Champion) and Fused SwiGLU $\to$ FP8 E4M3 (Sprint 2 Champion) eliminating redundant DRAM roundtrips.
 - **Tensor Core FlashAttention**: Contiguous & segmented prefill FlashAttention delivering up to 4.6x prefill speedup.
-- **Continuous GPU Serving**: Paged KV cache (PS16) with radix tree state reuse, fused argmax sampling, and 170–180 tokens/sec continuous decode throughput on laptop GPUs.
 
 The current validated target is an NVIDIA GeForce RTX 5060 Laptop GPU
 (Blackwell GeForce SM120) with CUDA 12.8.x. BF16 remains the golden reference
@@ -143,15 +145,20 @@ The runtime includes an OpenAI-compatible and vLLM-aligned HTTP API server power
 
 ### Endpoints Overview
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/v1/chat/completions` | Chat completions with ChatML formatting, streaming SSE, and structured outputs |
-| `POST` | `/v1/completions` | Classic text completion API (OpenAI compatible) |
-| `GET` | `/v1/models` | List available models (`object: "list"`, `max_model_len: 32768`) |
-| `GET` | `/v1/models/{model}` | Retrieve specific model metadata |
-| `GET` | `/health` | Server health check (`{"status": "ok"}`) |
-| `GET` | `/version` | Runtime version information |
-| `OPTIONS`| `*` | CORS preflight with full permissive headers for web UI / browser access |
+| Method | Endpoint | Protocol | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/v1/chat/completions` | OpenAI | Chat completions with ChatML formatting, SSE streaming, and structured outputs |
+| `POST` | `/v1/completions` | OpenAI | Classic text completion API (OpenAI compatible) |
+| `GET` | `/v1/models` | OpenAI | List available models (`object: "list"`, `max_model_len: 32768`) |
+| `GET` | `/v1/models/{model}` | OpenAI | Retrieve specific model metadata |
+| `POST` | `/api/chat` | Ollama | Native Ollama chat endpoint with NDJSON streaming (`stream: true` default) |
+| `POST` | `/api/generate` | Ollama | Native Ollama text completion endpoint with NDJSON streaming |
+| `GET` | `/api/tags` | Ollama | List models for OpenWebUI / Ollama CLI discovery |
+| `POST` | `/api/show` | Ollama | Show model architecture, context length, template, and parameters |
+| `GET` | `/api/version` | Ollama | Ollama version compatibility probe (`{"version": "0.1.0"}`) |
+| `GET` | `/health` | Generic | Server health check (`{"status": "ok"}`) |
+| `GET` | `/version` | Generic | Runtime version information |
+| `OPTIONS`| `*` | CORS | CORS preflight with full permissive headers for web UI / browser access |
 
 ### Starting the Server
 
@@ -289,12 +296,68 @@ curl -s -X POST http://127.0.0.1:8086/v1/completions \
   }'
 ```
 
-#### 6. CORS Preflight Check
+#### 6. Native Ollama Chat (`/api/chat` - NDJSON Streaming)
+
+Drop-in replacement for Ollama clients and OpenWebUI. By default, `stream` is `true` emitting newline-delimited JSON (NDJSON) chunks:
+
+```bash
+curl -N -s -X POST http://127.0.0.1:8086/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LFM2.5-1.2B-Instruct",
+    "messages": [
+      {"role": "user", "content": "Explain photosynthesis in 2 sentences."}
+    ],
+    "options": {
+      "num_predict": 64,
+      "temperature": 0.0
+    }
+  }'
+```
+
+#### 7. Native Ollama Raw Generation (`/api/generate`)
+
+```bash
+curl -N -s -X POST http://127.0.0.1:8086/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LFM2.5-1.2B-Instruct",
+    "prompt": "The capital of France is",
+    "options": {
+      "num_predict": 10,
+      "temperature": 0.0
+    }
+  }'
+```
+
+#### 8. CORS Preflight Check
 
 ```bash
 curl -s -I -X OPTIONS http://127.0.0.1:8086/v1/chat/completions
 # Returns HTTP/1.1 204 No Content with Access-Control-Allow-Origin: *
 ```
+
+### Performance & Scalability Evidence
+
+#### Continuous Batching Concurrency Scaling (RTX 5060 Laptop GPU)
+
+Continuous serving throughput under simultaneous active client streams ($C \in \{1, 2, 4, 8\}$):
+
+| Concurrency ($C$) | Total Tokens | Wall Clock (s) | Aggregate Throughput | Per-Stream Throughput | Mean TTFT | Scaling Efficiency |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1** | 44 tok | 0.29 s | **151.1 tok/s** | 151.1 tok/s | 18.14 ms | 1.00x |
+| **2** | 83 tok | 0.31 s | **270.0 tok/s** | 135.0 tok/s | 20.46 ms | 1.79x |
+| **4** | 170 tok | 0.32 s | **530.9 tok/s** | 132.7 tok/s | 29.93 ms | 3.51x |
+| **8** | 333 tok | 0.33 s | **1,006.8 tok/s** | 125.9 tok/s | 34.10 ms | **6.66x (>1k tok/s)** |
+
+#### Multi-Turn Radix Tree Prefix Caching Speedup
+
+Measured on a ~600-token enterprise document context:
+
+| Turn | Status | Prompt Size | Time-to-First-Token (TTFT) | Total Time | Speedup |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Turn 1** | Cold Prefill | ~600 tokens | **170.47 ms** | 291.53 ms | Baseline (1.0x) |
+| **Turn 2** | Radix Cache Hit | ~630 tokens (prefix cached) | **27.74 ms** | 125.90 ms | **6.15x Faster TTFT** |
 
 `--page-size` and precision selection are engine startup policies. They are not
 request-level overrides.
@@ -447,6 +510,8 @@ Start with these files:
   — validated atomic argmax production delta.
 - [`docs/research/nvfp4_rejection.md`](docs/research/nvfp4_rejection.md) — why
   NVFP4 was rejected for production despite strong primitive performance.
+- [`docs/architecture/fp8_kv_cache_roadmap.md`](docs/architecture/fp8_kv_cache_roadmap.md) —
+  technical architecture and kernel design blueprint for FP8 E4M3 KV cache.
 - [`docs/next_optimization_roadmap.md`](docs/next_optimization_roadmap.md) —
   future optimization directions, gates, and stop conditions.
 

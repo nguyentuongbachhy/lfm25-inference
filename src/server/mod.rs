@@ -84,6 +84,12 @@ async fn serve_frontend(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamProtocol {
+    OpenAiSse,
+    OllamaNdjson,
+}
+
 struct GenerationTask {
     token_ids: Vec<u32>,
     options: crate::engine::GenerationOptions,
@@ -92,6 +98,7 @@ struct GenerationTask {
     stream: bool,
     is_chat: bool,
     is_structured_json: bool,
+    protocol: StreamProtocol,
 }
 
 async fn handle_connection(
@@ -163,6 +170,7 @@ async fn handle_connection(
                     stream: parsed.stream,
                     is_chat: true,
                     is_structured_json: parsed.is_structured_json,
+                    protocol: StreamProtocol::OpenAiSse,
                 };
                 if task.stream && !task.is_structured_json {
                     return execute_live_streaming_task(
@@ -225,6 +233,136 @@ async fn handle_connection(
                     stream: parsed.stream,
                     is_chat: false,
                     is_structured_json: false,
+                    protocol: StreamProtocol::OpenAiSse,
+                };
+                if task.stream {
+                    return execute_live_streaming_task(
+                        stream,
+                        task,
+                        handle,
+                        tokenizer,
+                        request_ids,
+                        request_started,
+                        tokenization_ms,
+                    )
+                    .await;
+                }
+                let response = execute_generation_task(
+                    task,
+                    handle,
+                    tokenizer,
+                    request_ids,
+                    request_started,
+                    tokenization_ms,
+                )
+                .await;
+                return write_response(&mut stream, response).await;
+            }
+            ("GET", "/api/tags") => routes::ollama_tags(default_model),
+            ("GET", "/api/version") => routes::version(),
+            ("POST", "/api/show") => routes::ollama_show(&body, default_model),
+            ("POST", "/api/chat") => {
+                let parsed = match routes::parse_ollama_chat(&body, default_model) {
+                    Ok(val) => val,
+                    Err(resp) => return write_response(&mut stream, resp).await,
+                };
+                let tokenization_started = Instant::now();
+                let tokenizer_worker = Arc::clone(&tokenizer);
+                let messages = parsed.messages;
+                let token_ids = match tokio::task::spawn_blocking(move || {
+                    tokenizer_worker.encode_chat_prompt(&messages)
+                })
+                .await
+                .context("tokenizer worker panicked")?
+                {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        return write_response(
+                            &mut stream,
+                            routes::error_response(
+                                "400 Bad Request",
+                                &format!("tokenization failed: {error:#}"),
+                                "invalid_request_error",
+                                400,
+                                Some("messages"),
+                            ),
+                        )
+                        .await;
+                    }
+                };
+                let tokenization_ms = tokenization_started.elapsed().as_secs_f64() * 1000.0;
+                let task = GenerationTask {
+                    token_ids,
+                    options: parsed.options,
+                    model: parsed.model,
+                    stop: parsed.stop,
+                    stream: parsed.stream,
+                    is_chat: true,
+                    is_structured_json: parsed.is_structured_json,
+                    protocol: StreamProtocol::OllamaNdjson,
+                };
+                if task.stream && !task.is_structured_json {
+                    return execute_live_streaming_task(
+                        stream,
+                        task,
+                        handle,
+                        tokenizer,
+                        request_ids,
+                        request_started,
+                        tokenization_ms,
+                    )
+                    .await;
+                }
+                let response = execute_generation_task(
+                    task,
+                    handle,
+                    tokenizer,
+                    request_ids,
+                    request_started,
+                    tokenization_ms,
+                )
+                .await;
+                return write_response(&mut stream, response).await;
+            }
+            ("POST", "/api/generate") => {
+                let parsed = match routes::parse_ollama_generate(&body, default_model) {
+                    Ok(val) => val,
+                    Err(resp) => return write_response(&mut stream, resp).await,
+                };
+                let tokenization_started = Instant::now();
+                let tokenizer_worker = Arc::clone(&tokenizer);
+                let prompt = parsed.prompt;
+                let token_ids = match tokio::task::spawn_blocking(move || {
+                    tokenizer_worker.encode_text(&prompt)
+                })
+                .await
+                .context("tokenizer worker panicked")?
+                {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        return write_response(
+                            &mut stream,
+                            routes::error_response(
+                                "400 Bad Request",
+                                &format!("tokenization failed: {error:#}"),
+                                "invalid_request_error",
+                                400,
+                                Some("prompt"),
+                            ),
+                        )
+                        .await;
+                    }
+                };
+                let tokenization_ms = tokenization_started.elapsed().as_secs_f64() * 1000.0;
+                let task = GenerationTask {
+                    token_ids,
+                    options: parsed.options,
+                    model: parsed.model,
+                    stop: parsed.stop,
+                    stream: parsed.stream,
+                    is_chat: false,
+                    is_structured_json: false,
+                    protocol: StreamProtocol::OllamaNdjson,
                 };
                 if task.stream {
                     return execute_live_streaming_task(
@@ -340,14 +478,20 @@ async fn execute_live_streaming_task(
         format!("cmpl-{:016x}{:08x}", created, request_id)
     };
 
-    let headers = "HTTP/1.1 200 OK\r\n\
-        Content-Type: text/event-stream; charset=utf-8\r\n\
+    let content_type = match task.protocol {
+        StreamProtocol::OpenAiSse => "text/event-stream; charset=utf-8",
+        StreamProtocol::OllamaNdjson => "application/x-ndjson; charset=utf-8",
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\n\
+        Content-Type: {content_type}\r\n\
         Cache-Control: no-cache\r\n\
         Transfer-Encoding: chunked\r\n\
         Access-Control-Allow-Origin: *\r\n\
         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
         Access-Control-Allow-Headers: *\r\n\
-        Connection: close\r\n\r\n";
+        Connection: close\r\n\r\n"
+    );
     stream
         .write_all(headers.as_bytes())
         .await
@@ -357,10 +501,27 @@ async fn execute_live_streaming_task(
         .await
         .context("failed to flush streaming HTTP headers")?;
 
-    if task.is_chat {
+    if task.protocol == StreamProtocol::OpenAiSse && task.is_chat {
         let role_chunk = routes::format_sse_chat_role_chunk(&req_id_str, &task.model, created);
         write_http_chunk(&mut stream, &role_chunk).await?;
     }
+
+    let format_delta = |delta: &str| -> String {
+        match (task.protocol, task.is_chat) {
+            (StreamProtocol::OpenAiSse, true) => {
+                routes::format_sse_chat_content_chunk(&req_id_str, &task.model, created, delta)
+            }
+            (StreamProtocol::OpenAiSse, false) => {
+                routes::format_sse_text_content_chunk(&req_id_str, &task.model, created, delta)
+            }
+            (StreamProtocol::OllamaNdjson, true) => {
+                routes::format_ollama_chat_delta_chunk(&task.model, delta)
+            }
+            (StreamProtocol::OllamaNdjson, false) => {
+                routes::format_ollama_generate_delta_chunk(&task.model, delta)
+            }
+        }
+    };
 
     let stop_words: Vec<String> = task
         .stop
@@ -400,21 +561,7 @@ async fn execute_live_streaming_task(
                 };
                 if valid.len() > prefix_len {
                     let delta = &valid[prefix_len..];
-                    let chunk = if task.is_chat {
-                        routes::format_sse_chat_content_chunk(
-                            &req_id_str,
-                            &task.model,
-                            created,
-                            delta,
-                        )
-                    } else {
-                        routes::format_sse_text_content_chunk(
-                            &req_id_str,
-                            &task.model,
-                            created,
-                            delta,
-                        )
-                    };
+                    let chunk = format_delta(delta);
                     let _ = write_http_chunk(&mut stream, &chunk).await;
                     emitted_text.push_str(delta);
                 }
@@ -439,21 +586,7 @@ async fn execute_live_streaming_task(
                 };
                 if safe_text.len() > prefix_len {
                     let delta = &safe_text[prefix_len..];
-                    let chunk = if task.is_chat {
-                        routes::format_sse_chat_content_chunk(
-                            &req_id_str,
-                            &task.model,
-                            created,
-                            delta,
-                        )
-                    } else {
-                        routes::format_sse_text_content_chunk(
-                            &req_id_str,
-                            &task.model,
-                            created,
-                            delta,
-                        )
-                    };
+                    let chunk = format_delta(delta);
                     if write_http_chunk(&mut stream, &chunk).await.is_err() {
                         stopped = true;
                         break;
@@ -475,11 +608,7 @@ async fn execute_live_streaming_task(
             };
             if current_text.len() > prefix_len {
                 let delta = &current_text[prefix_len..];
-                let chunk = if task.is_chat {
-                    routes::format_sse_chat_content_chunk(&req_id_str, &task.model, created, delta)
-                } else {
-                    routes::format_sse_text_content_chunk(&req_id_str, &task.model, created, delta)
-                };
+                let chunk = format_delta(delta);
                 if write_http_chunk(&mut stream, &chunk).await.is_err() {
                     stopped = true;
                     break;
@@ -521,11 +650,7 @@ async fn execute_live_streaming_task(
         };
         if cleaned.len() > prefix_len {
             let delta = &cleaned[prefix_len..];
-            let chunk = if task.is_chat {
-                routes::format_sse_chat_content_chunk(&req_id_str, &task.model, created, delta)
-            } else {
-                routes::format_sse_text_content_chunk(&req_id_str, &task.model, created, delta)
-            };
+            let chunk = format_delta(delta);
             let _ = write_http_chunk(&mut stream, &chunk).await;
         }
     }
@@ -541,25 +666,44 @@ async fn execute_live_streaming_task(
         completion_tokens,
         total_tokens: prompt_tokens + completion_tokens,
     };
-    let finish_chunk = if task.is_chat {
-        routes::format_sse_chat_finish_chunk(
+    let total_duration_ns = request_started.elapsed().as_nanos() as u64;
+    let prompt_eval_ns = (completion.metrics.prefill_gpu_ms * 1_000_000.0) as u64;
+    let eval_ns = (completion.metrics.decode_gpu_ms * 1_000_000.0) as u64;
+
+    let finish_chunk = match (task.protocol, task.is_chat) {
+        (StreamProtocol::OpenAiSse, true) => routes::format_sse_chat_finish_chunk(
             &req_id_str,
             &task.model,
             created,
             finish_reason,
             usage,
-        )
-    } else {
-        routes::format_sse_text_finish_chunk(
+        ),
+        (StreamProtocol::OpenAiSse, false) => routes::format_sse_text_finish_chunk(
             &req_id_str,
             &task.model,
             created,
             finish_reason,
             usage,
-        )
+        ),
+        (StreamProtocol::OllamaNdjson, true) => routes::format_ollama_chat_finish_chunk(
+            &task.model,
+            usage,
+            total_duration_ns,
+            prompt_eval_ns,
+            eval_ns,
+        ),
+        (StreamProtocol::OllamaNdjson, false) => routes::format_ollama_generate_finish_chunk(
+            &task.model,
+            usage,
+            total_duration_ns,
+            prompt_eval_ns,
+            eval_ns,
+        ),
     };
     let _ = write_http_chunk(&mut stream, &finish_chunk).await;
-    let _ = write_http_chunk(&mut stream, "data: [DONE]\n\n").await;
+    if task.protocol == StreamProtocol::OpenAiSse {
+        let _ = write_http_chunk(&mut stream, "data: [DONE]\n\n").await;
+    }
     let _ = write_http_chunk_end(&mut stream).await;
     let _ = stream.shutdown().await;
     Ok(())
@@ -624,7 +768,27 @@ async fn execute_generation_task(
                 };
             completion.metrics.detokenization_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
             completion.metrics.total_ms = request_started.elapsed().as_secs_f64() * 1000.0;
-            if task.is_chat {
+            let total_duration_ns = request_started.elapsed().as_nanos() as u64;
+            if task.protocol == StreamProtocol::OllamaNdjson {
+                if task.is_chat {
+                    routes::ollama_chat_response(
+                        task.model,
+                        completion,
+                        text,
+                        task.stop.as_ref(),
+                        task.is_structured_json,
+                        total_duration_ns,
+                    )
+                } else {
+                    routes::ollama_generate_response(
+                        task.model,
+                        completion,
+                        text,
+                        task.stop.as_ref(),
+                        total_duration_ns,
+                    )
+                }
+            } else if task.is_chat {
                 if task.stream {
                     routes::chat_completion_sse_stream(
                         request_id,

@@ -22,7 +22,7 @@ fn cuda_graphs_enabled_from_env() -> bool {
                 "0" | "false" | "off" | "no"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 pub struct CudaRuntime {
