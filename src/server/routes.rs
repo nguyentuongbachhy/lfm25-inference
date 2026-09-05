@@ -314,7 +314,7 @@ fn build_model_object(model_name: &str) -> ModelObject {
         owned_by: "liquid",
         root: model_name.to_string(),
         parent: None,
-        max_model_len: 4096,
+        max_model_len: 32_768,
         permission: vec![ModelPermission {
             id: format!("modelperm-{}", model_name.to_lowercase()),
             object: "model_permission",
