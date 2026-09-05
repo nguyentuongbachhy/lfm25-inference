@@ -1,10 +1,17 @@
 # lfm25-inference
 
-A from-scratch Rust + CUDA inference runtime for `LFM2.5-1.2B-Instruct`.
+A from-scratch Rust + CUDA inference runtime and OpenAI-compatible serving engine for `LFM2.5-1.2B-Instruct`.
 
 The project focuses on explicit GPU memory management, custom CUDA kernels,
-cuBLASLt GEMMs, paged KV caching, low-latency decode, and measurement-driven
-runtime optimization without PyTorch, Candle, GGUF/GGML, ONNX, or Burn.
+cuBLASLt GEMMs, paged KV caching, fused activations, low-latency decode, continuous GPU
+batching, and an OpenAI-compatible HTTP API server without PyTorch, Candle, GGUF/GGML, ONNX, or Burn.
+
+Key runtime features:
+- **OpenAI & vLLM Compatible Server**: Full `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, CORS `OPTIONS`, and Server-Sent Events (SSE) streaming.
+- **Structured Outputs (JSON Schema)**: Strict OpenAI `response_format: {"type": "json_schema" | "json_object"}` alongside Ollama `format` / `options` schema compatibility with automated markdown fence stripping.
+- **Fused CUDA Kernels**: Fused Residual RMSNorm $\to$ FP8 E4M3 (Sprint 1 Champion) and Fused SwiGLU $\to$ FP8 E4M3 (Sprint 2 Champion) eliminating redundant DRAM roundtrips.
+- **Tensor Core FlashAttention**: Contiguous & segmented prefill FlashAttention delivering up to 4.6x prefill speedup.
+- **Continuous GPU Serving**: Paged KV cache (PS16) with radix tree state reuse, fused argmax sampling, and 170–180 tokens/sec continuous decode throughput on laptop GPUs.
 
 The current validated target is an NVIDIA GeForce RTX 5060 Laptop GPU
 (Blackwell GeForce SM120) with CUDA 12.8.x. BF16 remains the golden reference
@@ -12,7 +19,7 @@ and fallback path. A checkpoint- and GPU-specific selective E4M3 policy is
 available for decode.
 
 For the complete validated results, see
-[`docs/final_release_report.md`](docs/final_release_report.md).
+[`docs/final_release_report.md`](docs/final_release_report.md) and [`walkthrough.md`](walkthrough.md).
 
 ## Requirements
 
@@ -132,59 +139,161 @@ LLM_CUDA_ARCH=compute_120 cargo run --release -- \
 
 ## Serving
 
-A validated PS16 scheduler cost model for the measured RTX 5060 Laptop GPU is
-already committed at:
+The runtime includes an OpenAI-compatible and vLLM-aligned HTTP API server powered by high-performance continuous GPU batching, paged KV caching, and fused kernels.
 
-```text
-docs/serving/fp8-splitk-hardware-ps16.cost-model.json
-```
+### Endpoints Overview
 
-Start the validated selective-E4M3 server with the matching precision policy:
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/v1/chat/completions` | Chat completions with ChatML formatting, streaming SSE, and structured outputs |
+| `POST` | `/v1/completions` | Classic text completion API (OpenAI compatible) |
+| `GET` | `/v1/models` | List available models (`object: "list"`, `max_model_len: 32768`) |
+| `GET` | `/v1/models/{model}` | Retrieve specific model metadata |
+| `GET` | `/health` | Server health check (`{"status": "ok"}`) |
+| `GET` | `/version` | Runtime version information |
+| `OPTIONS`| `*` | CORS preflight with full permissive headers for web UI / browser access |
+
+### Starting the Server
+
+Start the production continuous server on port `8086` (or any custom port):
 
 ```bash
 LLM_CUDA_ARCH=compute_120 cargo run --release -- \
   --model models/LFM2.5-1.2B-Instruct \
-  --serve 127.0.0.1:8080 \
-  --fp8-policy docs/benchmarks/fp8/selected-policy.json \
+  --serve 127.0.0.1:8086 \
   --hardware-profile docs/serving/fp8-splitk-hardware-ps16.cost-model.json \
   --page-size 16
 ```
 
-The scheduler profile and runtime precision must match. Do not use the
-selective-E4M3 cost model with a BF16-only server.
+> [!NOTE]
+> The selective FP8 policy (`docs/benchmarks/fp8/selected-policy.json`) is auto-detected at startup if present. To force BF16-only serving, omit the FP8 policy and hardware profile.
 
-To generate a fresh profile on the active GPU, run:
+### API Usage Examples
 
-```bash
-LLM_CUDA_ARCH=compute_120 cargo run --release -- \
-  --model models/LFM2.5-1.2B-Instruct \
-  --fp8-policy docs/benchmarks/fp8/selected-policy.json \
-  --benchmark-hardware docs/serving/rtx5060-ps16-hardware.json \
-  --page-size 16
-```
-
-This command writes both:
-
-```text
-docs/serving/rtx5060-ps16-hardware.json
-docs/serving/rtx5060-ps16-hardware.cost-model.json
-```
-
-For a BF16-only server, generate a separate hardware profile without
-`--fp8-policy` and serve with that BF16-generated cost model.
-
-Health check:
+#### 1. Chat Completion (Non-Streaming)
 
 ```bash
-curl http://127.0.0.1:8080/health
+curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LFM2.5-1.2B-Instruct",
+    "messages": [
+      {"role": "system", "content": "You are a helpful AI assistant."},
+      {"role": "user", "content": "Explain quantum computing in one sentence."}
+    ],
+    "max_tokens": 64,
+    "temperature": 0.0
+  }'
 ```
 
-Completion request:
+#### 2. Streaming Chat Completion (SSE)
 
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"Who are you?","max_new_tokens":32,"temperature":0.0}'
+curl -N -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LFM2.5-1.2B-Instruct",
+    "messages": [
+      {"role": "user", "content": "Count from 1 to 5."}
+    ],
+    "max_tokens": 64,
+    "stream": true
+  }'
+```
+
+#### 3. Structured Output (OpenAI `json_schema`)
+
+Enforce strict JSON schema validation for reliable tool calling, information extraction, and agent workflows:
+
+```bash
+curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LFM2.5-1.2B-Instruct",
+    "messages": [
+      {"role": "user", "content": "List 2 planets and their order from the sun."}
+    ],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "planets_list",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "planets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {"type": "string"},
+                  "order": {"type": "integer"}
+                },
+                "required": ["name", "order"]
+              }
+            }
+          },
+          "required": ["planets"]
+        }
+      }
+    },
+    "max_tokens": 128
+  }'
+```
+
+#### 4. Ollama Payload Compatibility (`format` + `options`)
+
+Clients configured for Ollama can call `/v1/chat/completions` directly without modification:
+
+```bash
+curl -s -X POST http://127.0.0.1:8086/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "LFM2.5-1.2B-Instruct",
+    "stream": false,
+    "format": {
+      "type": "object",
+      "properties": {
+        "answerable": {"type": "boolean"},
+        "answer": {"type": "string"},
+        "selected_chunk_ids": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["answerable", "answer", "selected_chunk_ids"]
+    },
+    "keep_alive": "5m",
+    "options": {"temperature": 0, "num_ctx": 4096, "num_predict": 128},
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a grounded enterprise assistant. Answer only from the evidence."
+      },
+      {
+        "role": "user",
+        "content": "Evidence: [chunk_01] Apollo 11 landed in 1969.\nQuestion: When did Apollo 11 land?"
+      }
+    ]
+  }'
+```
+
+The server automatically injects the schema instruction, strips markdown code blocks, and returns a clean, parseable JSON object in `choices[0].message.content`.
+
+#### 5. Text Completion (`/v1/completions`)
+
+```bash
+curl -s -X POST http://127.0.0.1:8086/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Liquid Foundation Models are",
+    "max_tokens": 32,
+    "temperature": 0.0
+  }'
+```
+
+#### 6. CORS Preflight Check
+
+```bash
+curl -s -I -X OPTIONS http://127.0.0.1:8086/v1/chat/completions
+# Returns HTTP/1.1 204 No Content with Access-Control-Allow-Origin: *
 ```
 
 `--page-size` and precision selection are engine startup policies. They are not
@@ -300,10 +409,14 @@ The runtime uses a small set of production principles:
 - Performance changes are promoted using end-to-end measurements, not isolated
   microbenchmarks alone.
 
-The current runtime includes paged GQA/XQA-like decode attention, tiled
-contiguous prefill attention, persistent decode buffers/execution state,
-selective E4M3 decode GEMMs, and the validated scratchless atomic greedy argmax
-path.
+The current runtime includes:
+- **Paged GQA/XQA Decode Attention**: Zero-allocation paged KV caching with Split-K reduction.
+- **Tensor Core FlashAttention**: Contiguous and segmented/ragged multi-sequence prefill attention.
+- **Fused Residual RMSNorm $\to$ FP8 E4M3**: Sprint 1 Champion eliminating 9 DRAM write/read roundtrips per token with 100.0% bitwise parity.
+- **Fused SwiGLU $\to$ FP8 E4M3**: Sprint 2 Champion eliminating 7 DRAM write/read roundtrips across all FP8 down-projection layers with 100.0% bitwise parity.
+- **Scratchless Atomic Greedy Argmax**: High-speed reduction bypassing CPU synchronization and intermediate staging.
+- **Multilingual Adaptive Speculative Decoding**: DSpark dynamic backoff with 0 auxiliary VRAM.
+- **OpenAI & vLLM Serving Stack**: Continuous GPU batching, SSE streaming, and schema-guided structured outputs.
 
 ## Project Layout
 

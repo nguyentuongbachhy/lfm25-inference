@@ -845,7 +845,7 @@ fn extract_schema_constraint(
                 let schema_str = serde_json::to_string_pretty(&json_schema.schema)
                     .unwrap_or_else(|_| json_schema.schema.to_string());
                 Some(format!(
-                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. The root JSON object must directly contain the fields defined under 'properties' (do NOT wrap them in a 'properties' key). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                    "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
                 ))
             }
             ResponseFormat::TypeOnly { r#type } if r#type == "json_object" => {
@@ -866,7 +866,7 @@ fn extract_schema_constraint(
                     let schema_str = serde_json::to_string_pretty(val)
                         .unwrap_or_else(|_| val.to_string());
                     return Some(format!(
-                        "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. The root JSON object must directly contain the fields defined under 'properties' (do NOT wrap them in a 'properties' key). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                        "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
                     ));
                 }
                 None
@@ -884,10 +884,9 @@ fn extract_schema_constraint(
                 None
             }
         } else if fmt.is_object() {
-            let schema_str =
-                serde_json::to_string_pretty(fmt).unwrap_or_else(|_| fmt.to_string());
+            let schema_str = serde_json::to_string_pretty(fmt).unwrap_or_else(|_| fmt.to_string());
             Some(format!(
-                "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. The root JSON object must directly contain the fields defined under 'properties' (do NOT wrap them in a 'properties' key). Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
+                "\n\n[RESPONSE FORMAT INSTRUCTION]\nYou must respond strictly with a single valid JSON object adhering to the following JSON schema. Do not enclose the output in markdown code blocks or backticks, and do not include any commentary outside the JSON:\n{schema_str}"
             ))
         } else {
             None
@@ -913,45 +912,28 @@ fn clean_structured_output(text: &str) -> String {
         };
         let cleaned = inner.trim();
         if serde_json::from_str::<serde_json::Value>(cleaned).is_ok() {
-            return unwrap_accidental_properties(cleaned);
+            return cleaned.to_string();
         }
     }
     // 2. If the trimmed text is already valid JSON
     if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
-        return unwrap_accidental_properties(trimmed);
+        return trimmed.to_string();
     }
     // 3. Try to locate the outermost matching '{' ... '}' or '[' ... ']'
     if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
         let candidate = trimmed[start..=end].trim();
         if start < end && serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-            return unwrap_accidental_properties(candidate);
+            return candidate.to_string();
         }
     }
     if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
         let candidate = trimmed[start..=end].trim();
         if start < end && serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-            return unwrap_accidental_properties(candidate);
+            return candidate.to_string();
         }
     }
     // Fallback to trimmed text
     trimmed.to_string()
-}
-
-fn unwrap_accidental_properties(json_str: &str) -> String {
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-        if let Some(obj) = val.as_object() {
-            if obj.len() == 1 {
-                if let Some(inner) = obj.get("properties") {
-                    if inner.is_object() {
-                        if let Ok(unwrapped) = serde_json::to_string(inner) {
-                            return unwrapped;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    json_str.to_string()
 }
 
 fn build_sampling_config(
