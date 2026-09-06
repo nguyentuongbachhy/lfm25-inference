@@ -105,13 +105,13 @@ impl Args {
         let mut speculative_draft = env::var("LFM25_SPECULATIVE_DRAFT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(3usize);
+            .unwrap_or(0usize);
         let mut fused_rms_fp8 = env::var("LFM25_FUSED_RMS_FP8")
             .map(|v| v != "0" && v != "false")
-            .unwrap_or(true);
+            .unwrap_or(false);
         let mut fused_swiglu_fp8 = env::var("LFM25_FUSED_SWIGLU_FP8")
             .map(|v| v != "0" && v != "false")
-            .unwrap_or(true);
+            .unwrap_or(false);
         let mut metadata_scratch = env::var("LFM25_METADATA_SCRATCH")
             .map(|v| v != "0" && v != "false")
             .unwrap_or(false);

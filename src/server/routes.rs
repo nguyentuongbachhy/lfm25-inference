@@ -1773,7 +1773,8 @@ mod tests {
         assert!(finish_chunk.contains("\"finish_reason\":\"stop\""));
         assert!(finish_chunk.contains("\"completion_tokens\":5"));
 
-        let text_content = format_sse_text_content_chunk("cmpl-test", "test-model", created, "Hello");
+        let text_content =
+            format_sse_text_content_chunk("cmpl-test", "test-model", created, "Hello");
         assert!(text_content.contains("\"text\":\"Hello\""));
     }
 
@@ -1784,7 +1785,10 @@ mod tests {
             check_stop_match("here is the text stop now", &stop_words),
             Some(17)
         );
-        assert_eq!(check_stop_match("no matching words here", &stop_words), None);
+        assert_eq!(
+            check_stop_match("no matching words here", &stop_words),
+            None
+        );
 
         // Longest stop prefix testing
         assert_eq!(longest_stop_prefix_len("prefix end of", &stop_words), 6); // "end of" matches prefix of "end of sequence"
@@ -1841,8 +1845,13 @@ mod tests {
             completion_tokens: 8,
             total_tokens: 20,
         };
-        let finish =
-            format_ollama_chat_finish_chunk("test-model", usage, 50_000_000, 10_000_000, 40_000_000);
+        let finish = format_ollama_chat_finish_chunk(
+            "test-model",
+            usage,
+            50_000_000,
+            10_000_000,
+            40_000_000,
+        );
         assert!(finish.contains("\"done\":true"));
         assert!(finish.contains("\"prompt_eval_count\":12"));
         assert!(finish.contains("\"eval_count\":8"));
@@ -1852,8 +1861,13 @@ mod tests {
         assert!(gen_delta.contains("\"response\":\"test\""));
         assert!(gen_delta.contains("\"done\":false"));
 
-        let gen_finish =
-            format_ollama_generate_finish_chunk("test-model", usage, 30_000_000, 5_000_000, 25_000_000);
+        let gen_finish = format_ollama_generate_finish_chunk(
+            "test-model",
+            usage,
+            30_000_000,
+            5_000_000,
+            25_000_000,
+        );
         assert!(gen_finish.contains("\"done\":true"));
         assert!(gen_finish.contains("\"eval_count\":8"));
     }

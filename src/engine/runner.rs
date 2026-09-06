@@ -36,7 +36,7 @@ impl Default for GenerationOptions {
         Self {
             max_new_tokens: 64,
             sampling: SamplingConfig::default(),
-            speculative_draft: 3,
+            speculative_draft: 0,
         }
     }
 }
@@ -59,8 +59,8 @@ impl Default for EngineConfig {
             decode_profile: DecodeProfileMode::Off,
             decode_profile_warmup_steps: 4,
             decode_profile_steps: 128,
-            fused_rms_fp8: true,
-            fused_swiglu_fp8: true,
+            fused_rms_fp8: false,
+            fused_swiglu_fp8: false,
             metadata_scratch: false,
         }
     }

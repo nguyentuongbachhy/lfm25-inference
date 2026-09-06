@@ -8,12 +8,14 @@ batching, and an OpenAI-compatible HTTP API server without PyTorch, Candle, GGUF
 
 Key runtime features:
 - **OpenAI & Ollama Drop-in Serving**: Full OpenAI `/v1/chat/completions`, `/v1/completions`, `/v1/models` and native Ollama `/api/tags`, `/api/version`, `/api/show`, `/api/chat`, `/api/generate` endpoints with NDJSON streaming.
-- **High Concurrency Continuous Batching**: Zero-overhead continuous batching scaling from 151 tok/s ($C=1$) to **1,006.8 tok/s** ($C=8$) on an RTX 5060 Laptop GPU.
-- **Multi-Turn Radix Tree Prefix Caching**: Automated KV block reuse across conversation turns delivering **6.15x TTFT speedup** on multi-turn chats.
-- **CUDA Graphs Decode Acceleration**: Default-enabled lazy graph capture promoting single-stream decode host launch overhead down by 9.3x.
+- **High Concurrency Continuous Batching**: Zero-overhead continuous batching scaling up to **817+ tok/s** ($C=8$) on an RTX 5060 Laptop GPU.
+- **Multi-Turn Radix Tree Prefix Caching**: Automated KV block reuse across conversation turns delivering **6.20x TTFT speedup** on multi-turn chats.
+- **CUDA Graphs Decode Acceleration**: Default-enabled lazy graph capture reducing single-stream decode host launch overhead by 9.3x.
 - **Structured Outputs (JSON Schema)**: Strict OpenAI `response_format: {"type": "json_schema" | "json_object"}` alongside Ollama `format` / `options` schema compatibility with automated markdown fence stripping.
-- **Fused CUDA Kernels**: Fused Residual RMSNorm $\to$ FP8 E4M3 (Sprint 1 Champion) and Fused SwiGLU $\to$ FP8 E4M3 (Sprint 2 Champion) eliminating redundant DRAM roundtrips.
-- **Tensor Core FlashAttention**: Contiguous & segmented prefill FlashAttention delivering up to 4.6x prefill speedup.
+- **Tensor Core FlashAttention**: Contiguous & segmented/ragged prefill FlashAttention delivering up to 2.51x E2E prefill speedup with zero padding waste.
+- **Selective FP8 E4M3 Decode**: Model-quality validated (+0.226% NLL delta) delivering up to 1.221x TPOT speedup at short context.
+- **Scratchless Atomic Greedy Argmax**: High-speed reduction for $B \le 16$ bypassing CPU staging with 100% top-1 agreement.
+- **Conservative Empirical Defaults**: High-risk paths (speculative decoding, fused RMS/SwiGLU) gated to opt-in flags after rigorous ABBA parity and latency verification.
 
 The current validated target is an NVIDIA GeForce RTX 5060 Laptop GPU
 (Blackwell GeForce SM120) with CUDA 12.8.x. BF16 remains the golden reference
@@ -377,6 +379,34 @@ Measured on a ~600-token enterprise document context:
 `--page-size` and precision selection are engine startup policies. They are not
 request-level overrides.
 
+### Production Defaults & Empirical Gating Matrix
+
+All runtime defaults are frozen according to empirical ABBA benchmarking across 5 diverse prompt languages (English, Vietnamese, French, German, and Rust programming) on the target RTX 5060 Laptop GPU.
+
+| Optimization / Flag | Production Default | Environment Variable | CLI Flag | Empirical Gate Verdict |
+|---|:---:|---|---|---|
+| **Selective FP8 E4M3** | **ON** | Auto-detected from `docs/benchmarks/fp8/` | `--fp8-policy <path>` | **ACCEPT**: +0.226% NLL delta, 1.221x TPOT speedup |
+| **Tensor Core FlashAttention** | **ON** | Built-in | Built-in | **ACCEPT**: 2.513x TTFT speedup, zero padding overhead |
+| **Atomic Greedy Argmax** | **ON** ($B \le 16$) | Built-in | Built-in | **ACCEPT**: 2.0–2.54x kernel speedup, 100% top-1 agreement |
+| **Radix Tree Prefix Caching** | **ON** | Built-in | Built-in | **ACCEPT**: 6.20x TTFT speedup on multi-turn conversations |
+| **Bounded CUDA Graphs** | **ON** | `LFM25_CUDA_GRAPHS=1` | Built-in | **ACCEPT**: 9.3x CPU launch overhead reduction |
+| **Speculative Decoding** | **OFF** (`0`) | `LFM25_SPECULATIVE_DRAFT=0` | `--speculative-draft <N>` | **REJECT AS DEFAULT**: 80% non-deterministic parity failure (LFM SSM rollback). Opt-in only. |
+| **Fused Residual RMSNorm** | **OFF** (`false`) | `LFM25_FUSED_RMS_FP8=0` | `--fused-rms-fp8` | **REJECT AS DEFAULT**: +0.55% speedup fails $\ge 1.0\%$ threshold. Opt-in only. |
+| **Fused SwiGLU $\to$ FP8** | **OFF** (`false`) | `LFM25_FUSED_SWIGLU_FP8=0` | `--fused-swiglu-fp8` | **REJECT AS DEFAULT**: +0.05%–0.13% incremental benefit is pure noise. Opt-in only. |
+| **Metadata Scratchpad** | **OFF** (`false`) | `LFM25_METADATA_SCRATCH=0` | `--metadata-scratch` | **REJECT**: -0.17% throughput regression. |
+
+#### Exact Defaults ABBA Benchmark Results (100 Trials, 5 Domains)
+
+| Configuration | Mean TPOT (ms) | p50 TPOT (ms) | p95 TPOT (ms) | Mean TTFT (ms) | Paired Speedup | Bitwise Parity | Gate Verdict |
+|---|---:|---:|---:|---:|---:|:---:|:---:|
+| **A: Conservative Validated Baseline** | 6.057 | 6.060 | 6.105 | 35.89 | **1.0000x** (ref) | **100.0%** | **FROZEN PRODUCTION DEFAULT** |
+| **B: Prior Default (Spec3 + Both Fused)** | 5.681 | 5.805 | 6.082 | 35.55 | 1.0662x | **20.0% (FAIL)** | REJECT AS DEFAULT |
+| **C: Spec3 + Fused RMS Only** | 5.684 | 5.821 | 6.098 | 35.31 | 1.0656x | **20.0% (FAIL)** | REJECT AS DEFAULT |
+| **D: Deterministic Fused RMS Only** | 6.023 | 6.018 | 6.073 | 36.45 | 1.0055x (+0.55%) | **100.0%** | REJECT AS DEFAULT (<1.0% gain) |
+| **E: Deterministic Both Fused** | 6.015 | 6.006 | 6.095 | 35.86 | 1.0069x (+0.69%) | **100.0%** | REJECT AS DEFAULT (<1.0% gain) |
+
+See [`docs/final_release_report.md`](docs/final_release_report.md) for full gate and reproducibility analysis.
+
 ## Profiling
 
 Use coarse profiling first:
@@ -511,11 +541,12 @@ The runtime uses a small set of production principles:
 The current runtime includes:
 - **Paged GQA/XQA Decode Attention**: Zero-allocation paged KV caching with Split-K reduction.
 - **Tensor Core FlashAttention**: Contiguous and segmented/ragged multi-sequence prefill attention.
-- **Fused Residual RMSNorm $\to$ FP8 E4M3**: Sprint 1 Champion eliminating 9 DRAM write/read roundtrips per token with 100.0% bitwise parity.
-- **Fused SwiGLU $\to$ FP8 E4M3**: Sprint 2 Champion eliminating 7 DRAM write/read roundtrips across all FP8 down-projection layers with 100.0% bitwise parity.
+- **Selective FP8 E4M3 Decode**: Empirically validated decode acceleration for selected MLP GEMMs (+0.226% NLL delta).
 - **Scratchless Atomic Greedy Argmax**: High-speed reduction bypassing CPU synchronization and intermediate staging.
-- **Multilingual Adaptive Speculative Decoding**: DSpark dynamic backoff with 0 auxiliary VRAM.
-- **OpenAI & vLLM Serving Stack**: Continuous GPU batching, SSE streaming, and schema-guided structured outputs.
+- **Bounded CUDA Graphs**: Lazy graph capture eliminating single-stream host launch overhead.
+- **Radix Tree Multi-Turn Prefix Caching**: Automated KV block reuse across conversation turns.
+- **OpenAI & Ollama Serving Stack**: Continuous GPU batching, SSE streaming, NDJSON streaming, and schema-guided structured outputs.
+- **Experimental Opt-in Enhancements**: Multilingual speculative decoding (`--speculative-draft <N>`), Fused RMSNorm-FP8 (`--fused-rms-fp8`), and Fused SwiGLU-FP8 (`--fused-swiglu-fp8`).
 
 ## Project Layout
 

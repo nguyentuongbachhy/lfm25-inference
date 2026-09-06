@@ -1,0 +1,87 @@
+{
+  "timestamp": "2026-09-06 11:08:01",
+  "configs": {
+    "A_conservative": {
+      "name": "A: Conservative Validated (spec=0, unfused)",
+      "speculative_draft": 0,
+      "fused_rms_fp8": false,
+      "fused_swiglu_fp8": false
+    },
+    "B_current_default": {
+      "name": "B: EXACT Current Default (spec=3, fused_rms=true, fused_swiglu=true)",
+      "speculative_draft": 3,
+      "fused_rms_fp8": true,
+      "fused_swiglu_fp8": true
+    },
+    "C_spec3_rms_only": {
+      "name": "C: Spec3 + Fused RMS Only (spec=3, fused_rms=true, fused_swiglu=false)",
+      "speculative_draft": 3,
+      "fused_rms_fp8": true,
+      "fused_swiglu_fp8": false
+    },
+    "D_spec0_rms_only": {
+      "name": "D: Deterministic Fused RMS Only (spec=0, fused_rms=true, fused_swiglu=false)",
+      "speculative_draft": 0,
+      "fused_rms_fp8": true,
+      "fused_swiglu_fp8": false
+    },
+    "E_spec0_both_fused": {
+      "name": "E: Deterministic Both Fused (spec=0, fused_rms=true, fused_swiglu=true)",
+      "speculative_draft": 0,
+      "fused_rms_fp8": true,
+      "fused_swiglu_fp8": true
+    }
+  },
+  "summary": [
+    {
+      "key": "A_conservative",
+      "name": "A: Conservative Validated (spec=0, unfused)",
+      "mean_tpot": 6.0566,
+      "p50_tpot": 6.0595,
+      "p95_tpot": 6.105049999999999,
+      "mean_ttft": 35.892599999999995,
+      "mean_total": 805.2564500000001,
+      "speedup": 1.0
+    },
+    {
+      "key": "B_current_default",
+      "name": "B: EXACT Current Default (spec=3, fused_rms=true, fused_swiglu=true)",
+      "mean_tpot": 5.68075,
+      "p50_tpot": 5.8045,
+      "p95_tpot": 6.0818,
+      "mean_ttft": 35.547599999999996,
+      "mean_total": 757.0835,
+      "speedup": 1.0661620384632313
+    },
+    {
+      "key": "C_spec3_rms_only",
+      "name": "C: Spec3 + Fused RMS Only (spec=3, fused_rms=true, fused_swiglu=false)",
+      "mean_tpot": 5.6839,
+      "p50_tpot": 5.821,
+      "p95_tpot": 6.09755,
+      "mean_ttft": 35.31420000000001,
+      "mean_total": 757.2653500000001,
+      "speedup": 1.065571174721582
+    },
+    {
+      "key": "D_spec0_rms_only",
+      "name": "D: Deterministic Fused RMS Only (spec=0, fused_rms=true, fused_swiglu=false)",
+      "mean_tpot": 6.0234000000000005,
+      "p50_tpot": 6.018,
+      "p95_tpot": 6.07315,
+      "mean_ttft": 36.4507,
+      "mean_total": 801.57585,
+      "speedup": 1.0055118371683767
+    },
+    {
+      "key": "E_spec0_both_fused",
+      "name": "E: Deterministic Both Fused (spec=0, fused_rms=true, fused_swiglu=true)",
+      "mean_tpot": 6.015349999999999,
+      "p50_tpot": 6.0055,
+      "p95_tpot": 6.094900000000001,
+      "mean_ttft": 35.85955,
+      "mean_total": 799.9759500000001,
+      "speedup": 1.0068574563408617
+    }
+  ]
+}

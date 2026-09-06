@@ -747,10 +747,10 @@ impl Lfm2Model {
             decode_fp8_enabled: false,
             fused_rms_fp8_enabled: std::env::var("LFM25_FUSED_RMS_FP8")
                 .map(|v| v != "0" && v != "false")
-                .unwrap_or(true),
+                .unwrap_or(false),
             fused_swiglu_fp8_enabled: std::env::var("LFM25_FUSED_SWIGLU_FP8")
                 .map(|v| v != "0" && v != "false")
-                .unwrap_or(true),
+                .unwrap_or(false),
             metadata_scratch_enabled: std::env::var("LFM25_METADATA_SCRATCH")
                 .map(|v| v != "0" && v != "false")
                 .unwrap_or(false),

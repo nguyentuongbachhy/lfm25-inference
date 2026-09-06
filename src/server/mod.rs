@@ -416,10 +416,7 @@ async fn write_http_chunk(stream: &mut TcpStream, data: &str) -> Result<()> {
         .write_all(b"\r\n")
         .await
         .context("failed to write HTTP chunk delimiter")?;
-    stream
-        .flush()
-        .await
-        .context("failed to flush HTTP chunk")?;
+    stream.flush().await.context("failed to flush HTTP chunk")?;
     Ok(())
 }
 
